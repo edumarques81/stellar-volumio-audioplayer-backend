@@ -1,0 +1,123 @@
+# MPD Configuration - Bit-Perfect Audio
+# For use with Singxer SU-6 DDC and similar USB audio devices
+#
+# This configuration disables all audio processing for bit-perfect playback:
+# - No resampling
+# - No format conversion
+# - No software volume/mixing
+# - DSD over PCM (DoP) enabled
+
+###############################################################################
+# General Settings
+###############################################################################
+music_directory         "/var/lib/mpd/music"
+playlist_directory      "/var/lib/mpd/playlists"
+db_file                 "/var/lib/mpd/database"
+log_file                "/var/log/mpd/mpd.log"
+pid_file                "/run/mpd/pid"
+state_file              "/var/lib/mpd/state"
+sticker_file            "/var/lib/mpd/sticker.sql"
+
+user                    "mpd"
+group                   "audio"
+
+bind_to_address         "any"
+port                    "6600"
+
+###############################################################################
+# Audio Output - Bit-Perfect (Singxer SU-6)
+###############################################################################
+audio_output {
+    type                "alsa"
+    name                "Singxer SU-6 (Bit-Perfect)"
+
+    # Direct hardware access - use actual card name from `aplay -l`
+    device              "hw:U20SU6,0"
+
+    # CRITICAL: Disable software volume for bit-perfect
+    mixer_type          "none"
+
+    # CRITICAL: Disable all automatic conversions
+    auto_resample       "no"
+    auto_format         "no"
+    auto_channels       "no"
+
+    # DSD over PCM - enables DSD playback on DoP-compatible DACs
+    dop                 "yes"
+
+    # Buffer settings for USB audio stability
+    # Increase if experiencing dropouts
+    buffer_time         "100000"        # 100ms buffer
+    period_time         "25000"         # 25ms period
+}
+
+###############################################################################
+# Disabled: Software Volume Output (for reference)
+###############################################################################
+# Uncomment if you need software volume control (breaks bit-perfect)
+#
+# audio_output {
+#     type                "alsa"
+#     name                "Software Volume"
+#     device              "hw:U20SU6,0"
+#     mixer_type          "software"
+#     auto_resample       "yes"
+#     auto_format         "yes"
+# }
+
+###############################################################################
+# Disabled: Multiroom/Snapcast Output
+###############################################################################
+audio_output {
+    type                "fifo"
+    enabled             "no"
+    name                "Snapcast"
+    path                "/tmp/snapfifo"
+    format              "48000:16:2"
+    mixer_type          "software"
+}
+
+###############################################################################
+# DSD Decoders
+###############################################################################
+decoder {
+    plugin              "dsdiff"
+    enabled             "yes"
+}
+
+decoder {
+    plugin              "dsf"
+    enabled             "yes"
+}
+
+###############################################################################
+# Audio Processing - ALL DISABLED for bit-perfect
+###############################################################################
+# Resampler - disabled
+# resampler {
+#     plugin            "soxr"
+#     quality           "very high"
+# }
+
+# ReplayGain - disabled for bit-perfect
+replaygain              "off"
+
+# Volume normalization - disabled
+volume_normalization    "no"
+
+###############################################################################
+# Buffer Settings
+###############################################################################
+audio_buffer_size       "8192"          # 8KB buffer (increase if needed)
+buffer_before_play      "20%"           # Start playback at 20% buffer
+
+###############################################################################
+# Database & Filesystem
+###############################################################################
+auto_update             "no"            # Manual updates only
+filesystem_charset      "UTF-8"
+
+###############################################################################
+# Logging
+###############################################################################
+log_level               "default"       # Use "verbose" for debugging

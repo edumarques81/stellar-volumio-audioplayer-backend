@@ -1,0 +1,70 @@
+# ALSA Configuration - Bit-Perfect Audio
+# For use with Singxer SU-6 DDC and similar USB audio devices
+#
+# This configuration provides direct hardware access without any processing:
+# - No dmix (no software mixing)
+# - No plug (no format conversion)
+# - No softvol (no software volume)
+#
+# Replace "U20SU6" with your device name from `aplay -l`
+
+###############################################################################
+# Default PCM Device - Direct Hardware Access
+###############################################################################
+pcm.!default {
+    type hw
+    card "U20SU6"
+    device 0
+}
+
+###############################################################################
+# Default Control Device
+###############################################################################
+ctl.!default {
+    type hw
+    card "U20SU6"
+}
+
+###############################################################################
+# Named Device: Bit-Perfect Output
+###############################################################################
+# Use this for explicit bit-perfect access: aplay -D bitperfect file.flac
+pcm.bitperfect {
+    type hw
+    card "U20SU6"
+    device 0
+}
+
+###############################################################################
+# Named Device: With Software Volume (NOT bit-perfect)
+###############################################################################
+# Use only if you need software volume control
+# This breaks bit-perfect but allows volume adjustment
+pcm.softvol {
+    type softvol
+    slave.pcm "hw:U20SU6,0"
+    control {
+        name "SoftMaster"
+        card "U20SU6"
+    }
+    min_dB -51.0
+    max_dB 0.0
+    resolution 256
+}
+
+###############################################################################
+# REFERENCE: Volumio's Default Configuration (with plug - NOT bit-perfect)
+###############################################################################
+# This is what Volumio uses by default. The 'plug' plugin can convert formats.
+#
+# pcm.volumio {
+#     type plug
+#     slave.pcm "hw:U20SU6,0"
+# }
+#
+# The 'plug' plugin will:
+# - Convert sample rates if needed
+# - Convert bit depths if needed
+# - Convert channel counts if needed
+#
+# For bit-perfect, we skip 'plug' and go directly to 'hw'
