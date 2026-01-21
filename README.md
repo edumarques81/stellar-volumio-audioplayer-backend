@@ -90,6 +90,12 @@ go build -o stellar ./cmd/stellar
 └── configs/               # Configuration templates
 ```
 
+## Documentation
+
+- [Architecture](docs/ARCHITECTURE.md) - System design, MPD-as-source-of-truth pattern
+- [Bit-Perfect Audio](../Volumio2-UI/volumio-poc/docs/BIT-PERFECT-AUDIO.md) - Audio configuration for audiophile playback
+- [State Machine Issues](../Volumio2-UI/volumio-poc/docs/STATE-MACHINE-ISSUES.md) - Why we don't use Volumio's state machine
+
 ## License
 
 MIT License - See [LICENSE](LICENSE) for details.
