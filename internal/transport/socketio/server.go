@@ -85,7 +85,11 @@ func (s *Server) setupHandlers() {
 	})
 
 	s.io.OnError("/", func(conn socketio.Conn, err error) {
-		log.Error().Err(err).Str("id", conn.ID()).Msg("Socket.io error")
+		if conn != nil {
+			log.Error().Err(err).Str("id", conn.ID()).Msg("Socket.io error")
+		} else {
+			log.Error().Err(err).Msg("Socket.io error (no connection)")
+		}
 	})
 
 	// Player control events
