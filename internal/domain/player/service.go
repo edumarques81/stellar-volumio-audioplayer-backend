@@ -262,3 +262,148 @@ func (s *Service) AddToQueue(uri string) error {
 	log.Info().Str("uri", uri).Msg("AddToQueue")
 	return s.mpd.Add(uri)
 }
+
+// BrowseLibrary returns directory contents in Volumio-compatible format.
+func (s *Service) BrowseLibrary(uri string) (map[string]interface{}, error) {
+	// Handle special URIs
+	if uri == "" || uri == "music-library" {
+		// Root of music library - list MPD database root
+		uri = ""
+	} else if strings.HasPrefix(uri, "music-library/") {
+		// Strip the music-library prefix to get the actual path
+		uri = strings.TrimPrefix(uri, "music-library/")
+	}
+
+	log.Info().Str("uri", uri).Msg("BrowseLibrary")
+
+	entries, err := s.mpd.ListInfo(uri)
+	if err != nil {
+		log.Error().Err(err).Str("uri", uri).Msg("Failed to list directory")
+		return nil, err
+	}
+
+	items := make([]map[string]interface{}, 0, len(entries))
+	for _, entry := range entries {
+		item := s.entryToBrowseItem(entry, uri)
+		if item != nil {
+			items = append(items, item)
+		}
+	}
+
+	// Build Volumio-compatible response
+	response := map[string]interface{}{
+		"navigation": map[string]interface{}{
+			"lists": []map[string]interface{}{
+				{
+					"title":              "Music Library",
+					"icon":               "fa fa-folder-open-o",
+					"availableListViews": []string{"list", "grid"},
+					"items":              items,
+				},
+			},
+		},
+	}
+
+	// Add prev navigation if not at root
+	if uri != "" {
+		prevUri := "music-library"
+		if idx := strings.LastIndex(uri, "/"); idx != -1 {
+			prevUri = "music-library/" + uri[:idx]
+		}
+		response["navigation"].(map[string]interface{})["prev"] = map[string]interface{}{
+			"uri": prevUri,
+		}
+	}
+
+	return response, nil
+}
+
+// entryToBrowseItem converts an MPD entry to a Volumio browse item.
+func (s *Service) entryToBrowseItem(entry map[string]string, parentUri string) map[string]interface{} {
+	item := make(map[string]interface{})
+
+	// Directory entry
+	if dir, ok := entry["directory"]; ok {
+		item["type"] = "folder"
+		item["title"] = getBaseName(dir)
+		item["uri"] = "music-library/" + dir
+		item["icon"] = "fa fa-folder-open-o"
+		item["service"] = "mpd"
+		return item
+	}
+
+	// File entry (song)
+	if file, ok := entry["file"]; ok {
+		item["type"] = "song"
+		item["service"] = "mpd"
+		item["uri"] = file
+
+		// Title - use tag or filename
+		if title := entry["Title"]; title != "" {
+			item["title"] = title
+		} else {
+			item["title"] = getBaseName(file)
+		}
+
+		item["artist"] = entry["Artist"]
+		item["album"] = entry["Album"]
+
+		// Duration
+		if duration, err := strconv.Atoi(entry["Time"]); err == nil {
+			item["duration"] = duration
+		}
+
+		// Track number
+		if trackNum, err := strconv.Atoi(entry["Track"]); err == nil {
+			item["tracknumber"] = trackNum
+		}
+
+		// Track type from extension
+		if idx := strings.LastIndex(file, "."); idx != -1 {
+			item["trackType"] = strings.ToLower(file[idx+1:])
+		}
+
+		// Album art
+		item["albumart"] = "/albumart?path=" + file
+
+		return item
+	}
+
+	// Playlist entry
+	if playlist, ok := entry["playlist"]; ok {
+		item["type"] = "playlist"
+		item["title"] = getBaseName(playlist)
+		item["uri"] = playlist
+		item["icon"] = "fa fa-list-ol"
+		item["service"] = "mpd"
+		return item
+	}
+
+	return nil
+}
+
+// getBaseName returns the last component of a path.
+func getBaseName(path string) string {
+	if idx := strings.LastIndex(path, "/"); idx != -1 {
+		return path[idx+1:]
+	}
+	return path
+}
+
+// ReplaceAndPlay clears the queue, adds the item, and starts playing.
+func (s *Service) ReplaceAndPlay(uri string) error {
+	log.Info().Str("uri", uri).Msg("ReplaceAndPlay")
+
+	// Clear current queue
+	if err := s.mpd.Clear(); err != nil {
+		return err
+	}
+
+	// Add the new item
+	if err := s.mpd.Add(uri); err != nil {
+		return err
+	}
+
+	// Start playing
+	return s.mpd.Play(0)
+}

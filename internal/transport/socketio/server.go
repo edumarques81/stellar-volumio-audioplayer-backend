@@ -231,12 +231,40 @@ func (s *Server) setupHandlers() {
 
 		client.On("browseLibrary", func(args ...any) {
 			log.Debug().Str("id", clientID).Interface("data", args).Msg("browseLibrary")
-			// TODO: Implement library browsing
-			client.Emit("pushBrowseLibrary", map[string]interface{}{
-				"navigation": map[string]interface{}{
-					"lists": []interface{}{},
-				},
-			})
+
+			uri := ""
+			if len(args) > 0 {
+				if m, ok := args[0].(map[string]interface{}); ok {
+					if u, ok := m["uri"].(string); ok {
+						uri = u
+					}
+				}
+			}
+
+			result, err := s.playerService.BrowseLibrary(uri)
+			if err != nil {
+				log.Error().Err(err).Str("uri", uri).Msg("BrowseLibrary failed")
+				client.Emit("pushBrowseLibrary", map[string]interface{}{
+					"navigation": map[string]interface{}{
+						"lists": []interface{}{},
+					},
+				})
+				return
+			}
+			client.Emit("pushBrowseLibrary", result)
+		})
+
+		client.On("replaceAndPlay", func(args ...any) {
+			log.Debug().Str("id", clientID).Interface("data", args).Msg("replaceAndPlay")
+			if len(args) > 0 {
+				if m, ok := args[0].(map[string]interface{}); ok {
+					if uri, ok := m["uri"].(string); ok {
+						if err := s.playerService.ReplaceAndPlay(uri); err != nil {
+							log.Error().Err(err).Msg("ReplaceAndPlay failed")
+						}
+					}
+				}
+			}
 		})
 	})
 }
