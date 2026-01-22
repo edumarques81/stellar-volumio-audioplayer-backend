@@ -343,9 +343,41 @@ func (s *Server) setupHandlers() {
 
 		// Bit-perfect configuration check event
 		client.On("getBitPerfect", func(args ...any) {
-			log.Debug().Str("id", clientID).Msg("getBitPerfect")
+			log.Info().Str("id", clientID).Msg("getBitPerfect requested")
 			result := GetBitPerfectStatus()
+			log.Info().Str("status", result.Status).Int("issues", len(result.Issues)).Int("config", len(result.Config)).Msg("pushBitPerfect")
 			client.Emit("pushBitPerfect", result)
+		})
+
+		// Playback options event (audio devices)
+		client.On("getPlaybackOptions", func(args ...any) {
+			log.Info().Str("id", clientID).Msg("getPlaybackOptions requested")
+			options := GetPlaybackOptions()
+			log.Info().Int("sections", len(options.Options)).Int("cards", len(options.SystemCards)).Msg("pushPlaybackOptions")
+			client.Emit("pushPlaybackOptions", options)
+		})
+
+		// DSD mode events
+		client.On("getDsdMode", func(args ...any) {
+			log.Info().Str("id", clientID).Msg("getDsdMode requested")
+			mode := GetDsdMode()
+			log.Info().Str("mode", mode.Mode).Msg("pushDsdMode")
+			client.Emit("pushDsdMode", mode)
+		})
+
+		client.On("setDsdMode", func(args ...any) {
+			log.Info().Str("id", clientID).Interface("args", args).Msg("setDsdMode requested")
+			if len(args) > 0 {
+				if m, ok := args[0].(map[string]interface{}); ok {
+					if mode, ok := m["mode"].(string); ok {
+						result := SetDsdMode(mode)
+						log.Info().Bool("success", result.Success).Str("mode", result.Mode).Msg("pushDsdMode")
+						client.Emit("pushDsdMode", result)
+						// Broadcast to all clients
+						s.io.Emit("pushDsdMode", result)
+					}
+				}
+			}
 		})
 	})
 }
@@ -722,48 +754,414 @@ type BitPerfectStatus struct {
 	Config   []string `json:"config"`   // Current configuration details
 }
 
-// GetBitPerfectStatus runs the bit-perfect checker script and returns the result.
+// PlaybackOption represents an audio output option.
+type PlaybackOption struct {
+	Value string `json:"value"`
+	Name  string `json:"name"`
+}
+
+// PlaybackAttribute represents an attribute in playback options.
+type PlaybackAttribute struct {
+	Name    string           `json:"name"`
+	Type    string           `json:"type"`
+	Value   string           `json:"value"`
+	Options []PlaybackOption `json:"options,omitempty"`
+}
+
+// PlaybackOptionsSection represents a section in playback options.
+type PlaybackOptionsSection struct {
+	ID         string              `json:"id"`
+	Name       string              `json:"name,omitempty"`
+	Attributes []PlaybackAttribute `json:"attributes"`
+}
+
+// PlaybackOptionsResponse represents the playback options response.
+type PlaybackOptionsResponse struct {
+	Options     []PlaybackOptionsSection `json:"options"`
+	SystemCards []string                 `json:"systemCards"`
+}
+
+// GetPlaybackOptions returns available audio output devices.
+func GetPlaybackOptions() PlaybackOptionsResponse {
+	response := PlaybackOptionsResponse{
+		Options:     []PlaybackOptionsSection{},
+		SystemCards: []string{},
+	}
+
+	// Get list of sound cards using aplay -l
+	out, err := exec.Command("aplay", "-l").Output()
+	if err != nil {
+		log.Error().Err(err).Msg("Failed to list audio devices")
+		return response
+	}
+
+	var options []PlaybackOption
+	var systemCards []string
+	selectedDevice := ""
+
+	// Parse aplay -l output
+	// Format: card N: CARDNAME [DESCRIPTION], device M: DEVICENAME [DESCRIPTION]
+	lines := strings.Split(string(out), "\n")
+	for _, line := range lines {
+		if strings.HasPrefix(line, "card ") {
+			// Parse card line: "card 0: vc4hdmi0 [vc4-hdmi-0], device 0: MAI PCM i2s-hifi-0 [MAI PCM i2s-hifi-0]"
+			parts := strings.SplitN(line, ":", 2)
+			if len(parts) < 2 {
+				continue
+			}
+
+			// Extract card name (e.g., "vc4hdmi0" from "card 0: vc4hdmi0 [vc4-hdmi-0]")
+			cardPart := strings.TrimSpace(parts[1])
+			cardNameEnd := strings.Index(cardPart, " [")
+			if cardNameEnd == -1 {
+				cardNameEnd = strings.Index(cardPart, ",")
+			}
+			if cardNameEnd == -1 {
+				continue
+			}
+
+			cardName := strings.TrimSpace(cardPart[:cardNameEnd])
+
+			// Get the description from brackets
+			descStart := strings.Index(cardPart, "[")
+			descEnd := strings.Index(cardPart, "]")
+			description := cardName
+			if descStart != -1 && descEnd != -1 && descEnd > descStart {
+				description = cardPart[descStart+1 : descEnd]
+			}
+
+			// Make a friendly name
+			friendlyName := description
+			if strings.Contains(strings.ToLower(cardName), "hdmi") {
+				friendlyName = "HDMI: " + description
+			} else if strings.Contains(strings.ToLower(cardName), "usb") || strings.HasPrefix(strings.ToLower(cardName), "u20") {
+				friendlyName = "USB: " + description
+			}
+
+			options = append(options, PlaybackOption{
+				Value: cardName,
+				Name:  friendlyName,
+			})
+			systemCards = append(systemCards, cardName)
+
+			// Select USB device by default if available
+			if strings.Contains(strings.ToLower(cardName), "usb") || strings.HasPrefix(strings.ToLower(cardName), "u20") {
+				if selectedDevice == "" {
+					selectedDevice = cardName
+				}
+			}
+		}
+	}
+
+	// If no USB device, select the first one
+	if selectedDevice == "" && len(options) > 0 {
+		selectedDevice = options[0].Value
+	}
+
+	response.Options = []PlaybackOptionsSection{
+		{
+			ID:   "output",
+			Name: "Audio Output",
+			Attributes: []PlaybackAttribute{
+				{
+					Name:    "output_device",
+					Type:    "select",
+					Value:   selectedDevice,
+					Options: options,
+				},
+			},
+		},
+	}
+	response.SystemCards = systemCards
+
+	log.Debug().Interface("options", options).Str("selected", selectedDevice).Msg("Playback options")
+	return response
+}
+
+// GetBitPerfectStatus checks bit-perfect audio configuration natively in Go.
 func GetBitPerfectStatus() BitPerfectStatus {
-	defaultError := BitPerfectStatus{
-		Status:   "error",
-		Issues:   []string{"Failed to run bit-perfect checker"},
+	// Read MPD config
+	mpdConfig := ""
+	if data, err := os.ReadFile("/etc/mpd.conf"); err == nil {
+		mpdConfig = string(data)
+	} else {
+		log.Warn().Err(err).Msg("Failed to read MPD config")
+	}
+
+	// Read ALSA config
+	alsaConfig := ""
+	if data, err := os.ReadFile("/etc/asound.conf"); err == nil {
+		alsaConfig = string(data)
+	}
+
+	// Get aplay output for device detection
+	aplayOutput := ""
+	if out, err := exec.Command("aplay", "-l").Output(); err == nil {
+		aplayOutput = string(out)
+	}
+
+	return CheckBitPerfectFromConfig(mpdConfig, alsaConfig, aplayOutput)
+}
+
+// CheckBitPerfectFromConfig checks bit-perfect configuration from config strings.
+// This is the main logic, separated for easier testing.
+func CheckBitPerfectFromConfig(mpdConfig, alsaConfig, aplayOutput string) BitPerfectStatus {
+	status := BitPerfectStatus{
+		Status:   "ok",
+		Issues:   []string{},
 		Warnings: []string{},
 		Config:   []string{},
 	}
 
-	cmd := exec.Command("/home/volumio/check-bitperfect.sh", "--json")
-	output, err := cmd.Output()
-	if err != nil {
-		// Script might return exit code 1 if not bit-perfect, check if we have stdout
-		if exitErr, ok := err.(*exec.ExitError); ok {
-			// If we have stdout from the command, use it
-			if len(output) > 0 {
-				var status BitPerfectStatus
-				if jsonErr := json.Unmarshal(output, &status); jsonErr == nil {
-					return status
-				}
-			}
-			// Try stderr as fallback
-			if len(exitErr.Stderr) > 0 {
-				var status BitPerfectStatus
-				if jsonErr := json.Unmarshal(exitErr.Stderr, &status); jsonErr == nil {
-					return status
-				}
-			}
+	// Check 1: MPD resampler
+	if strings.Contains(mpdConfig, "resampler") {
+		if strings.Contains(mpdConfig, "plugin") && (strings.Contains(mpdConfig, "soxr") || strings.Contains(mpdConfig, "libsamplerate")) {
+			status.Issues = append(status.Issues, "MPD: Resampler is enabled - audio will be resampled")
 		}
-		log.Error().Err(err).Msg("Failed to run bit-perfect checker script")
-		defaultError.Issues = []string{err.Error()}
-		return defaultError
+	} else {
+		status.Config = append(status.Config, "MPD: No resampler configured (good)")
 	}
 
-	var status BitPerfectStatus
-	if err := json.Unmarshal(output, &status); err != nil {
-		log.Error().Err(err).Str("output", string(output)).Msg("Failed to parse bit-perfect checker output")
-		defaultError.Issues = []string{"Invalid JSON from bit-perfect checker"}
-		return defaultError
+	// Check 2: Volume normalization
+	if strings.Contains(mpdConfig, `volume_normalization`) && strings.Contains(mpdConfig, `"yes"`) {
+		// Check if it's actually volume_normalization "yes"
+		if matchConfigValue(mpdConfig, "volume_normalization", "yes") {
+			status.Issues = append(status.Issues, "MPD: Volume normalization is enabled - audio will be modified")
+		}
+	} else {
+		status.Config = append(status.Config, "MPD: Volume normalization disabled (good)")
+	}
+
+	// Check 3: Direct hardware output
+	if strings.Contains(mpdConfig, `device`) && strings.Contains(mpdConfig, `"hw:`) {
+		// Extract device name
+		device := extractConfigValue(mpdConfig, "device")
+		if device != "" && strings.HasPrefix(device, "hw:") {
+			status.Config = append(status.Config, "MPD: Direct hardware output: "+device+" (good)")
+		}
+	} else if strings.Contains(mpdConfig, `device`) && strings.Contains(mpdConfig, `"volumio"`) {
+		status.Issues = append(status.Issues, "MPD: Using 'volumio' device (goes through plug layer)")
+	} else if mpdConfig != "" {
+		status.Warnings = append(status.Warnings, "MPD: Could not determine audio device")
+	}
+
+	// Check 4: Auto conversion settings
+	for _, setting := range []string{"auto_resample", "auto_format", "auto_channels"} {
+		if matchConfigValue(mpdConfig, setting, "no") {
+			status.Config = append(status.Config, setting+": disabled (good)")
+		} else if matchConfigValue(mpdConfig, setting, "yes") {
+			status.Issues = append(status.Issues, setting+": enabled - audio may be converted")
+		}
+	}
+
+	// Check 5: DSD playback mode (native vs DoP)
+	if matchConfigValue(mpdConfig, "dop", "yes") {
+		status.Warnings = append(status.Warnings, "DSD over PCM (DoP): enabled - consider native DSD for true bit-perfect")
+	} else if matchConfigValue(mpdConfig, "dop", "no") {
+		status.Config = append(status.Config, "DSD: Native DSD mode (DoP disabled) - true bit-perfect DSD")
+	} else if mpdConfig != "" {
+		status.Config = append(status.Config, "DSD: DoP not configured (native DSD assumed)")
+	}
+
+	// Check 6: Mixer type
+	if matchConfigValue(mpdConfig, "mixer_type", "none") {
+		status.Config = append(status.Config, "Mixer: disabled (bit-perfect volume)")
+	} else if matchConfigValue(mpdConfig, "mixer_type", "software") {
+		status.Warnings = append(status.Warnings, "Mixer: software mixing enabled (not bit-perfect)")
+	}
+
+	// Check 7: ALSA config
+	if alsaConfig != "" {
+		if strings.Contains(alsaConfig, "type") && strings.Contains(alsaConfig, "plug") {
+			status.Warnings = append(status.Warnings, "ALSA: 'plug' type detected - may convert formats")
+		}
+		if strings.Contains(alsaConfig, "type") && strings.Contains(alsaConfig, "hw") {
+			status.Config = append(status.Config, "ALSA: Direct hardware access configured (good)")
+		}
+	}
+
+	// Check 8: USB DAC presence (Singxer SU-6)
+	if aplayOutput != "" {
+		if strings.Contains(aplayOutput, "U20SU6") || strings.Contains(aplayOutput, "SU-6") || strings.Contains(aplayOutput, "SU6") {
+			status.Config = append(status.Config, "Hardware: Singxer SU-6 detected (native DSD capable)")
+		} else {
+			status.Warnings = append(status.Warnings, "Hardware: Singxer SU-6 not detected")
+		}
+	}
+
+	// Determine overall status based on issues and warnings
+	if len(status.Issues) > 0 {
+		status.Status = "error"
+	} else if len(status.Warnings) > 0 {
+		status.Status = "warning"
+	} else {
+		status.Status = "ok"
 	}
 
 	return status
+}
+
+// matchConfigValue checks if a config setting has a specific value.
+// Handles various MPD config formats like: setting "value" or setting    "value"
+func matchConfigValue(config, setting, value string) bool {
+	// Look for patterns like: setting "value" or setting    "value"
+	lines := strings.Split(config, "\n")
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		// Skip comments
+		if strings.HasPrefix(line, "#") {
+			continue
+		}
+		// Check if line contains the setting
+		if strings.HasPrefix(line, setting) {
+			// Extract the value after the setting name
+			rest := strings.TrimPrefix(line, setting)
+			rest = strings.TrimSpace(rest)
+			// Check if it matches the expected value
+			expectedValue := `"` + value + `"`
+			if strings.HasPrefix(rest, expectedValue) || rest == expectedValue {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// extractConfigValue extracts the value for a config setting.
+func extractConfigValue(config, setting string) string {
+	lines := strings.Split(config, "\n")
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		// Skip comments
+		if strings.HasPrefix(line, "#") {
+			continue
+		}
+		// Check if line contains the setting
+		if strings.HasPrefix(line, setting) {
+			// Extract the value after the setting name
+			rest := strings.TrimPrefix(line, setting)
+			rest = strings.TrimSpace(rest)
+			// Find value in quotes
+			start := strings.Index(rest, `"`)
+			if start != -1 {
+				end := strings.Index(rest[start+1:], `"`)
+				if end != -1 {
+					return rest[start+1 : start+1+end]
+				}
+			}
+		}
+	}
+	return ""
+}
+
+// NormalizeBitPerfectStatus converts script status values to frontend expected values.
+// Script returns: "bit-perfect", "not-bit-perfect", "warning"
+// Frontend expects: "ok", "error", "warning"
+func NormalizeBitPerfectStatus(status BitPerfectStatus) BitPerfectStatus {
+	switch status.Status {
+	case "bit-perfect":
+		status.Status = "ok"
+	case "not-bit-perfect":
+		status.Status = "error"
+	}
+	return status
+}
+
+// DsdModeResponse represents the DSD playback mode.
+type DsdModeResponse struct {
+	Mode    string `json:"mode"`    // "native" or "dop"
+	Success bool   `json:"success"` // true if operation succeeded (for setDsdMode)
+	Error   string `json:"error"`   // error message if failed
+}
+
+// GetDsdMode returns the current DSD playback mode from MPD config.
+func GetDsdMode() DsdModeResponse {
+	response := DsdModeResponse{
+		Mode:    "native", // Default to native
+		Success: true,
+	}
+
+	// Read MPD config to check dop setting
+	data, err := os.ReadFile("/etc/mpd.conf")
+	if err != nil {
+		log.Error().Err(err).Msg("Failed to read MPD config")
+		response.Error = "Failed to read MPD config"
+		response.Success = false
+		return response
+	}
+
+	content := string(data)
+	if strings.Contains(content, `dop`) {
+		// Check if dop is set to "yes"
+		if strings.Contains(content, `dop             "yes"`) || strings.Contains(content, `dop "yes"`) {
+			response.Mode = "dop"
+		}
+	}
+
+	return response
+}
+
+// SetDsdMode sets the DSD playback mode in MPD config and restarts MPD.
+func SetDsdMode(mode string) DsdModeResponse {
+	response := DsdModeResponse{
+		Mode:    mode,
+		Success: false,
+	}
+
+	// Validate mode
+	if mode != "native" && mode != "dop" {
+		response.Error = "Invalid mode. Must be 'native' or 'dop'"
+		return response
+	}
+
+	// Read current config
+	data, err := os.ReadFile("/etc/mpd.conf")
+	if err != nil {
+		log.Error().Err(err).Msg("Failed to read MPD config")
+		response.Error = "Failed to read MPD config"
+		return response
+	}
+
+	content := string(data)
+	var newContent string
+
+	dopValue := "no"
+	if mode == "dop" {
+		dopValue = "yes"
+	}
+
+	// Replace dop setting - handle various formats
+	if strings.Contains(content, `dop             "yes"`) {
+		newContent = strings.Replace(content, `dop             "yes"`, `dop             "`+dopValue+`"`, 1)
+	} else if strings.Contains(content, `dop             "no"`) {
+		newContent = strings.Replace(content, `dop             "no"`, `dop             "`+dopValue+`"`, 1)
+	} else if strings.Contains(content, `dop "yes"`) {
+		newContent = strings.Replace(content, `dop "yes"`, `dop "`+dopValue+`"`, 1)
+	} else if strings.Contains(content, `dop "no"`) {
+		newContent = strings.Replace(content, `dop "no"`, `dop "`+dopValue+`"`, 1)
+	} else {
+		response.Error = "Could not find dop setting in MPD config"
+		return response
+	}
+
+	// Write updated config
+	if err := os.WriteFile("/etc/mpd.conf", []byte(newContent), 0644); err != nil {
+		log.Error().Err(err).Msg("Failed to write MPD config")
+		response.Error = "Failed to write MPD config: " + err.Error()
+		return response
+	}
+
+	// Restart MPD
+	cmd := exec.Command("systemctl", "restart", "mpd")
+	if err := cmd.Run(); err != nil {
+		log.Error().Err(err).Msg("Failed to restart MPD")
+		response.Error = "Config updated but failed to restart MPD: " + err.Error()
+		return response
+	}
+
+	log.Info().Str("mode", mode).Msg("DSD mode changed successfully")
+	response.Success = true
+	return response
 }
 
 // StartNetworkWatcher starts watching network status and broadcasts changes.
