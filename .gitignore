@@ -1,6 +1,5 @@
 # Binaries
-stellar
-stellar-*
+/bin/
 *.exe
 *.dll
 *.so
@@ -28,7 +27,6 @@ Thumbs.db
 
 # Build output
 /dist/
-/bin/
 
 # Local config
 config.local.yaml

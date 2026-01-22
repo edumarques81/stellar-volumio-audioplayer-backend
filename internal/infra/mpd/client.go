@@ -35,6 +35,11 @@ func (c *Client) Connect() error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
+	return c.connectLocked()
+}
+
+// connectLocked establishes connection (must hold lock).
+func (c *Client) connectLocked() error {
 	addr := fmt.Sprintf("%s:%d", c.host, c.port)
 	log.Info().Str("addr", addr).Msg("Connecting to MPD")
 
@@ -52,6 +57,28 @@ func (c *Client) Connect() error {
 
 	c.client = client
 	log.Info().Msg("Connected to MPD")
+	return nil
+}
+
+// ensureConnected checks connection and reconnects if needed.
+func (c *Client) ensureConnected() error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if c.client == nil {
+		return c.connectLocked()
+	}
+
+	// Try a ping to check if connection is alive
+	if err := c.client.Ping(); err != nil {
+		log.Warn().Err(err).Msg("MPD connection lost, reconnecting...")
+		// Close old connection
+		c.client.Close()
+		c.client = nil
+		// Reconnect
+		return c.connectLocked()
+	}
+
 	return nil
 }
 
@@ -86,34 +113,36 @@ func (c *Client) Ping() error {
 
 // Status returns the current MPD status.
 func (c *Client) Status() (mpd.Attrs, error) {
+	if err := c.ensureConnected(); err != nil {
+		return nil, err
+	}
+
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 
-	if c.client == nil {
-		return nil, fmt.Errorf("not connected")
-	}
 	return c.client.Status()
 }
 
 // CurrentSong returns the currently playing song.
 func (c *Client) CurrentSong() (mpd.Attrs, error) {
+	if err := c.ensureConnected(); err != nil {
+		return nil, err
+	}
+
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 
-	if c.client == nil {
-		return nil, fmt.Errorf("not connected")
-	}
 	return c.client.CurrentSong()
 }
 
 // Play starts playback. If pos is -1, resumes current track.
 func (c *Client) Play(pos int) error {
+	if err := c.ensureConnected(); err != nil {
+		return err
+	}
+
 	c.mu.RLock()
 	defer c.mu.RUnlock()
-
-	if c.client == nil {
-		return fmt.Errorf("not connected")
-	}
 
 	if pos < 0 {
 		return c.client.Play(-1)
@@ -123,56 +152,60 @@ func (c *Client) Play(pos int) error {
 
 // Pause toggles pause state.
 func (c *Client) Pause(pause bool) error {
+	if err := c.ensureConnected(); err != nil {
+		return err
+	}
+
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 
-	if c.client == nil {
-		return fmt.Errorf("not connected")
-	}
 	return c.client.Pause(pause)
 }
 
 // Stop stops playback.
 func (c *Client) Stop() error {
+	if err := c.ensureConnected(); err != nil {
+		return err
+	}
+
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 
-	if c.client == nil {
-		return fmt.Errorf("not connected")
-	}
 	return c.client.Stop()
 }
 
 // Next plays the next song.
 func (c *Client) Next() error {
+	if err := c.ensureConnected(); err != nil {
+		return err
+	}
+
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 
-	if c.client == nil {
-		return fmt.Errorf("not connected")
-	}
 	return c.client.Next()
 }
 
 // Previous plays the previous song.
 func (c *Client) Previous() error {
+	if err := c.ensureConnected(); err != nil {
+		return err
+	}
+
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 
-	if c.client == nil {
-		return fmt.Errorf("not connected")
-	}
 	return c.client.Previous()
 }
 
 // Seek seeks to position in current song (seconds).
 func (c *Client) Seek(pos int) error {
+	if err := c.ensureConnected(); err != nil {
+		return err
+	}
+
 	c.mu.RLock()
 	defer c.mu.RUnlock()
-
-	if c.client == nil {
-		return fmt.Errorf("not connected")
-	}
 
 	status, err := c.client.Status()
 	if err != nil {
@@ -189,12 +222,12 @@ func (c *Client) Seek(pos int) error {
 
 // SetVolume sets the volume (0-100).
 func (c *Client) SetVolume(vol int) error {
+	if err := c.ensureConnected(); err != nil {
+		return err
+	}
+
 	c.mu.RLock()
 	defer c.mu.RUnlock()
-
-	if c.client == nil {
-		return fmt.Errorf("not connected")
-	}
 
 	if vol < 0 {
 		vol = 0
@@ -207,67 +240,73 @@ func (c *Client) SetVolume(vol int) error {
 
 // SetRandom sets random/shuffle mode.
 func (c *Client) SetRandom(on bool) error {
+	if err := c.ensureConnected(); err != nil {
+		return err
+	}
+
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 
-	if c.client == nil {
-		return fmt.Errorf("not connected")
-	}
 	return c.client.Random(on)
 }
 
 // SetRepeat sets repeat mode.
 func (c *Client) SetRepeat(on bool) error {
+	if err := c.ensureConnected(); err != nil {
+		return err
+	}
+
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 
-	if c.client == nil {
-		return fmt.Errorf("not connected")
-	}
 	return c.client.Repeat(on)
 }
 
 // SetSingle sets single mode (repeat single song).
 func (c *Client) SetSingle(on bool) error {
+	if err := c.ensureConnected(); err != nil {
+		return err
+	}
+
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 
-	if c.client == nil {
-		return fmt.Errorf("not connected")
-	}
 	return c.client.Single(on)
 }
 
 // PlaylistInfo returns the current queue.
 func (c *Client) PlaylistInfo() ([]mpd.Attrs, error) {
+	if err := c.ensureConnected(); err != nil {
+		return nil, err
+	}
+
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 
-	if c.client == nil {
-		return nil, fmt.Errorf("not connected")
-	}
 	return c.client.PlaylistInfo(-1, -1)
 }
 
 // Clear clears the current queue.
 func (c *Client) Clear() error {
+	if err := c.ensureConnected(); err != nil {
+		return err
+	}
+
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 
-	if c.client == nil {
-		return fmt.Errorf("not connected")
-	}
 	return c.client.Clear()
 }
 
 // Add adds a URI to the queue.
 func (c *Client) Add(uri string) error {
+	if err := c.ensureConnected(); err != nil {
+		return err
+	}
+
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 
-	if c.client == nil {
-		return fmt.Errorf("not connected")
-	}
 	return c.client.Add(uri)
 }
 
@@ -309,22 +348,48 @@ func (c *Client) Watch(subsystems ...string) (<-chan string, error) {
 
 // ListAllInfo lists all songs in the database.
 func (c *Client) ListAllInfo(uri string) ([]mpd.Attrs, error) {
+	if err := c.ensureConnected(); err != nil {
+		return nil, err
+	}
+
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 
-	if c.client == nil {
-		return nil, fmt.Errorf("not connected")
-	}
 	return c.client.ListAllInfo(uri)
 }
 
 // ListInfo lists contents of a directory.
 func (c *Client) ListInfo(uri string) ([]mpd.Attrs, error) {
+	if err := c.ensureConnected(); err != nil {
+		return nil, err
+	}
+
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 
-	if c.client == nil {
-		return nil, fmt.Errorf("not connected")
-	}
 	return c.client.ListInfo(uri)
+}
+
+// ReadPicture retrieves embedded album art for a song.
+func (c *Client) ReadPicture(uri string) ([]byte, error) {
+	if err := c.ensureConnected(); err != nil {
+		return nil, err
+	}
+
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	return c.client.ReadPicture(uri)
+}
+
+// AlbumArt retrieves album art from the music directory (cover.jpg, etc).
+func (c *Client) AlbumArt(uri string) ([]byte, error) {
+	if err := c.ensureConnected(); err != nil {
+		return nil, err
+	}
+
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	return c.client.AlbumArt(uri)
 }
