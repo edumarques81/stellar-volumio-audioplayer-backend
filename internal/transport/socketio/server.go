@@ -20,6 +20,7 @@ import (
 	"github.com/edumarques81/stellar-volumio-audioplayer-backend/internal/audio"
 	"github.com/edumarques81/stellar-volumio-audioplayer-backend/internal/domain/player"
 	mpdclient "github.com/edumarques81/stellar-volumio-audioplayer-backend/internal/infra/mpd"
+	"github.com/edumarques81/stellar-volumio-audioplayer-backend/internal/version"
 )
 
 // NetworkStatus represents the current network connection status.
@@ -332,6 +333,19 @@ func (s *Server) setupHandlers() {
 			log.Debug().Str("id", clientID).Msg("getAudioStatus")
 			status := s.audioController.GetStatus()
 			client.Emit("pushAudioStatus", status)
+		})
+
+		// Version info event
+		client.On("getVersion", func(args ...any) {
+			log.Debug().Str("id", clientID).Msg("getVersion")
+			client.Emit("pushVersion", version.GetInfo())
+		})
+
+		// Bit-perfect configuration check event
+		client.On("getBitPerfect", func(args ...any) {
+			log.Debug().Str("id", clientID).Msg("getBitPerfect")
+			result := GetBitPerfectStatus()
+			client.Emit("pushBitPerfect", result)
 		})
 	})
 }
@@ -698,6 +712,58 @@ func (s *Server) BroadcastAudioStatus() {
 	status := s.audioController.GetStatus()
 	s.io.Emit("pushAudioStatus", status)
 	log.Debug().Bool("locked", status.Locked).Interface("format", status.Format).Msg("Broadcast audio status")
+}
+
+// BitPerfectStatus represents the result of a bit-perfect configuration check.
+type BitPerfectStatus struct {
+	Status   string   `json:"status"`   // "ok", "warning", "error"
+	Issues   []string `json:"issues"`   // Critical issues preventing bit-perfect
+	Warnings []string `json:"warnings"` // Non-critical warnings
+	Config   []string `json:"config"`   // Current configuration details
+}
+
+// GetBitPerfectStatus runs the bit-perfect checker script and returns the result.
+func GetBitPerfectStatus() BitPerfectStatus {
+	defaultError := BitPerfectStatus{
+		Status:   "error",
+		Issues:   []string{"Failed to run bit-perfect checker"},
+		Warnings: []string{},
+		Config:   []string{},
+	}
+
+	cmd := exec.Command("/home/volumio/check-bitperfect.sh", "--json")
+	output, err := cmd.Output()
+	if err != nil {
+		// Script might return exit code 1 if not bit-perfect, check if we have stdout
+		if exitErr, ok := err.(*exec.ExitError); ok {
+			// If we have stdout from the command, use it
+			if len(output) > 0 {
+				var status BitPerfectStatus
+				if jsonErr := json.Unmarshal(output, &status); jsonErr == nil {
+					return status
+				}
+			}
+			// Try stderr as fallback
+			if len(exitErr.Stderr) > 0 {
+				var status BitPerfectStatus
+				if jsonErr := json.Unmarshal(exitErr.Stderr, &status); jsonErr == nil {
+					return status
+				}
+			}
+		}
+		log.Error().Err(err).Msg("Failed to run bit-perfect checker script")
+		defaultError.Issues = []string{err.Error()}
+		return defaultError
+	}
+
+	var status BitPerfectStatus
+	if err := json.Unmarshal(output, &status); err != nil {
+		log.Error().Err(err).Str("output", string(output)).Msg("Failed to parse bit-perfect checker output")
+		defaultError.Issues = []string{"Invalid JSON from bit-perfect checker"}
+		return defaultError
+	}
+
+	return status
 }
 
 // StartNetworkWatcher starts watching network status and broadcasts changes.
