@@ -20,6 +20,7 @@ import (
 	"github.com/edumarques81/stellar-volumio-audioplayer-backend/internal/audio"
 	"github.com/edumarques81/stellar-volumio-audioplayer-backend/internal/domain/player"
 	mpdclient "github.com/edumarques81/stellar-volumio-audioplayer-backend/internal/infra/mpd"
+	"github.com/edumarques81/stellar-volumio-audioplayer-backend/internal/version"
 )
 
 // NetworkStatus represents the current network connection status.
@@ -332,6 +333,12 @@ func (s *Server) setupHandlers() {
 			log.Debug().Str("id", clientID).Msg("getAudioStatus")
 			status := s.audioController.GetStatus()
 			client.Emit("pushAudioStatus", status)
+		})
+
+		// Version info event
+		client.On("getVersion", func(args ...any) {
+			log.Debug().Str("id", clientID).Msg("getVersion")
+			client.Emit("pushVersion", version.GetInfo())
 		})
 	})
 }

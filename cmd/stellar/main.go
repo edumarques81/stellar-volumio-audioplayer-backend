@@ -21,9 +21,8 @@ import (
 	"github.com/edumarques81/stellar-volumio-audioplayer-backend/internal/domain/player"
 	"github.com/edumarques81/stellar-volumio-audioplayer-backend/internal/infra/mpd"
 	"github.com/edumarques81/stellar-volumio-audioplayer-backend/internal/transport/socketio"
+	"github.com/edumarques81/stellar-volumio-audioplayer-backend/internal/version"
 )
-
-const version = "0.1.0-dev"
 
 func main() {
 	// Command line flags
@@ -52,14 +51,20 @@ func main() {
 		log.Logger = log.Output(zerolog.ConsoleWriter{Out: os.Stderr, TimeFormat: time.RFC3339})
 	}
 
+	// Print startup banner
+	versionInfo := version.GetInfo()
+	log.Info().Msg("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+	log.Info().Msgf("  %s", versionInfo.String())
+	log.Info().Msg("  Bit-Perfect Audio Player Backend")
+	log.Info().Msg("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 	log.Info().
-		Str("version", version).
 		Str("port", *port).
 		Str("mpd_host", *mpdHost).
 		Int("mpd_port", *mpdPort).
 		Bool("exclusive", *exclusive).
+		Bool("bit_perfect", *bitPerfect).
 		Bool("password_set", *mpdPassword != "").
-		Msg("Starting Stellar Audio Player Backend")
+		Msg("Configuration")
 
 	// Create MPD client
 	mpdClient := mpd.NewClient(*mpdHost, *mpdPort, *mpdPassword)
@@ -115,7 +120,8 @@ func main() {
 	// Version endpoint
 	mux.HandleFunc("/api/v1/version", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		w.Write([]byte(`{"version":"` + version + `","name":"Stellar"}`))
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		json.NewEncoder(w).Encode(version.GetInfo())
 	})
 
 	// Album art endpoint
