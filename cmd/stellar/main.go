@@ -31,9 +31,16 @@ func main() {
 	mpdHost := flag.String("mpd-host", "localhost", "MPD host")
 	mpdPort := flag.Int("mpd-port", 6600, "MPD port")
 	mpdPassword := flag.String("mpd-password", "", "MPD password")
+	exclusive := flag.Bool("exclusive", false, "Enable exclusive MPD access mode (requires password, blocks other clients)")
+	bitPerfect := flag.Bool("bit-perfect", true, "Enable bit-perfect audio mode (default true)")
 	staticDir := flag.String("static", "", "Directory to serve static files from (optional)")
 	debug := flag.Bool("debug", false, "Enable debug logging")
 	flag.Parse()
+
+	// Warn if exclusive mode is enabled without password
+	if *exclusive && *mpdPassword == "" {
+		log.Warn().Msg("Exclusive mode enabled but no MPD password set - MPD may still accept other connections")
+	}
 
 	// Setup logging
 	zerolog.TimeFieldFormat = zerolog.TimeFormatUnix
@@ -50,6 +57,8 @@ func main() {
 		Str("port", *port).
 		Str("mpd_host", *mpdHost).
 		Int("mpd_port", *mpdPort).
+		Bool("exclusive", *exclusive).
+		Bool("password_set", *mpdPassword != "").
 		Msg("Starting Stellar Audio Player Backend")
 
 	// Create MPD client
@@ -69,7 +78,7 @@ func main() {
 	playerService := player.NewService(mpdClient)
 
 	// Create Socket.io server
-	socketServer, err := socketio.NewServer(playerService, mpdClient)
+	socketServer, err := socketio.NewServer(playerService, mpdClient, *bitPerfect)
 	if err != nil {
 		log.Fatal().Err(err).Msg("Failed to create Socket.io server")
 	}

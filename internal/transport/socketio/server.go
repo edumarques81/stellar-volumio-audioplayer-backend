@@ -17,6 +17,7 @@ import (
 	"github.com/zishang520/socket.io/servers/socket/v3"
 	"github.com/zishang520/socket.io/v3/pkg/types"
 
+	"github.com/edumarques81/stellar-volumio-audioplayer-backend/internal/audio"
 	"github.com/edumarques81/stellar-volumio-audioplayer-backend/internal/domain/player"
 	mpdclient "github.com/edumarques81/stellar-volumio-audioplayer-backend/internal/infra/mpd"
 )
@@ -37,16 +38,18 @@ type LCDStatus struct {
 
 // Server handles Socket.io connections and events.
 type Server struct {
-	io            *socket.Server
-	playerService *player.Service
-	mpdClient     *mpdclient.Client
-	mu            sync.RWMutex
-	clients       map[string]*socket.Socket
-	lastNetwork   NetworkStatus
+	io              *socket.Server
+	playerService   *player.Service
+	mpdClient       *mpdclient.Client
+	audioController *audio.Controller
+	mu              sync.RWMutex
+	clients         map[string]*socket.Socket
+	lastNetwork     NetworkStatus
 }
 
 // NewServer creates a new Socket.io server.
-func NewServer(playerService *player.Service, mpdClient *mpdclient.Client) (*Server, error) {
+// bitPerfect indicates whether the system is configured for bit-perfect audio output.
+func NewServer(playerService *player.Service, mpdClient *mpdclient.Client, bitPerfect bool) (*Server, error) {
 	// Configure Socket.io server options
 	opts := socket.DefaultServerOptions()
 	opts.SetPingTimeout(20 * time.Second)
@@ -59,10 +62,11 @@ func NewServer(playerService *player.Service, mpdClient *mpdclient.Client) (*Ser
 	server := socket.NewServer(nil, opts)
 
 	s := &Server{
-		io:            server,
-		playerService: playerService,
-		mpdClient:     mpdClient,
-		clients:       make(map[string]*socket.Socket),
+		io:              server,
+		playerService:   playerService,
+		mpdClient:       mpdClient,
+		audioController: audio.NewController(bitPerfect),
+		clients:         make(map[string]*socket.Socket),
 	}
 
 	s.setupHandlers()
@@ -87,9 +91,10 @@ func (s *Server) setupHandlers() {
 			time.Sleep(100 * time.Millisecond)
 			s.pushState(client)
 			s.pushQueue(client)
-			// Also send network and LCD status
+			// Also send network, LCD, and audio status
 			client.Emit("pushNetworkStatus", GetNetworkStatus())
 			client.Emit("pushLcdStatus", GetLCDStatus())
+			client.Emit("pushAudioStatus", s.audioController.GetStatus())
 		}()
 
 		// Handle disconnect
@@ -321,6 +326,13 @@ func (s *Server) setupHandlers() {
 			}
 			s.BroadcastLCDStatus()
 		})
+
+		// Audio status events
+		client.On("getAudioStatus", func(args ...any) {
+			log.Debug().Str("id", clientID).Msg("getAudioStatus")
+			status := s.audioController.GetStatus()
+			client.Emit("pushAudioStatus", status)
+		})
 	})
 }
 
@@ -353,6 +365,23 @@ func (s *Server) BroadcastState() {
 	}
 
 	s.io.Emit("pushState", state)
+
+	// Update audio controller with current state
+	mpdState, _ := state["status"].(string)
+	audioFormat := ""
+	if sr, ok := state["samplerate"].(string); ok {
+		audioFormat = sr
+		if bd, ok := state["bitdepth"].(string); ok {
+			audioFormat += ":" + bd
+		}
+		if ch, ok := state["channels"].(string); ok {
+			audioFormat += ":" + ch
+		}
+	}
+
+	if s.audioController.UpdateFromMPDStatus(mpdState, audioFormat) {
+		s.BroadcastAudioStatus()
+	}
 
 	if log.Debug().Enabled() {
 		data, _ := json.Marshal(state)
@@ -662,6 +691,13 @@ func (s *Server) BroadcastLCDStatus() {
 	status := GetLCDStatus()
 	s.io.Emit("pushLcdStatus", status)
 	log.Debug().Bool("isOn", status.IsOn).Msg("Broadcast LCD status")
+}
+
+// BroadcastAudioStatus sends audio status to all connected clients.
+func (s *Server) BroadcastAudioStatus() {
+	status := s.audioController.GetStatus()
+	s.io.Emit("pushAudioStatus", status)
+	log.Debug().Bool("locked", status.Locked).Interface("format", status.Format).Msg("Broadcast audio status")
 }
 
 // StartNetworkWatcher starts watching network status and broadcasts changes.
