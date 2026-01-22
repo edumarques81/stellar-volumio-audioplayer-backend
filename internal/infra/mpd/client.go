@@ -369,3 +369,27 @@ func (c *Client) ListInfo(uri string) ([]mpd.Attrs, error) {
 
 	return c.client.ListInfo(uri)
 }
+
+// ReadPicture retrieves embedded album art for a song.
+func (c *Client) ReadPicture(uri string) ([]byte, error) {
+	if err := c.ensureConnected(); err != nil {
+		return nil, err
+	}
+
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	return c.client.ReadPicture(uri)
+}
+
+// AlbumArt retrieves album art from the music directory (cover.jpg, etc).
+func (c *Client) AlbumArt(uri string) ([]byte, error) {
+	if err := c.ensureConnected(); err != nil {
+		return nil, err
+	}
+
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	return c.client.AlbumArt(uri)
+}

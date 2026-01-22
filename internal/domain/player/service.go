@@ -363,7 +363,7 @@ func (s *Service) entryToBrowseItem(entry map[string]string, parentUri string) m
 			item["trackType"] = strings.ToLower(file[idx+1:])
 		}
 
-		// Album art
+		// Album art URL - the /albumart endpoint will fetch from MPD
 		item["albumart"] = "/albumart?path=" + file
 
 		return item
