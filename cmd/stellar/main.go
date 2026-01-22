@@ -170,29 +170,6 @@ func main() {
 		json.NewEncoder(w).Encode(status)
 	})
 
-	// Bit-perfect configuration check endpoint
-	mux.HandleFunc("/api/v1/bitperfect", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		w.Header().Set("Access-Control-Allow-Origin", "*")
-
-		// Run the bit-perfect checker script
-		cmd := exec.Command("/home/volumio/check-bitperfect.sh", "--json")
-		output, err := cmd.Output()
-		if err != nil {
-			// Script might return exit code 1 if not bit-perfect, which is fine
-			if exitErr, ok := err.(*exec.ExitError); ok {
-				// Use the output even if exit code is non-zero
-				output = exitErr.Stderr
-				if len(output) == 0 {
-					output = []byte(`{"status": "error", "issues": ["Failed to run bit-perfect checker"], "warnings": [], "config": []}`)
-				}
-			} else {
-				output = []byte(`{"status": "error", "issues": ["` + err.Error() + `"], "warnings": [], "config": []}`)
-			}
-		}
-		w.Write(output)
-	})
-
 	// Basic state endpoint (REST fallback)
 	mux.HandleFunc("/api/v1/getState", func(w http.ResponseWriter, r *http.Request) {
 		state, err := playerService.GetState()
