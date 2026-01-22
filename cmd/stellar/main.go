@@ -2,11 +2,16 @@
 package main
 
 import (
+	"bufio"
 	"context"
+	"encoding/json"
 	"flag"
 	"net/http"
 	"os"
+	"os/exec"
 	"os/signal"
+	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -26,6 +31,7 @@ func main() {
 	mpdHost := flag.String("mpd-host", "localhost", "MPD host")
 	mpdPort := flag.Int("mpd-port", 6600, "MPD port")
 	mpdPassword := flag.String("mpd-password", "", "MPD password")
+	staticDir := flag.String("static", "", "Directory to serve static files from (optional)")
 	debug := flag.Bool("debug", false, "Enable debug logging")
 	flag.Parse()
 
@@ -76,6 +82,9 @@ func main() {
 	if err := socketServer.StartMPDWatcher(ctx); err != nil {
 		log.Fatal().Err(err).Msg("Failed to start MPD watcher")
 	}
+
+	// Start network watcher for Socket.IO push notifications
+	socketServer.StartNetworkWatcher(ctx)
 
 	// Setup HTTP server
 	mux := http.NewServeMux()
@@ -138,6 +147,14 @@ func main() {
 		w.Write(data)
 	})
 
+	// Network status endpoint
+	mux.HandleFunc("/api/v1/network", func(w http.ResponseWriter, r *http.Request) {
+		status := getNetworkStatus()
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		json.NewEncoder(w).Encode(status)
+	})
+
 	// Basic state endpoint (REST fallback)
 	mux.HandleFunc("/api/v1/getState", func(w http.ResponseWriter, r *http.Request) {
 		state, err := playerService.GetState()
@@ -173,6 +190,25 @@ func main() {
 		data += "}"
 		w.Write([]byte(data))
 	})
+
+	// Serve static files if directory specified (SPA mode)
+	if *staticDir != "" {
+		log.Info().Str("dir", *staticDir).Msg("Serving static files")
+		fs := http.FileServer(http.Dir(*staticDir))
+		mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+			// Check if the file exists
+			path := *staticDir + r.URL.Path
+			if r.URL.Path == "/" {
+				path = *staticDir + "/index.html"
+			}
+			if _, err := os.Stat(path); os.IsNotExist(err) {
+				// For SPA routing, serve index.html for non-existing paths
+				http.ServeFile(w, r, *staticDir+"/index.html")
+				return
+			}
+			fs.ServeHTTP(w, r)
+		})
+	}
 
 	// Start HTTP server
 	server := &http.Server{
@@ -227,4 +263,146 @@ func itoa(i int) string {
 		buf[pos] = '-'
 	}
 	return string(buf[pos:])
+}
+
+// NetworkStatus represents the current network connection status
+type NetworkStatus struct {
+	Type     string `json:"type"`     // "wifi", "ethernet", "none"
+	SSID     string `json:"ssid"`     // WiFi network name (if wifi)
+	Signal   int    `json:"signal"`   // WiFi signal strength 0-100 (if wifi)
+	IP       string `json:"ip"`       // IP address
+	Strength int    `json:"strength"` // Signal strength level 0-3 (for icon)
+}
+
+// getNetworkStatus returns the current network connection status
+func getNetworkStatus() NetworkStatus {
+	status := NetworkStatus{
+		Type:     "none",
+		Signal:   0,
+		Strength: 0,
+	}
+
+	// Check ethernet first (usually eth0 or end0 on newer Pi)
+	for _, iface := range []string{"eth0", "end0"} {
+		carrierPath := "/sys/class/net/" + iface + "/carrier"
+		if data, err := os.ReadFile(carrierPath); err == nil {
+			if strings.TrimSpace(string(data)) == "1" {
+				status.Type = "ethernet"
+				status.IP = getIPAddress(iface)
+				status.Signal = 100
+				status.Strength = 3
+				return status
+			}
+		}
+	}
+
+	// Check WiFi (usually wlan0)
+	for _, iface := range []string{"wlan0", "wlan1"} {
+		operstatePath := "/sys/class/net/" + iface + "/operstate"
+		if data, err := os.ReadFile(operstatePath); err == nil {
+			if strings.TrimSpace(string(data)) == "up" {
+				status.Type = "wifi"
+				status.IP = getIPAddress(iface)
+				status.SSID, status.Signal = getWifiInfo(iface)
+				// Convert signal to strength level (0-3)
+				switch {
+				case status.Signal >= 70:
+					status.Strength = 3 // Full signal
+				case status.Signal >= 50:
+					status.Strength = 2 // Medium
+				case status.Signal >= 30:
+					status.Strength = 1 // Weak
+				default:
+					status.Strength = 0 // Very weak
+				}
+				return status
+			}
+		}
+	}
+
+	return status
+}
+
+// getIPAddress returns the IP address for a given interface
+func getIPAddress(iface string) string {
+	out, err := exec.Command("ip", "-4", "addr", "show", iface).Output()
+	if err != nil {
+		return ""
+	}
+
+	lines := strings.Split(string(out), "\n")
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "inet ") {
+			parts := strings.Fields(line)
+			if len(parts) >= 2 {
+				// Remove CIDR notation
+				ip := strings.Split(parts[1], "/")[0]
+				return ip
+			}
+		}
+	}
+	return ""
+}
+
+// getWifiInfo returns SSID and signal strength (0-100) for a WiFi interface
+func getWifiInfo(iface string) (string, int) {
+	ssid := ""
+	signal := 0
+
+	// Get SSID using iwgetid
+	out, err := exec.Command("iwgetid", iface, "-r").Output()
+	if err == nil {
+		ssid = strings.TrimSpace(string(out))
+	}
+
+	// Get signal from /proc/net/wireless
+	file, err := os.Open("/proc/net/wireless")
+	if err != nil {
+		return ssid, signal
+	}
+	defer file.Close()
+
+	scanner := bufio.NewScanner(file)
+	for scanner.Scan() {
+		line := scanner.Text()
+		if strings.Contains(line, iface) {
+			fields := strings.Fields(line)
+			if len(fields) >= 4 {
+				// Signal level is in field 3 (link quality) or field 4 (signal level)
+				// Format is usually: interface: status link level noise
+				// Signal level is typically in dBm (negative) or link quality (0-100)
+				linkQuality := strings.TrimSuffix(fields[2], ".")
+				if q, err := strconv.Atoi(linkQuality); err == nil {
+					// If it's a percentage (0-100), use directly
+					if q >= 0 && q <= 100 {
+						signal = q
+					} else if q >= 0 && q <= 70 {
+						// It's likely link quality out of 70
+						signal = (q * 100) / 70
+					}
+				}
+
+				// Also try signal level in dBm (field 3)
+				if signal == 0 && len(fields) >= 4 {
+					sigLevel := strings.TrimSuffix(fields[3], ".")
+					if dbm, err := strconv.Atoi(sigLevel); err == nil {
+						// Convert dBm to percentage (-100 dBm = 0%, -50 dBm = 100%)
+						if dbm < 0 {
+							signal = 2 * (dbm + 100)
+							if signal < 0 {
+								signal = 0
+							}
+							if signal > 100 {
+								signal = 100
+							}
+						}
+					}
+				}
+			}
+			break
+		}
+	}
+
+	return ssid, signal
 }
