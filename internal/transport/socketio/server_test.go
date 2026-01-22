@@ -134,3 +134,51 @@ func TestGetLCDStatus(t *testing.T) {
 	// IsOn should be boolean (no additional validation needed, but test doesn't panic)
 	t.Logf("LCD status: isOn=%v", status.IsOn)
 }
+
+func TestGetBitPerfectStatus(t *testing.T) {
+	// GetBitPerfectStatus should return a valid BitPerfectStatus struct
+	status := socketio.GetBitPerfectStatus()
+
+	// Status should be one of: ok, warning, error
+	validStatuses := map[string]bool{"ok": true, "warning": true, "error": true}
+	if !validStatuses[status.Status] {
+		t.Errorf("Invalid bit-perfect status: %s (should be ok, warning, or error)", status.Status)
+	}
+
+	// Arrays should not be nil (may be empty but not nil)
+	if status.Issues == nil {
+		t.Error("Issues array should not be nil")
+	}
+	if status.Warnings == nil {
+		t.Error("Warnings array should not be nil")
+	}
+	if status.Config == nil {
+		t.Error("Config array should not be nil")
+	}
+
+	t.Logf("Bit-perfect status: %s, issues=%d, warnings=%d, config=%d",
+		status.Status, len(status.Issues), len(status.Warnings), len(status.Config))
+}
+
+func TestBitPerfectStatusStructure(t *testing.T) {
+	// Test that BitPerfectStatus can be properly JSON marshaled
+	status := socketio.BitPerfectStatus{
+		Status:   "ok",
+		Issues:   []string{},
+		Warnings: []string{"test warning"},
+		Config:   []string{"config1", "config2"},
+	}
+
+	if status.Status != "ok" {
+		t.Errorf("Expected status 'ok', got '%s'", status.Status)
+	}
+	if len(status.Issues) != 0 {
+		t.Errorf("Expected 0 issues, got %d", len(status.Issues))
+	}
+	if len(status.Warnings) != 1 {
+		t.Errorf("Expected 1 warning, got %d", len(status.Warnings))
+	}
+	if len(status.Config) != 2 {
+		t.Errorf("Expected 2 config items, got %d", len(status.Config))
+	}
+}
