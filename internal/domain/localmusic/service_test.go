@@ -181,9 +181,11 @@ func TestPlayOrigin_Values(t *testing.T) {
 
 // MockMPDClient for testing
 type MockMPDClient struct {
-	ListInfoResponse    map[string][]map[string]string
-	ListAllInfoResponse map[string][]map[string]string
-	ListInfoError       error
+	ListInfoResponse       map[string][]map[string]string
+	ListAllInfoResponse    map[string][]map[string]string
+	GetAlbumDetailsResp    map[string][]AlbumDetails
+	ListInfoError          error
+	GetAlbumDetailsError   error
 }
 
 func (m *MockMPDClient) ListInfo(uri string) ([]map[string]string, error) {
@@ -203,9 +205,20 @@ func (m *MockMPDClient) ListAllInfo(uri string) ([]map[string]string, error) {
 	return []map[string]string{}, nil
 }
 
+func (m *MockMPDClient) GetAlbumDetails(basePath string) ([]AlbumDetails, error) {
+	if m.GetAlbumDetailsError != nil {
+		return nil, m.GetAlbumDetailsError
+	}
+	if resp, ok := m.GetAlbumDetailsResp[basePath]; ok {
+		return resp, nil
+	}
+	return []AlbumDetails{}, nil
+}
+
 func TestService_GetLocalAlbums_Empty(t *testing.T) {
 	mockMPD := &MockMPDClient{
-		ListInfoResponse: map[string][]map[string]string{
+		// Empty album details for both sources
+		GetAlbumDetailsResp: map[string][]AlbumDetails{
 			"INTERNAL": {},
 			"USB":      {},
 		},
@@ -227,16 +240,15 @@ func TestService_GetLocalAlbums_Empty(t *testing.T) {
 
 func TestService_GetLocalAlbums_WithAlbums(t *testing.T) {
 	mockMPD := &MockMPDClient{
-		ListInfoResponse: map[string][]map[string]string{
+		GetAlbumDetailsResp: map[string][]AlbumDetails{
 			"INTERNAL": {
-				{"directory": "INTERNAL/Artist1"},
-			},
-			"INTERNAL/Artist1": {
-				{"directory": "INTERNAL/Artist1/Album1"},
-			},
-			"INTERNAL/Artist1/Album1": {
-				{"file": "INTERNAL/Artist1/Album1/01-Track.flac", "Title": "Track 1", "Artist": "Artist1", "Album": "Album1"},
-				{"file": "INTERNAL/Artist1/Album1/02-Track.flac", "Title": "Track 2", "Artist": "Artist1", "Album": "Album1"},
+				{
+					Album:       "Album1",
+					AlbumArtist: "Artist1",
+					TrackCount:  2,
+					FirstTrack:  "INTERNAL/Artist1/Album1/01-Track.flac",
+					TotalTime:   300,
+				},
 			},
 			"USB": {},
 		},
@@ -274,16 +286,20 @@ func TestService_GetLocalAlbums_WithAlbums(t *testing.T) {
 
 func TestService_GetLocalAlbums_WithQuery(t *testing.T) {
 	mockMPD := &MockMPDClient{
-		ListInfoResponse: map[string][]map[string]string{
+		GetAlbumDetailsResp: map[string][]AlbumDetails{
 			"INTERNAL": {
-				{"directory": "INTERNAL/Album1"},
-				{"directory": "INTERNAL/Album2"},
-			},
-			"INTERNAL/Album1": {
-				{"file": "INTERNAL/Album1/track.flac", "Album": "Jazz Album"},
-			},
-			"INTERNAL/Album2": {
-				{"file": "INTERNAL/Album2/track.flac", "Album": "Rock Album"},
+				{
+					Album:       "Jazz Album",
+					AlbumArtist: "Jazz Artist",
+					TrackCount:  1,
+					FirstTrack:  "INTERNAL/Album1/track.flac",
+				},
+				{
+					Album:       "Rock Album",
+					AlbumArtist: "Rock Artist",
+					TrackCount:  1,
+					FirstTrack:  "INTERNAL/Album2/track.flac",
+				},
 			},
 			"USB": {},
 		},

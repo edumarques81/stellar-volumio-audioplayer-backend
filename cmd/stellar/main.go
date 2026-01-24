@@ -499,6 +499,26 @@ func (a *mpdClientAdapter) ListAllInfo(uri string) ([]map[string]string, error) 
 	return attrsToMaps(attrs), nil
 }
 
+func (a *mpdClientAdapter) GetAlbumDetails(basePath string) ([]localmusic.AlbumDetails, error) {
+	details, err := a.client.GetAlbumDetails(basePath)
+	if err != nil {
+		return nil, err
+	}
+
+	// Convert mpd.AlbumDetails to localmusic.AlbumDetails
+	result := make([]localmusic.AlbumDetails, len(details))
+	for i, d := range details {
+		result[i] = localmusic.AlbumDetails{
+			Album:       d.Album,
+			AlbumArtist: d.AlbumArtist,
+			TrackCount:  d.TrackCount,
+			FirstTrack:  d.FirstTrack,
+			TotalTime:   d.TotalTime,
+		}
+	}
+	return result, nil
+}
+
 // attrsToMaps converts gompd Attrs slice to map slice.
 func attrsToMaps(attrs []gompd.Attrs) []map[string]string {
 	result := make([]map[string]string, len(attrs))

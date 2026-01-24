@@ -43,14 +43,14 @@ const (
 
 // Album represents a local music album.
 type Album struct {
-	ID        string     `json:"id"`
-	Title     string     `json:"title"`
-	Artist    string     `json:"artist"`
-	URI       string     `json:"uri"`
-	AlbumArt  string     `json:"albumart,omitempty"`
-	TrackCount int       `json:"trackCount,omitempty"`
-	Source    SourceType `json:"source"`
-	AddedAt   time.Time  `json:"addedAt,omitempty"`
+	ID         string     `json:"id"`
+	Title      string     `json:"title"`
+	Artist     string     `json:"artist"`
+	URI        string     `json:"uri"`
+	AlbumArt   string     `json:"albumArt,omitempty"`
+	TrackCount int        `json:"trackCount,omitempty"`
+	Source     SourceType `json:"source"`
+	AddedAt    time.Time  `json:"addedAt,omitempty"`
 }
 
 // Track represents a local music track.
@@ -61,18 +61,18 @@ type Track struct {
 	Album    string     `json:"album"`
 	URI      string     `json:"uri"`
 	Duration int        `json:"duration,omitempty"`
-	AlbumArt string     `json:"albumart,omitempty"`
+	AlbumArt string     `json:"albumArt,omitempty"`
 	Source   SourceType `json:"source"`
 }
 
 // PlayHistoryEntry represents a record of a track being played.
 type PlayHistoryEntry struct {
 	ID        string     `json:"id"`
-	TrackURI  string     `json:"trackUri"`
+	TrackURI  string     `json:"trackURI"`
 	Title     string     `json:"title"`
 	Artist    string     `json:"artist"`
 	Album     string     `json:"album"`
-	AlbumArt  string     `json:"albumart,omitempty"`
+	AlbumArt  string     `json:"albumArt,omitempty"`
 	Source    SourceType `json:"source"`
 	Origin    PlayOrigin `json:"origin"`
 	PlayedAt  time.Time  `json:"playedAt"`

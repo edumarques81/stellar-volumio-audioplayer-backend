@@ -393,3 +393,197 @@ func (c *Client) AlbumArt(uri string) ([]byte, error) {
 
 	return c.client.AlbumArt(uri)
 }
+
+// AlbumInfo represents an album with its metadata from MPD database.
+type AlbumInfo struct {
+	Album       string
+	AlbumArtist string
+}
+
+// ListAlbums returns all unique albums from the MPD database grouped by album artist.
+// This uses MPD's "list" command which is much faster than scanning directories.
+func (c *Client) ListAlbums() ([]AlbumInfo, error) {
+	if err := c.ensureConnected(); err != nil {
+		return nil, err
+	}
+
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	// Use "list album group albumartist" to get albums with their artists
+	// AttrsList("Album") tells the parser that each new entry starts with "Album:" key
+	attrs, err := c.client.Command("list album group albumartist").AttrsList("Album")
+	if err != nil {
+		return nil, fmt.Errorf("failed to list albums: %w", err)
+	}
+
+	var albums []AlbumInfo
+	for _, attr := range attrs {
+		album := attr["Album"]
+		artist := attr["AlbumArtist"]
+		if album != "" {
+			albums = append(albums, AlbumInfo{
+				Album:       album,
+				AlbumArtist: artist,
+			})
+		}
+	}
+
+	return albums, nil
+}
+
+// FindAlbumTracks finds all tracks for a specific album and optionally album artist.
+// Returns track information including file paths, which can be used to determine source.
+func (c *Client) FindAlbumTracks(album string, albumArtist string) ([]mpd.Attrs, error) {
+	if err := c.ensureConnected(); err != nil {
+		return nil, err
+	}
+
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	// Build the find command
+	// Format: find album "album name" albumartist "artist name"
+	var cmd *mpd.Command
+	if albumArtist != "" {
+		cmd = c.client.Command("find album %s albumartist %s", album, albumArtist)
+	} else {
+		cmd = c.client.Command("find album %s", album)
+	}
+
+	// AttrsList("file") tells the parser each song starts with "file:" key
+	return cmd.AttrsList("file")
+}
+
+// SearchByBase searches for all songs within a specific base path.
+// This is useful for filtering songs by source (e.g., INTERNAL, USB).
+func (c *Client) SearchByBase(basePath string) ([]mpd.Attrs, error) {
+	if err := c.ensureConnected(); err != nil {
+		return nil, err
+	}
+
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	// Use "search base" to find songs under a path
+	// MPD supports: search base "INTERNAL"
+	// AttrsList("file") tells the parser each song starts with "file:" key
+	return c.client.Command("search base %s", basePath).AttrsList("file")
+}
+
+// ListAlbumsInBase returns unique albums that have tracks in the specified base path.
+// This combines "list album" filtering with base path checking.
+func (c *Client) ListAlbumsInBase(basePath string) ([]AlbumInfo, error) {
+	if err := c.ensureConnected(); err != nil {
+		return nil, err
+	}
+
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	// Use search base to get all songs in the path, then extract unique albums
+	// AttrsList("file") tells the parser each song starts with "file:" key
+	songs, err := c.client.Command("search base %s", basePath).AttrsList("file")
+	if err != nil {
+		return nil, fmt.Errorf("failed to search base %s: %w", basePath, err)
+	}
+
+	// Extract unique album/artist combinations
+	seen := make(map[string]bool)
+	var albums []AlbumInfo
+
+	for _, song := range songs {
+		album := song["Album"]
+		artist := song["AlbumArtist"]
+		if artist == "" {
+			artist = song["Artist"]
+		}
+
+		// Skip songs without album tag
+		if album == "" {
+			continue
+		}
+
+		key := album + "\x00" + artist
+		if !seen[key] {
+			seen[key] = true
+			albums = append(albums, AlbumInfo{
+				Album:       album,
+				AlbumArtist: artist,
+			})
+		}
+	}
+
+	return albums, nil
+}
+
+// GetAlbumDetails returns detailed information about an album including track count
+// and a representative track path (for album art and source detection).
+type AlbumDetails struct {
+	Album       string
+	AlbumArtist string
+	TrackCount  int
+	FirstTrack  string // Path to first track (for album art)
+	TotalTime   int    // Total duration in seconds
+}
+
+// GetAlbumDetails retrieves detailed information for albums within a base path.
+func (c *Client) GetAlbumDetails(basePath string) ([]AlbumDetails, error) {
+	if err := c.ensureConnected(); err != nil {
+		return nil, err
+	}
+
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	// Get all songs in the base path
+	// AttrsList("file") tells the parser each song starts with "file:" key
+	songs, err := c.client.Command("search base %s", basePath).AttrsList("file")
+	if err != nil {
+		return nil, fmt.Errorf("failed to search base %s: %w", basePath, err)
+	}
+
+	// Group songs by album
+	albumMap := make(map[string]*AlbumDetails)
+
+	for _, song := range songs {
+		album := song["Album"]
+		artist := song["AlbumArtist"]
+		if artist == "" {
+			artist = song["Artist"]
+		}
+
+		// Skip songs without album tag
+		if album == "" {
+			continue
+		}
+
+		key := album + "\x00" + artist
+
+		if _, exists := albumMap[key]; !exists {
+			albumMap[key] = &AlbumDetails{
+				Album:       album,
+				AlbumArtist: artist,
+				FirstTrack:  song["file"],
+			}
+		}
+
+		details := albumMap[key]
+		details.TrackCount++
+
+		// Parse duration
+		if dur, err := strconv.Atoi(song["Time"]); err == nil {
+			details.TotalTime += dur
+		} else if dur, err := strconv.ParseFloat(song["duration"], 64); err == nil {
+			details.TotalTime += int(dur)
+		}
+	}
+
+	// Convert map to slice
+	var albums []AlbumDetails
+	for _, details := range albumMap {
+		albums = append(albums, *details)
+	}
+
+	return albums, nil
+}

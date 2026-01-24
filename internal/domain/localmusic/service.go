@@ -12,16 +12,30 @@ import (
 
 // MPDClient interface for MPD operations needed by this service.
 type MPDClient interface {
+	// Directory listing (legacy, kept for compatibility)
 	ListInfo(uri string) ([]map[string]string, error)
 	ListAllInfo(uri string) ([]map[string]string, error)
+
+	// Database queries (new, faster approach)
+	GetAlbumDetails(basePath string) ([]AlbumDetails, error)
+}
+
+// AlbumDetails represents album info from MPD database.
+// This is duplicated from mpd package to avoid circular imports.
+type AlbumDetails struct {
+	Album       string
+	AlbumArtist string
+	TrackCount  int
+	FirstTrack  string // Path to first track (for album art)
+	TotalTime   int    // Total duration in seconds
 }
 
 // Service provides local music operations.
 type Service struct {
-	mpd          MPDClient
-	classifier   *PathClassifier
-	history      *HistoryStore
-	mpdMusicDir  string
+	mpd         MPDClient
+	classifier  *PathClassifier
+	history     *HistoryStore
+	mpdMusicDir string
 }
 
 // NewService creates a new local music service.
@@ -43,17 +57,18 @@ func (s *Service) GetClassifier() *PathClassifier {
 }
 
 // GetLocalAlbums returns albums from local sources only (local disk + USB).
+// This uses MPD's database for proper album metadata instead of folder scanning.
 func (s *Service) GetLocalAlbums(req GetLocalAlbumsRequest) LocalAlbumsResponse {
 	var albums []Album
 	filteredOut := 0
 
-	// Get albums from INTERNAL (local disk)
-	internalAlbums, internalFiltered := s.getAlbumsFromPath("INTERNAL", SourceLocal, req.Query)
+	// Get albums from INTERNAL (local disk) using MPD database
+	internalAlbums, internalFiltered := s.getAlbumsFromDatabase("INTERNAL", SourceLocal, req.Query)
 	albums = append(albums, internalAlbums...)
 	filteredOut += internalFiltered
 
-	// Get albums from USB
-	usbAlbums, usbFiltered := s.getAlbumsFromPath("USB", SourceUSB, req.Query)
+	// Get albums from USB using MPD database
+	usbAlbums, usbFiltered := s.getAlbumsFromDatabase("USB", SourceUSB, req.Query)
 	albums = append(albums, usbAlbums...)
 	filteredOut += usbFiltered
 
@@ -78,7 +93,65 @@ func (s *Service) GetLocalAlbums(req GetLocalAlbumsRequest) LocalAlbumsResponse 
 	}
 }
 
-// getAlbumsFromPath retrieves albums from a specific path prefix.
+// getAlbumsFromDatabase retrieves albums from MPD database for a specific base path.
+// This is much faster than recursive directory scanning and returns proper metadata.
+func (s *Service) getAlbumsFromDatabase(basePath string, sourceType SourceType, query string) ([]Album, int) {
+	var albums []Album
+	filteredOut := 0
+
+	// Use MPD database query to get album details
+	albumDetails, err := s.mpd.GetAlbumDetails(basePath)
+	if err != nil {
+		log.Debug().Err(err).Str("path", basePath).Msg("Failed to get albums from database (may not exist)")
+		// Fall back to directory scanning if database query fails
+		return s.getAlbumsFromPath(basePath, sourceType, query)
+	}
+
+	// Convert AlbumDetails to Album structs
+	for _, details := range albumDetails {
+		// Apply query filter if provided
+		if query != "" {
+			queryLower := strings.ToLower(query)
+			if !strings.Contains(strings.ToLower(details.Album), queryLower) &&
+				!strings.Contains(strings.ToLower(details.AlbumArtist), queryLower) {
+				filteredOut++
+				continue
+			}
+		}
+
+		// Generate album ID from album name + artist
+		albumID := generateID(details.Album + "\x00" + details.AlbumArtist)
+
+		// Get directory path from first track for album art
+		albumPath := ""
+		if details.FirstTrack != "" {
+			albumPath = path.Dir(details.FirstTrack)
+		}
+
+		album := Album{
+			ID:         albumID,
+			Title:      details.Album,
+			Artist:     details.AlbumArtist,
+			URI:        albumPath,
+			AlbumArt:   "/albumart?path=" + details.FirstTrack,
+			TrackCount: details.TrackCount,
+			Source:     sourceType,
+		}
+
+		albums = append(albums, album)
+	}
+
+	log.Debug().
+		Str("basePath", basePath).
+		Int("albumCount", len(albums)).
+		Int("filteredOut", filteredOut).
+		Msg("Albums retrieved from MPD database")
+
+	return albums, filteredOut
+}
+
+// getAlbumsFromPath retrieves albums using directory scanning (fallback method).
+// This is kept as a fallback if database queries fail.
 func (s *Service) getAlbumsFromPath(basePath string, sourceType SourceType, query string) ([]Album, int) {
 	var albums []Album
 	filteredOut := 0
@@ -106,7 +179,7 @@ func (s *Service) getAlbumsFromPath(basePath string, sourceType SourceType, quer
 	return albums, filteredOut
 }
 
-// findAlbumsInDirectory recursively finds albums in a directory.
+// findAlbumsInDirectory recursively finds albums in a directory (fallback method).
 func (s *Service) findAlbumsInDirectory(dirPath string, sourceType SourceType, query string) []Album {
 	var albums []Album
 
@@ -158,7 +231,7 @@ func (s *Service) findAlbumsInDirectory(dirPath string, sourceType SourceType, q
 	return albums
 }
 
-// createAlbumFromDirectory creates an Album from a directory with audio files.
+// createAlbumFromDirectory creates an Album from a directory with audio files (fallback method).
 func (s *Service) createAlbumFromDirectory(dirPath string, firstTrack map[string]string, sourceType SourceType, entries []map[string]string) Album {
 	// Extract album info from first track metadata or directory name
 	albumTitle := firstTrack["Album"]
@@ -166,9 +239,9 @@ func (s *Service) createAlbumFromDirectory(dirPath string, firstTrack map[string
 		albumTitle = path.Base(dirPath)
 	}
 
-	artist := firstTrack["Artist"]
+	artist := firstTrack["AlbumArtist"]
 	if artist == "" {
-		artist = firstTrack["AlbumArtist"]
+		artist = firstTrack["Artist"]
 	}
 	if artist == "" {
 		// Try to extract from parent directory
@@ -187,12 +260,26 @@ func (s *Service) createAlbumFromDirectory(dirPath string, firstTrack map[string
 	// Generate album ID from URI
 	albumID := generateID(dirPath)
 
+	// Get first audio file for album art
+	firstFile := ""
+	for _, entry := range entries {
+		if file, ok := entry["file"]; ok && isAudioFile(file) {
+			firstFile = file
+			break
+		}
+	}
+
+	albumArtPath := dirPath
+	if firstFile != "" {
+		albumArtPath = firstFile
+	}
+
 	return Album{
 		ID:         albumID,
 		Title:      albumTitle,
 		Artist:     artist,
 		URI:        dirPath,
-		AlbumArt:   "/albumart?path=" + dirPath,
+		AlbumArt:   "/albumart?path=" + albumArtPath,
 		TrackCount: trackCount,
 		Source:     sourceType,
 	}
