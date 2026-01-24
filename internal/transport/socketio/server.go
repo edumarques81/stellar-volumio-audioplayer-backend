@@ -380,6 +380,37 @@ func (s *Server) setupHandlers() {
 			client.Emit("pushPlaybackOptions", options)
 		})
 
+		// Set playback settings (change audio output)
+		client.On("setPlaybackSettings", func(args ...any) {
+			log.Info().Str("id", clientID).Interface("args", args).Msg("setPlaybackSettings requested")
+
+			response := map[string]interface{}{"success": false}
+
+			if len(args) > 0 {
+				if m, ok := args[0].(map[string]interface{}); ok {
+					if device, ok := m["output_device"].(string); ok {
+						if err := SetPlaybackSettings(device); err != nil {
+							log.Error().Err(err).Str("device", device).Msg("Failed to set audio output")
+							response["error"] = err.Error()
+						} else {
+							response["success"] = true
+							// Broadcast updated playback options to all clients
+							options := GetPlaybackOptions()
+							s.io.Emit("pushPlaybackOptions", options)
+						}
+					}
+				}
+			}
+
+			// Handle callback if provided
+			if len(args) > 1 {
+				if callback, ok := args[len(args)-1].(func([]any, error)); ok {
+					callback([]any{response}, nil)
+				}
+			}
+			client.Emit("pushPlaybackSettings", response)
+		})
+
 		// DSD mode events
 		client.On("getDsdMode", func(args ...any) {
 			log.Info().Str("id", clientID).Msg("getDsdMode requested")
@@ -586,6 +617,88 @@ func (s *Server) setupHandlers() {
 				s.io.Emit("pushListNasShares", shares)
 				exec.Command("mpc", "update").Run()
 			}
+		})
+
+		// Discover NAS devices on the network
+		client.On("discoverNasDevices", func(args ...any) {
+			log.Info().Str("id", clientID).Msg("discoverNasDevices requested")
+			if s.sourcesService == nil {
+				client.Emit("pushNasDevices", sources.DiscoverResult{
+					Devices: []sources.NasDevice{},
+					Error:   "sources service not available",
+				})
+				return
+			}
+
+			result, err := s.sourcesService.DiscoverNasDevices()
+			if err != nil {
+				log.Error().Err(err).Msg("Failed to discover NAS devices")
+				client.Emit("pushNasDevices", sources.DiscoverResult{
+					Devices: []sources.NasDevice{},
+					Error:   err.Error(),
+				})
+				return
+			}
+
+			log.Info().Int("count", len(result.Devices)).Msg("pushNasDevices")
+			client.Emit("pushNasDevices", result)
+		})
+
+		// Browse shares on a NAS device
+		client.On("browseNasShares", func(args ...any) {
+			log.Info().Str("id", clientID).Interface("args", args).Msg("browseNasShares requested")
+			if s.sourcesService == nil {
+				client.Emit("pushBrowseNasShares", sources.BrowseSharesResult{
+					Shares: []sources.ShareInfo{},
+					Error:  "sources service not available",
+				})
+				return
+			}
+
+			if len(args) == 0 {
+				client.Emit("pushBrowseNasShares", sources.BrowseSharesResult{
+					Shares: []sources.ShareInfo{},
+					Error:  "missing host data",
+				})
+				return
+			}
+
+			data, ok := args[0].(map[string]interface{})
+			if !ok {
+				client.Emit("pushBrowseNasShares", sources.BrowseSharesResult{
+					Shares: []sources.ShareInfo{},
+					Error:  "invalid request format",
+				})
+				return
+			}
+
+			host := getString(data, "host")
+			if host == "" {
+				host = getString(data, "ip")
+			}
+			username := getString(data, "username")
+			password := getString(data, "password")
+
+			if host == "" {
+				client.Emit("pushBrowseNasShares", sources.BrowseSharesResult{
+					Shares: []sources.ShareInfo{},
+					Error:  "host is required",
+				})
+				return
+			}
+
+			result, err := s.sourcesService.BrowseNasShares(host, username, password)
+			if err != nil {
+				log.Error().Err(err).Str("host", host).Msg("Failed to browse NAS shares")
+				client.Emit("pushBrowseNasShares", sources.BrowseSharesResult{
+					Shares: []sources.ShareInfo{},
+					Error:  err.Error(),
+				})
+				return
+			}
+
+			log.Info().Int("count", len(result.Shares)).Str("host", host).Msg("pushBrowseNasShares")
+			client.Emit("pushBrowseNasShares", result)
 		})
 
 		// Unmount a NAS share
@@ -1098,7 +1211,6 @@ func GetPlaybackOptions() PlaybackOptionsResponse {
 
 	var options []PlaybackOption
 	var systemCards []string
-	selectedDevice := ""
 
 	// Parse aplay -l output
 	// Format: card N: CARDNAME [DESCRIPTION], device M: DEVICENAME [DESCRIPTION]
@@ -1144,19 +1256,23 @@ func GetPlaybackOptions() PlaybackOptionsResponse {
 				Name:  friendlyName,
 			})
 			systemCards = append(systemCards, cardName)
-
-			// Select USB device by default if available
-			if strings.Contains(strings.ToLower(cardName), "usb") || strings.HasPrefix(strings.ToLower(cardName), "u20") {
-				if selectedDevice == "" {
-					selectedDevice = cardName
-				}
-			}
 		}
 	}
 
-	// If no USB device, select the first one
-	if selectedDevice == "" && len(options) > 0 {
-		selectedDevice = options[0].Value
+	// Get currently selected device from MPD config
+	selectedDevice := GetCurrentAudioOutput()
+
+	// If no device found in config, select the first USB device, or first available
+	if selectedDevice == "" {
+		for _, opt := range options {
+			if strings.Contains(strings.ToLower(opt.Value), "usb") || strings.HasPrefix(strings.ToLower(opt.Value), "u20") {
+				selectedDevice = opt.Value
+				break
+			}
+		}
+		if selectedDevice == "" && len(options) > 0 {
+			selectedDevice = options[0].Value
+		}
 	}
 
 	response.Options = []PlaybackOptionsSection{
@@ -1177,6 +1293,171 @@ func GetPlaybackOptions() PlaybackOptionsResponse {
 
 	log.Debug().Interface("options", options).Str("selected", selectedDevice).Msg("Playback options")
 	return response
+}
+
+// GetCurrentAudioOutput reads the current audio output device from MPD config.
+func GetCurrentAudioOutput() string {
+	data, err := os.ReadFile("/etc/mpd.conf")
+	if err != nil {
+		log.Warn().Err(err).Msg("Failed to read MPD config for audio output")
+		return ""
+	}
+
+	content := string(data)
+	lines := strings.Split(content, "\n")
+
+	// Look for audio_output block with device setting
+	inAudioOutput := false
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+
+		// Skip comments
+		if strings.HasPrefix(trimmed, "#") {
+			continue
+		}
+
+		if strings.HasPrefix(trimmed, "audio_output") {
+			inAudioOutput = true
+			continue
+		}
+
+		if inAudioOutput {
+			if trimmed == "}" {
+				inAudioOutput = false
+				continue
+			}
+
+			// Look for device line like: device      "hw:2,0"
+			if strings.HasPrefix(trimmed, "device") {
+				// Extract the device value
+				device := extractConfigValue(content, "device")
+				if device != "" && strings.HasPrefix(device, "hw:") {
+					// Extract card number from hw:X,Y format
+					cardNum := strings.TrimPrefix(device, "hw:")
+					if idx := strings.Index(cardNum, ","); idx != -1 {
+						cardNum = cardNum[:idx]
+					}
+					// Find the card name by card number
+					return getCardNameByNumber(cardNum)
+				}
+				return device
+			}
+		}
+	}
+
+	return ""
+}
+
+// getCardNameByNumber returns the card name for a given card number.
+func getCardNameByNumber(cardNum string) string {
+	out, err := exec.Command("aplay", "-l").Output()
+	if err != nil {
+		return ""
+	}
+
+	lines := strings.Split(string(out), "\n")
+	for _, line := range lines {
+		// Look for: card N: CARDNAME
+		if strings.HasPrefix(line, "card "+cardNum+":") {
+			parts := strings.SplitN(line, ":", 2)
+			if len(parts) < 2 {
+				continue
+			}
+			cardPart := strings.TrimSpace(parts[1])
+			cardNameEnd := strings.Index(cardPart, " [")
+			if cardNameEnd == -1 {
+				cardNameEnd = strings.Index(cardPart, ",")
+			}
+			if cardNameEnd != -1 {
+				return strings.TrimSpace(cardPart[:cardNameEnd])
+			}
+		}
+	}
+	return ""
+}
+
+// SetPlaybackSettings changes the audio output device in MPD config.
+func SetPlaybackSettings(deviceName string) error {
+	// Find the card number for this device name
+	cardNum := getCardNumberByName(deviceName)
+	if cardNum == "" {
+		return exec.ErrNotFound
+	}
+
+	// Read current MPD config
+	data, err := os.ReadFile("/etc/mpd.conf")
+	if err != nil {
+		return err
+	}
+
+	content := string(data)
+	newDevice := `"hw:` + cardNum + `,0"`
+
+	// Update the device line in audio_output block
+	lines := strings.Split(content, "\n")
+	var newLines []string
+	inAudioOutput := false
+	foundDevice := false
+
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+
+		// Skip comments when checking, but keep them in output
+		if !strings.HasPrefix(trimmed, "#") {
+			if strings.HasPrefix(trimmed, "audio_output") {
+				inAudioOutput = true
+			} else if inAudioOutput && trimmed == "}" {
+				inAudioOutput = false
+			} else if inAudioOutput && strings.HasPrefix(trimmed, "device") {
+				// Replace the device line
+				line = `    device      ` + newDevice
+				foundDevice = true
+			}
+		}
+		newLines = append(newLines, line)
+	}
+
+	if !foundDevice {
+		return exec.ErrNotFound
+	}
+
+	// Write updated config
+	newContent := strings.Join(newLines, "\n")
+	if err := os.WriteFile("/etc/mpd.conf", []byte(newContent), 0644); err != nil {
+		return err
+	}
+
+	// Restart MPD to apply changes
+	cmd := exec.Command("systemctl", "restart", "mpd")
+	if err := cmd.Run(); err != nil {
+		log.Error().Err(err).Msg("Failed to restart MPD after changing audio output")
+		return err
+	}
+
+	log.Info().Str("device", deviceName).Str("hwDevice", "hw:"+cardNum+",0").Msg("Audio output changed")
+	return nil
+}
+
+// getCardNumberByName returns the card number for a given card name.
+func getCardNumberByName(cardName string) string {
+	out, err := exec.Command("aplay", "-l").Output()
+	if err != nil {
+		return ""
+	}
+
+	lines := strings.Split(string(out), "\n")
+	for _, line := range lines {
+		// Look for: card N: CARDNAME
+		if strings.HasPrefix(line, "card ") && strings.Contains(line, cardName) {
+			// Extract card number
+			parts := strings.Fields(line)
+			if len(parts) >= 2 {
+				numStr := strings.TrimSuffix(parts[1], ":")
+				return numStr
+			}
+		}
+	}
+	return ""
 }
 
 // GetBitPerfectStatus checks bit-perfect audio configuration natively in Go.
