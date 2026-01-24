@@ -465,6 +465,53 @@ func (s *Service) DiscoverNasDevices() (*DiscoverResult, error) {
 	}, nil
 }
 
+// MountAllShares attempts to mount all configured NAS shares.
+// Returns a summary of mount results for each share.
+func (s *Service) MountAllShares() []MountResult {
+	s.mu.RLock()
+	shares := make([]*NasShareConfig, 0, len(s.config.NasShares))
+	for _, cfg := range s.config.NasShares {
+		shares = append(shares, cfg)
+	}
+	s.mu.RUnlock()
+
+	results := make([]MountResult, 0, len(shares))
+
+	for _, cfg := range shares {
+		result := MountResult{
+			ShareID:   cfg.ID,
+			ShareName: cfg.Name,
+		}
+
+		mountPoint := filepath.Join(NasMountBase, sanitizeName(cfg.Name))
+
+		// Check if already mounted
+		if s.mounter != nil && s.mounter.IsMounted(mountPoint) {
+			result.Success = true
+			result.Message = "already mounted"
+			result.Mounted = true
+			results = append(results, result)
+			continue
+		}
+
+		// Try to mount
+		mountResult, err := s.MountNasShare(cfg.ID)
+		if err != nil {
+			result.Success = false
+			result.Error = err.Error()
+		} else if mountResult != nil {
+			result.Success = mountResult.Success
+			result.Message = mountResult.Message
+			result.Error = mountResult.Error
+			result.Mounted = mountResult.Success
+		}
+
+		results = append(results, result)
+	}
+
+	return results
+}
+
 // BrowseNasShares lists available shares on a NAS host.
 func (s *Service) BrowseNasShares(host, username, password string) (*BrowseSharesResult, error) {
 	s.mu.RLock()

@@ -2,12 +2,36 @@
 package player
 
 import (
+	"path"
+	"sort"
 	"strconv"
 	"strings"
 
 	"github.com/edumarques81/stellar-volumio-audioplayer-backend/internal/infra/mpd"
 	"github.com/rs/zerolog/log"
 )
+
+// audioExtensions defines supported audio file extensions.
+// Package-level to avoid allocation on every isAudioFile call.
+var audioExtensions = map[string]bool{
+	".flac": true,
+	".mp3":  true,
+	".wav":  true,
+	".aiff": true,
+	".aif":  true,
+	".ogg":  true,
+	".m4a":  true,
+	".aac":  true,
+	".wma":  true,
+	".dsf":  true,
+	".dff":  true,
+	".dsd":  true,
+	".ape":  true,
+	".wv":   true,
+	".mpc":  true,
+	".opus": true,
+	".alac": true,
+}
 
 // Service handles player operations.
 type Service struct {
@@ -390,7 +414,9 @@ func getBaseName(path string) string {
 	return path
 }
 
-// ReplaceAndPlay clears the queue, adds the item, and starts playing.
+// ReplaceAndPlay clears the queue, adds the item and its siblings, and starts playing.
+// When a single track is selected, all tracks from the same folder are added to the queue,
+// with the selected track playing first. This enables proper next/prev navigation.
 func (s *Service) ReplaceAndPlay(uri string) error {
 	log.Info().Str("uri", uri).Msg("ReplaceAndPlay")
 
@@ -399,11 +425,85 @@ func (s *Service) ReplaceAndPlay(uri string) error {
 		return err
 	}
 
-	// Add the new item
+	// Check if this is a file (has a known audio extension) vs a directory
+	if isAudioFile(uri) {
+		// Get parent directory using path.Dir for URI-style forward slashes
+		parentDir := path.Dir(uri)
+		siblings, err := s.mpd.ListInfo(parentDir)
+		if err != nil {
+			log.Warn().Err(err).Str("dir", parentDir).Msg("Failed to list parent directory, falling back to single track")
+			// Fall back to single track
+			if err := s.mpd.Add(uri); err != nil {
+				return err
+			}
+			return s.mpd.Play(0)
+		}
+
+		// Collect all audio files from the directory
+		var audioFiles []string
+		for _, item := range siblings {
+			if file, ok := item["file"]; ok {
+				if isAudioFile(file) {
+					audioFiles = append(audioFiles, file)
+				}
+			}
+		}
+
+		// Handle edge case: no audio files found in directory
+		if len(audioFiles) == 0 {
+			log.Warn().Str("dir", parentDir).Msg("No audio files found in directory, adding single track")
+			if err := s.mpd.Add(uri); err != nil {
+				return err
+			}
+			return s.mpd.Play(0)
+		}
+
+		// Sort files alphabetically for consistent track order
+		// This works well for files named with track numbers (e.g., "01-Track.flac")
+		sort.Strings(audioFiles)
+
+		// Find the position of the selected track
+		selectedPos := -1
+		for i, file := range audioFiles {
+			if file == uri {
+				selectedPos = i
+				break
+			}
+		}
+
+		// Handle edge case: selected track not found (could happen if file was deleted)
+		if selectedPos < 0 {
+			log.Warn().Str("uri", uri).Msg("Selected track not found in directory, playing from start")
+			selectedPos = 0
+		}
+
+		// Add all files to the queue
+		for _, file := range audioFiles {
+			if err := s.mpd.Add(file); err != nil {
+				log.Warn().Err(err).Str("file", file).Msg("Failed to add file to queue")
+			}
+		}
+
+		log.Info().
+			Int("totalTracks", len(audioFiles)).
+			Int("startPosition", selectedPos).
+			Str("startTrack", uri).
+			Msg("Queued album tracks")
+
+		// Start playing from the selected track
+		return s.mpd.Play(selectedPos)
+	}
+
+	// For directories, just add the directory (MPD will add all contents)
 	if err := s.mpd.Add(uri); err != nil {
 		return err
 	}
 
-	// Start playing
 	return s.mpd.Play(0)
+}
+
+// isAudioFile checks if a URI appears to be an audio file based on extension.
+func isAudioFile(uri string) bool {
+	ext := strings.ToLower(path.Ext(uri))
+	return audioExtensions[ext]
 }

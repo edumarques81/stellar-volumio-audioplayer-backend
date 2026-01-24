@@ -52,6 +52,16 @@ type SourceResult struct {
 	Error   string `json:"error,omitempty"`
 }
 
+// MountResult represents the result of mounting a single share.
+type MountResult struct {
+	ShareID   string `json:"shareId"`
+	ShareName string `json:"shareName"`
+	Success   bool   `json:"success"`
+	Mounted   bool   `json:"mounted"`
+	Message   string `json:"message,omitempty"`
+	Error     string `json:"error,omitempty"`
+}
+
 // AddNasShareRequest represents a request to add a NAS share.
 type AddNasShareRequest struct {
 	Name     string `json:"name"`
@@ -74,8 +84,8 @@ type NasShareConfig struct {
 	Name              string `json:"name"`
 	IP                string `json:"ip"`
 	Path              string `json:"path"`
-	FSType            string `json:"fstype"`
+	FSType            string `json:"fsType"`
 	Username          string `json:"username,omitempty"`
-	EncryptedPassword string `json:"password,omitempty"` // Encrypted
+	EncryptedPassword string `json:"password,omitempty"` // Stored encrypted
 	Options           string `json:"options,omitempty"`
 }

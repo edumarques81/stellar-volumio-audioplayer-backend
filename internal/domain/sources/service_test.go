@@ -503,6 +503,190 @@ func TestService_BrowseNasShares_NotFound(t *testing.T) {
 	}
 }
 
+// ============================================================
+// MountAllShares Tests
+// ============================================================
+
+func TestService_MountAllShares_Empty(t *testing.T) {
+	tmpDir := t.TempDir()
+	configPath := filepath.Join(tmpDir, "sources.json")
+
+	s, err := NewService(configPath, NewMockMounter())
+	if err != nil {
+		t.Fatalf("NewService failed: %v", err)
+	}
+
+	results := s.MountAllShares()
+	if len(results) != 0 {
+		t.Errorf("MountAllShares returned %d results, want 0", len(results))
+	}
+}
+
+func TestService_MountAllShares_SingleShare(t *testing.T) {
+	tmpDir := t.TempDir()
+	configPath := filepath.Join(tmpDir, "sources.json")
+
+	mounter := NewMockMounter()
+	s, err := NewService(configPath, mounter)
+	if err != nil {
+		t.Fatalf("NewService failed: %v", err)
+	}
+
+	// Add a share
+	req := AddNasShareRequest{
+		Name:     "TestShare",
+		IP:       "192.168.1.100",
+		Path:     "Music",
+		FSType:   "cifs",
+		Username: "user",
+		Password: "pass",
+	}
+	_, err = s.AddNasShare(req)
+	if err != nil {
+		t.Fatalf("AddNasShare failed: %v", err)
+	}
+
+	// Reset mounter state to simulate unmounted
+	mounter.MountedPaths = make(map[string]bool)
+
+	results := s.MountAllShares()
+	if len(results) != 1 {
+		t.Fatalf("MountAllShares returned %d results, want 1", len(results))
+	}
+
+	if !results[0].Success {
+		t.Errorf("MountAllShares failed: %s", results[0].Error)
+	}
+	if !results[0].Mounted {
+		t.Error("Share should be mounted")
+	}
+	if results[0].ShareName != "TestShare" {
+		t.Errorf("ShareName = %q, want %q", results[0].ShareName, "TestShare")
+	}
+}
+
+func TestService_MountAllShares_AlreadyMounted(t *testing.T) {
+	tmpDir := t.TempDir()
+	configPath := filepath.Join(tmpDir, "sources.json")
+
+	mounter := NewMockMounter()
+	s, err := NewService(configPath, mounter)
+	if err != nil {
+		t.Fatalf("NewService failed: %v", err)
+	}
+
+	// Add a share (this will mount it)
+	req := AddNasShareRequest{
+		Name:   "MountedShare",
+		IP:     "192.168.1.100",
+		Path:   "Music",
+		FSType: "cifs",
+	}
+	_, err = s.AddNasShare(req)
+	if err != nil {
+		t.Fatalf("AddNasShare failed: %v", err)
+	}
+
+	// MountAllShares should detect it's already mounted
+	results := s.MountAllShares()
+	if len(results) != 1 {
+		t.Fatalf("MountAllShares returned %d results, want 1", len(results))
+	}
+
+	if !results[0].Success {
+		t.Errorf("MountAllShares failed: %s", results[0].Error)
+	}
+	if results[0].Message != "already mounted" {
+		t.Errorf("Message = %q, want %q", results[0].Message, "already mounted")
+	}
+}
+
+func TestService_MountAllShares_MultipleShares(t *testing.T) {
+	tmpDir := t.TempDir()
+	configPath := filepath.Join(tmpDir, "sources.json")
+
+	mounter := NewMockMounter()
+	s, err := NewService(configPath, mounter)
+	if err != nil {
+		t.Fatalf("NewService failed: %v", err)
+	}
+
+	// Add multiple shares
+	shares := []AddNasShareRequest{
+		{Name: "Share1", IP: "192.168.1.100", Path: "Music1", FSType: "cifs"},
+		{Name: "Share2", IP: "192.168.1.101", Path: "Music2", FSType: "cifs"},
+		{Name: "Share3", IP: "192.168.1.102", Path: "Music3", FSType: "nfs"},
+	}
+
+	for _, req := range shares {
+		_, err = s.AddNasShare(req)
+		if err != nil {
+			t.Fatalf("AddNasShare failed: %v", err)
+		}
+	}
+
+	// Reset mounter to simulate all unmounted
+	mounter.MountedPaths = make(map[string]bool)
+
+	results := s.MountAllShares()
+	if len(results) != 3 {
+		t.Fatalf("MountAllShares returned %d results, want 3", len(results))
+	}
+
+	// All should be mounted
+	mountedCount := 0
+	for _, r := range results {
+		if r.Mounted {
+			mountedCount++
+		}
+	}
+	if mountedCount != 3 {
+		t.Errorf("Mounted %d shares, want 3", mountedCount)
+	}
+}
+
+func TestService_MountAllShares_MountFailure(t *testing.T) {
+	tmpDir := t.TempDir()
+	configPath := filepath.Join(tmpDir, "sources.json")
+
+	mounter := NewMockMounter()
+	s, err := NewService(configPath, mounter)
+	if err != nil {
+		t.Fatalf("NewService failed: %v", err)
+	}
+
+	// Add a share
+	req := AddNasShareRequest{
+		Name:   "FailShare",
+		IP:     "192.168.1.100",
+		Path:   "Music",
+		FSType: "cifs",
+	}
+	_, err = s.AddNasShare(req)
+	if err != nil {
+		t.Fatalf("AddNasShare failed: %v", err)
+	}
+
+	// Reset and set up mount to fail
+	mounter.MountedPaths = make(map[string]bool)
+	mounter.MountError = fmt.Errorf("mount failed: connection refused")
+
+	results := s.MountAllShares()
+	if len(results) != 1 {
+		t.Fatalf("MountAllShares returned %d results, want 1", len(results))
+	}
+
+	if results[0].Success {
+		t.Error("Expected mount to fail")
+	}
+	if results[0].Mounted {
+		t.Error("Share should not be mounted")
+	}
+	if results[0].Error == "" {
+		t.Error("Expected error message")
+	}
+}
+
 // MockDiscoverer implements Discoverer interface for testing
 type MockDiscoverer struct {
 	Devices     []NasDevice

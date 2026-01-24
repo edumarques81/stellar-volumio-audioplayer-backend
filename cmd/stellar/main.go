@@ -94,6 +94,35 @@ func main() {
 		// Set up NAS discoverer for Phase 2 discovery functionality
 		sourcesService.SetDiscoverer(sources.NewLinuxDiscoverer())
 		log.Info().Str("config", sourcesConfigPath).Msg("Sources service initialized with NAS discovery")
+
+		// Auto-mount all configured NAS shares on startup
+		mountResults := sourcesService.MountAllShares()
+		for _, result := range mountResults {
+			if result.Success {
+				log.Info().
+					Str("name", result.ShareName).
+					Bool("mounted", result.Mounted).
+					Str("message", result.Message).
+					Msg("NAS share ready")
+			} else {
+				log.Warn().
+					Str("name", result.ShareName).
+					Str("error", result.Error).
+					Msg("Failed to mount NAS share")
+			}
+		}
+		if len(mountResults) > 0 {
+			mounted := 0
+			for _, r := range mountResults {
+				if r.Mounted {
+					mounted++
+				}
+			}
+			log.Info().
+				Int("total", len(mountResults)).
+				Int("mounted", mounted).
+				Msg("NAS shares initialization complete")
+		}
 	}
 
 	// Create Socket.io server
