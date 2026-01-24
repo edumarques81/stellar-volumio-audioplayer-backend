@@ -37,6 +37,19 @@ type LCDStatus struct {
 	IsOn bool `json:"isOn"` // true if LCD is on
 }
 
+// SystemInfo represents basic system information.
+type SystemInfo struct {
+	ID            string `json:"id"`            // Unique device ID
+	Host          string `json:"host"`          // Hostname
+	Name          string `json:"name"`          // Display name
+	Type          string `json:"type"`          // Device type
+	ServiceName   string `json:"serviceName"`   // Service name for mDNS
+	SystemVersion string `json:"systemversion"` // System version
+	BuildDate     string `json:"builddate"`     // Build date
+	Variant       string `json:"variant"`       // System variant
+	Hardware      string `json:"hardware"`      // Hardware model
+}
+
 // Server handles Socket.io connections and events.
 type Server struct {
 	io              *socket.Server
@@ -92,8 +105,9 @@ func (s *Server) setupHandlers() {
 			time.Sleep(100 * time.Millisecond)
 			s.pushState(client)
 			s.pushQueue(client)
-			// Also send network, LCD, and audio status
+			// Also send network, LCD, system info, and audio status
 			client.Emit("pushNetworkStatus", GetNetworkStatus())
+			client.Emit("pushSystemInfo", GetSystemInfo())
 			client.Emit("pushLcdStatus", GetLCDStatus())
 			client.Emit("pushAudioStatus", s.audioController.GetStatus())
 		}()
@@ -341,6 +355,12 @@ func (s *Server) setupHandlers() {
 			client.Emit("pushVersion", version.GetInfo())
 		})
 
+		// System info event
+		client.On("getSystemInfo", func(args ...any) {
+			log.Debug().Str("id", clientID).Msg("getSystemInfo")
+			client.Emit("pushSystemInfo", GetSystemInfo())
+		})
+
 		// Bit-perfect configuration check event
 		client.On("getBitPerfect", func(args ...any) {
 			log.Info().Str("id", clientID).Msg("getBitPerfect requested")
@@ -495,6 +515,41 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 func (s *Server) Close() error {
 	s.io.Close(nil)
 	return nil
+}
+
+// GetSystemInfo returns basic system information.
+func GetSystemInfo() SystemInfo {
+	info := SystemInfo{
+		Type:          "audio_player",
+		ServiceName:   "stellar",
+		SystemVersion: version.GetInfo().Version,
+		BuildDate:     version.GetInfo().BuildTime,
+		Variant:       "stellar-pi",
+		Hardware:      "Raspberry Pi",
+	}
+
+	// Get hostname
+	if hostname, err := os.Hostname(); err == nil {
+		info.Host = hostname
+		info.Name = hostname
+		info.ID = hostname
+	}
+
+	// Try to get more specific hardware info from /proc/cpuinfo
+	if data, err := os.ReadFile("/proc/cpuinfo"); err == nil {
+		lines := strings.Split(string(data), "\n")
+		for _, line := range lines {
+			if strings.HasPrefix(line, "Model") {
+				parts := strings.SplitN(line, ":", 2)
+				if len(parts) == 2 {
+					info.Hardware = strings.TrimSpace(parts[1])
+					break
+				}
+			}
+		}
+	}
+
+	return info
 }
 
 // GetNetworkStatus returns the current network connection status.
