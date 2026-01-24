@@ -19,14 +19,16 @@ This project is inspired by and builds upon the excellent work of the [Volumio](
 
 ## Features
 
-- [ ] Socket.io API (Volumio-compatible)
-- [ ] MPD integration for playback control
-- [ ] Music library browsing
-- [ ] Queue management
+- [x] Socket.io API (Volumio-compatible)
+- [x] MPD integration for playback control
+- [x] Music library browsing
+- [x] Queue management
 - [ ] Playlist and favorites
-- [ ] Bit-perfect audio configuration
-- [ ] LCD brightness control
-- [ ] System management (power, network)
+- [x] Bit-perfect audio configuration
+- [x] LCD brightness control
+- [x] System management (power, network)
+- [x] NAS share management (CIFS/NFS)
+- [ ] Streaming services (Qobuz, Tidal, Audirvana)
 
 ## Architecture
 
@@ -93,6 +95,7 @@ go build -o stellar ./cmd/stellar
 ## Documentation
 
 - [Architecture](docs/ARCHITECTURE.md) - System design, MPD-as-source-of-truth pattern
+- [Streaming Services](docs/STREAMING-SERVICES.md) - Qobuz, Tidal, Audirvana integration
 - [Bit-Perfect Audio](../Volumio2-UI/volumio-poc/docs/BIT-PERFECT-AUDIO.md) - Audio configuration for audiophile playback
 - [State Machine Issues](../Volumio2-UI/volumio-poc/docs/STATE-MACHINE-ISSUES.md) - Why we don't use Volumio's state machine
 

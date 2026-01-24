@@ -20,6 +20,7 @@ import (
 	"github.com/edumarques81/stellar-volumio-audioplayer-backend/internal/audio"
 	"github.com/edumarques81/stellar-volumio-audioplayer-backend/internal/domain/player"
 	"github.com/edumarques81/stellar-volumio-audioplayer-backend/internal/domain/sources"
+	"github.com/edumarques81/stellar-volumio-audioplayer-backend/internal/domain/streaming/qobuz"
 	mpdclient "github.com/edumarques81/stellar-volumio-audioplayer-backend/internal/infra/mpd"
 	"github.com/edumarques81/stellar-volumio-audioplayer-backend/internal/version"
 )
@@ -58,6 +59,7 @@ type Server struct {
 	mpdClient       *mpdclient.Client
 	audioController *audio.Controller
 	sourcesService  *sources.Service
+	qobuzService    *qobuz.Service
 	mu              sync.RWMutex
 	clients         map[string]*socket.Socket
 	lastNetwork     NetworkStatus
@@ -77,12 +79,20 @@ func NewServer(playerService *player.Service, mpdClient *mpdclient.Client, sourc
 
 	server := socket.NewServer(nil, opts)
 
+	// Initialize Qobuz service
+	qobuzConfigPath := os.ExpandEnv("$HOME/.stellar/qobuz.json")
+	qobuzSvc, err := qobuz.NewService(qobuzConfigPath)
+	if err != nil {
+		log.Warn().Err(err).Msg("Failed to initialize Qobuz service, streaming features disabled")
+	}
+
 	s := &Server{
 		io:              server,
 		playerService:   playerService,
 		mpdClient:       mpdClient,
 		audioController: audio.NewController(bitPerfect),
 		sourcesService:  sourcesService,
+		qobuzService:    qobuzSvc,
 		clients:         make(map[string]*socket.Socket),
 	}
 
@@ -263,15 +273,7 @@ func (s *Server) setupHandlers() {
 		// Browse events
 		client.On("getBrowseSources", func(args ...any) {
 			log.Debug().Str("id", clientID).Msg("getBrowseSources")
-			sources := []map[string]interface{}{
-				{
-					"name":        "Music Library",
-					"uri":         "music-library",
-					"plugin_type": "music_service",
-					"plugin_name": "mpd",
-					"albumart":    "/albumart?sourceicon=music_service/mpd/musiclibraryicon.svg",
-				},
-			}
+			sources := s.getBrowseSources()
 			client.Emit("pushBrowseSources", sources)
 		})
 
@@ -287,6 +289,45 @@ func (s *Server) setupHandlers() {
 				}
 			}
 
+			// Handle Qobuz URIs
+			if strings.HasPrefix(uri, "qobuz://") {
+				if s.qobuzService == nil {
+					client.Emit("pushBrowseLibrary", map[string]interface{}{
+						"navigation": map[string]interface{}{
+							"lists": []interface{}{},
+						},
+						"error": "Qobuz service not available",
+					})
+					return
+				}
+
+				if !s.qobuzService.IsLoggedIn() {
+					client.Emit("pushBrowseLibrary", map[string]interface{}{
+						"navigation": map[string]interface{}{
+							"lists": []interface{}{},
+						},
+						"error": "not logged in to Qobuz",
+					})
+					return
+				}
+
+				result, err := s.qobuzService.HandleBrowseURI(uri)
+				if err != nil {
+					log.Error().Err(err).Str("uri", uri).Msg("Qobuz browse failed")
+					client.Emit("pushBrowseLibrary", map[string]interface{}{
+						"navigation": map[string]interface{}{
+							"lists": []interface{}{},
+						},
+						"error": err.Error(),
+					})
+					return
+				}
+
+				client.Emit("pushBrowseLibrary", result)
+				return
+			}
+
+			// Handle local library URIs
 			result, err := s.playerService.BrowseLibrary(uri)
 			if err != nil {
 				log.Error().Err(err).Str("uri", uri).Msg("BrowseLibrary failed")
@@ -748,6 +789,175 @@ func (s *Server) setupHandlers() {
 				s.io.Emit("pushListNasShares", shares)
 			}
 		})
+
+		// ============================================================
+		// Streaming Services (Qobuz) Events
+		// ============================================================
+
+		// Get Qobuz login status
+		client.On("getQobuzStatus", func(args ...any) {
+			log.Info().Str("id", clientID).Msg("getQobuzStatus requested")
+			if s.qobuzService == nil {
+				client.Emit("pushQobuzStatus", map[string]interface{}{
+					"loggedIn": false,
+					"error":    "Qobuz service not available",
+				})
+				return
+			}
+			status := s.qobuzService.GetStatus()
+			log.Info().Bool("loggedIn", status.LoggedIn).Str("email", status.Email).Msg("pushQobuzStatus")
+			client.Emit("pushQobuzStatus", status)
+		})
+
+		// Login to Qobuz
+		client.On("qobuzLogin", func(args ...any) {
+			log.Info().Str("id", clientID).Msg("qobuzLogin requested")
+			if s.qobuzService == nil {
+				client.Emit("pushQobuzLoginResult", map[string]interface{}{
+					"success": false,
+					"error":   "Qobuz service not available",
+				})
+				return
+			}
+
+			if len(args) == 0 {
+				client.Emit("pushQobuzLoginResult", map[string]interface{}{
+					"success": false,
+					"error":   "missing credentials",
+				})
+				return
+			}
+
+			data, ok := args[0].(map[string]interface{})
+			if !ok {
+				client.Emit("pushQobuzLoginResult", map[string]interface{}{
+					"success": false,
+					"error":   "invalid request format",
+				})
+				return
+			}
+
+			email := getString(data, "email")
+			password := getString(data, "password")
+
+			if email == "" || password == "" {
+				client.Emit("pushQobuzLoginResult", map[string]interface{}{
+					"success": false,
+					"error":   "email and password are required",
+				})
+				return
+			}
+
+			result, err := s.qobuzService.Login(email, password)
+			if err != nil {
+				log.Error().Err(err).Msg("Qobuz login failed")
+				client.Emit("pushQobuzLoginResult", map[string]interface{}{
+					"success": false,
+					"error":   err.Error(),
+				})
+				return
+			}
+
+			log.Info().Bool("success", result.Success).Msg("pushQobuzLoginResult")
+			client.Emit("pushQobuzLoginResult", result)
+
+			// Broadcast updated status to all clients
+			if result.Success {
+				s.io.Emit("pushQobuzStatus", s.qobuzService.GetStatus())
+				// Also update browse sources
+				s.broadcastBrowseSources()
+			}
+		})
+
+		// Logout from Qobuz
+		client.On("qobuzLogout", func(args ...any) {
+			log.Info().Str("id", clientID).Msg("qobuzLogout requested")
+			if s.qobuzService == nil {
+				client.Emit("pushQobuzLogoutResult", map[string]interface{}{
+					"success": false,
+					"error":   "Qobuz service not available",
+				})
+				return
+			}
+
+			if err := s.qobuzService.Logout(); err != nil {
+				log.Error().Err(err).Msg("Qobuz logout failed")
+				client.Emit("pushQobuzLogoutResult", map[string]interface{}{
+					"success": false,
+					"error":   err.Error(),
+				})
+				return
+			}
+
+			log.Info().Msg("Qobuz logout successful")
+			client.Emit("pushQobuzLogoutResult", map[string]interface{}{
+				"success": true,
+				"message": "Successfully logged out from Qobuz",
+			})
+
+			// Broadcast updated status to all clients
+			s.io.Emit("pushQobuzStatus", s.qobuzService.GetStatus())
+			// Also update browse sources
+			s.broadcastBrowseSources()
+		})
+
+		// Search Qobuz
+		client.On("qobuzSearch", func(args ...any) {
+			log.Info().Str("id", clientID).Interface("args", args).Msg("qobuzSearch requested")
+			if s.qobuzService == nil {
+				client.Emit("pushQobuzSearchResult", map[string]interface{}{
+					"error": "Qobuz service not available",
+				})
+				return
+			}
+
+			if !s.qobuzService.IsLoggedIn() {
+				client.Emit("pushQobuzSearchResult", map[string]interface{}{
+					"error": "not logged in to Qobuz",
+				})
+				return
+			}
+
+			if len(args) == 0 {
+				client.Emit("pushQobuzSearchResult", map[string]interface{}{
+					"error": "missing search query",
+				})
+				return
+			}
+
+			data, ok := args[0].(map[string]interface{})
+			if !ok {
+				client.Emit("pushQobuzSearchResult", map[string]interface{}{
+					"error": "invalid request format",
+				})
+				return
+			}
+
+			query := getString(data, "query")
+			if query == "" {
+				client.Emit("pushQobuzSearchResult", map[string]interface{}{
+					"error": "query is required",
+				})
+				return
+			}
+
+			limit := 50
+			if l, ok := data["limit"].(float64); ok {
+				limit = int(l)
+			}
+
+			result, err := s.qobuzService.Search(query, limit)
+			if err != nil {
+				log.Error().Err(err).Str("query", query).Msg("Qobuz search failed")
+				client.Emit("pushQobuzSearchResult", map[string]interface{}{
+					"error": err.Error(),
+				})
+				return
+			}
+
+			log.Info().Str("query", query).Msg("pushQobuzSearchResult")
+			client.Emit("pushQobuzSearchResult", result)
+		})
 	})
 }
 
@@ -759,6 +969,42 @@ func getString(m map[string]interface{}, key string) string {
 		}
 	}
 	return ""
+}
+
+// getBrowseSources returns the list of available music sources.
+func (s *Server) getBrowseSources() []map[string]interface{} {
+	sources := []map[string]interface{}{
+		{
+			"name":        "Music Library",
+			"uri":         "music-library",
+			"plugin_type": "music_service",
+			"plugin_name": "mpd",
+			"albumart":    "/albumart?sourceicon=music_service/mpd/musiclibraryicon.svg",
+		},
+	}
+
+	// Add Qobuz if logged in
+	if s.qobuzService != nil && s.qobuzService.IsLoggedIn() {
+		qobuzSource := s.qobuzService.GetBrowseSource()
+		if qobuzSource != nil {
+			sources = append(sources, map[string]interface{}{
+				"name":        qobuzSource.Name,
+				"uri":         qobuzSource.URI,
+				"plugin_type": qobuzSource.PluginType,
+				"plugin_name": qobuzSource.PluginName,
+				"albumart":    qobuzSource.AlbumArt,
+				"icon":        qobuzSource.Icon,
+			})
+		}
+	}
+
+	return sources
+}
+
+// broadcastBrowseSources sends updated browse sources to all clients.
+func (s *Server) broadcastBrowseSources() {
+	sources := s.getBrowseSources()
+	s.io.Emit("pushBrowseSources", sources)
 }
 
 // pushState sends current state to a client.

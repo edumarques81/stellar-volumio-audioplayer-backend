@@ -180,7 +180,6 @@ func (s *PlayerService) SetVolume(vol int) error {
 | MyVolumio Cloud | No cloud dependencies |
 | Spotify Connect | Volatile mode complexity |
 | UPnP/DLNA Renderer | Consume mode complexity |
-| Tidal/Qobuz | Can add later as fixed services |
 | Plugin Marketplace | No plugin system |
 | Wizard/Onboarding | Simple config file |
 | REST API | Socket.io is sufficient |
@@ -190,6 +189,16 @@ func (s *PlayerService) SetVolume(vol int) error {
 | Sleep Timer | Not core function |
 | Network Config | Handle externally |
 | Firmware Updates | Handle externally |
+
+### Planned Features (Fixed Services)
+
+| Feature | Status | Notes |
+|---------|--------|-------|
+| Qobuz | Planned | Hi-Res streaming, highest quality (24-bit/192kHz) |
+| Tidal | Planned | Hi-Res streaming, MQA support |
+| Audirvana | Planned | Debian package integration |
+
+See [STREAMING-SERVICES.md](STREAMING-SERVICES.md) for implementation details.
 
 ---
 
