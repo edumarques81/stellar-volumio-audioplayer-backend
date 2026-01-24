@@ -1070,6 +1070,37 @@ func (s *Server) setupHandlers() {
 			client.Emit("pushLastPlayedTracks", resp)
 		})
 
+		// Get tracks for a specific album
+		client.On("getAlbumTracks", func(args ...any) {
+			log.Info().Str("id", clientID).Interface("args", args).Msg("getAlbumTracks requested")
+			if s.localMusicService == nil {
+				client.Emit("pushAlbumTracks", map[string]interface{}{
+					"tracks":     []interface{}{},
+					"totalCount": 0,
+					"error":      "local music service not available",
+				})
+				return
+			}
+
+			// Parse request parameters
+			req := localmusic.GetAlbumTracksRequest{}
+
+			if len(args) > 0 {
+				if data, ok := args[0].(map[string]interface{}); ok {
+					if albumUri, ok := data["albumUri"].(string); ok {
+						req.AlbumURI = albumUri
+					}
+				}
+			}
+
+			resp := s.localMusicService.GetAlbumTracks(req)
+			log.Info().
+				Str("albumUri", req.AlbumURI).
+				Int("trackCount", len(resp.Tracks)).
+				Msg("pushAlbumTracks")
+			client.Emit("pushAlbumTracks", resp)
+		})
+
 		// Record a manual track play (for history tracking)
 		client.On("recordTrackPlay", func(args ...any) {
 			log.Debug().Str("id", clientID).Interface("args", args).Msg("recordTrackPlay requested")

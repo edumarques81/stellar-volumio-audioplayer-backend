@@ -55,14 +55,15 @@ type Album struct {
 
 // Track represents a local music track.
 type Track struct {
-	ID       string     `json:"id"`
-	Title    string     `json:"title"`
-	Artist   string     `json:"artist"`
-	Album    string     `json:"album"`
-	URI      string     `json:"uri"`
-	Duration int        `json:"duration,omitempty"`
-	AlbumArt string     `json:"albumArt,omitempty"`
-	Source   SourceType `json:"source"`
+	ID          string     `json:"id"`
+	Title       string     `json:"title"`
+	Artist      string     `json:"artist"`
+	Album       string     `json:"album"`
+	URI         string     `json:"uri"`
+	TrackNumber int        `json:"trackNumber,omitempty"`
+	Duration    int        `json:"duration,omitempty"`
+	AlbumArt    string     `json:"albumArt,omitempty"`
+	Source      SourceType `json:"source"`
 }
 
 // PlayHistoryEntry represents a record of a track being played.
@@ -119,6 +120,19 @@ type LocalAlbumsResponse struct {
 
 // LastPlayedResponse represents the response for last played tracks.
 type LastPlayedResponse struct {
-	Tracks      []PlayHistoryEntry `json:"tracks"`
-	TotalCount  int                `json:"totalCount"`
+	Tracks     []PlayHistoryEntry `json:"tracks"`
+	TotalCount int                `json:"totalCount"`
+}
+
+// GetAlbumTracksRequest represents a request to get tracks for an album.
+type GetAlbumTracksRequest struct {
+	AlbumURI string `json:"albumUri"` // The album directory URI
+}
+
+// AlbumTracksResponse represents the response for album tracks.
+type AlbumTracksResponse struct {
+	Tracks     []Track `json:"tracks"`
+	TotalCount int     `json:"totalCount"`
+	AlbumURI   string  `json:"albumUri"`
+	Error      string  `json:"error,omitempty"`
 }

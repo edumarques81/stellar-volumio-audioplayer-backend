@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"path"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/rs/zerolog/log"
@@ -322,6 +323,104 @@ func (s *Service) GetLastPlayedTracks(req GetLastPlayedRequest) LastPlayedRespon
 	return s.history.GetLastPlayed(req, true, true)
 }
 
+// GetAlbumTracks returns tracks for a specific album directory.
+func (s *Service) GetAlbumTracks(req GetAlbumTracksRequest) AlbumTracksResponse {
+	if req.AlbumURI == "" {
+		return AlbumTracksResponse{
+			Error: "album URI is required",
+		}
+	}
+
+	// Get directory contents
+	entries, err := s.mpd.ListInfo(req.AlbumURI)
+	if err != nil {
+		log.Debug().Err(err).Str("uri", req.AlbumURI).Msg("Failed to list album directory")
+		return AlbumTracksResponse{
+			AlbumURI: req.AlbumURI,
+			Error:    "failed to get album tracks: " + err.Error(),
+		}
+	}
+
+	// Determine source type from album URI
+	sourceType := s.classifier.GetSourceType(req.AlbumURI)
+
+	// Extract tracks from entries
+	var tracks []Track
+	for _, entry := range entries {
+		file, isFile := entry["file"]
+		if !isFile || !isAudioFile(file) {
+			continue
+		}
+
+		// Parse track number
+		trackNum := 0
+		if tn, ok := entry["Track"]; ok {
+			// Track can be "1" or "1/12"
+			if idx := strings.Index(tn, "/"); idx > 0 {
+				tn = tn[:idx]
+			}
+			if n, err := parseInt(tn); err == nil {
+				trackNum = n
+			}
+		}
+
+		// Parse duration
+		duration := 0
+		if d, ok := entry["Time"]; ok {
+			if n, err := parseInt(d); err == nil {
+				duration = n
+			}
+		} else if d, ok := entry["duration"]; ok {
+			if f, err := parseFloat(d); err == nil {
+				duration = int(f)
+			}
+		}
+
+		// Get title, fallback to filename
+		title := entry["Title"]
+		if title == "" {
+			title = path.Base(file)
+			// Remove extension
+			if ext := path.Ext(title); ext != "" {
+				title = title[:len(title)-len(ext)]
+			}
+		}
+
+		track := Track{
+			ID:          generateID(file),
+			Title:       title,
+			Artist:      entry["Artist"],
+			Album:       entry["Album"],
+			URI:         file,
+			TrackNumber: trackNum,
+			Duration:    duration,
+			AlbumArt:    "/albumart?path=" + file,
+			Source:      sourceType,
+		}
+
+		tracks = append(tracks, track)
+	}
+
+	// Sort by track number
+	sort.Slice(tracks, func(i, j int) bool {
+		if tracks[i].TrackNumber != tracks[j].TrackNumber {
+			return tracks[i].TrackNumber < tracks[j].TrackNumber
+		}
+		return tracks[i].Title < tracks[j].Title
+	})
+
+	log.Info().
+		Str("albumUri", req.AlbumURI).
+		Int("trackCount", len(tracks)).
+		Msg("GetAlbumTracks completed")
+
+	return AlbumTracksResponse{
+		Tracks:     tracks,
+		TotalCount: len(tracks),
+		AlbumURI:   req.AlbumURI,
+	}
+}
+
 // RecordTrackPlay records a track play event.
 func (s *Service) RecordTrackPlay(trackURI, title, artist, album, albumArt string, origin PlayOrigin) {
 	s.history.RecordPlay(trackURI, title, artist, album, albumArt, origin)
@@ -369,4 +468,14 @@ func isAudioFile(filePath string) bool {
 		".alac": true,
 	}
 	return audioExtensions[ext]
+}
+
+// parseInt parses a string to int.
+func parseInt(s string) (int, error) {
+	return strconv.Atoi(s)
+}
+
+// parseFloat parses a string to float64.
+func parseFloat(s string) (float64, error) {
+	return strconv.ParseFloat(s, 64)
 }
