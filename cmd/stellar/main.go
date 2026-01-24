@@ -91,7 +91,9 @@ func main() {
 		log.Warn().Err(err).Msg("Failed to create sources service - NAS/USB management disabled")
 		sourcesService = nil
 	} else {
-		log.Info().Str("config", sourcesConfigPath).Msg("Sources service initialized")
+		// Set up NAS discoverer for Phase 2 discovery functionality
+		sourcesService.SetDiscoverer(sources.NewLinuxDiscoverer())
+		log.Info().Str("config", sourcesConfigPath).Msg("Sources service initialized with NAS discovery")
 	}
 
 	// Create Socket.io server

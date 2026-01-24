@@ -25,6 +25,7 @@ type Service struct {
 	config     *Config
 	configPath string
 	mounter    Mounter
+	discoverer Discoverer
 	mu         sync.RWMutex
 }
 
@@ -429,4 +430,63 @@ func encryptPassword(password string) string {
 // decryptPassword decrypts a stored password.
 func decryptPassword(encrypted string) string {
 	return encrypted // Placeholder
+}
+
+// SetDiscoverer sets the NAS discoverer for the service.
+func (s *Service) SetDiscoverer(d Discoverer) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.discoverer = d
+}
+
+// DiscoverNasDevices finds NAS devices on the local network.
+func (s *Service) DiscoverNasDevices() (*DiscoverResult, error) {
+	s.mu.RLock()
+	discoverer := s.discoverer
+	s.mu.RUnlock()
+
+	if discoverer == nil {
+		return &DiscoverResult{
+			Devices: []NasDevice{},
+			Error:   "discoverer not configured",
+		}, nil
+	}
+
+	devices, err := discoverer.DiscoverDevices()
+	if err != nil {
+		return &DiscoverResult{
+			Devices: []NasDevice{},
+			Error:   err.Error(),
+		}, nil
+	}
+
+	return &DiscoverResult{
+		Devices: devices,
+	}, nil
+}
+
+// BrowseNasShares lists available shares on a NAS host.
+func (s *Service) BrowseNasShares(host, username, password string) (*BrowseSharesResult, error) {
+	s.mu.RLock()
+	discoverer := s.discoverer
+	s.mu.RUnlock()
+
+	if discoverer == nil {
+		return &BrowseSharesResult{
+			Shares: []ShareInfo{},
+			Error:  "discoverer not configured",
+		}, nil
+	}
+
+	shares, err := discoverer.BrowseShares(host, username, password)
+	if err != nil {
+		return &BrowseSharesResult{
+			Shares: []ShareInfo{},
+			Error:  err.Error(),
+		}, nil
+	}
+
+	return &BrowseSharesResult{
+		Shares: shares,
+	}, nil
 }

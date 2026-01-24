@@ -1,6 +1,7 @@
 package sources
 
 import (
+	"fmt"
 	"path/filepath"
 	"testing"
 )
@@ -323,4 +324,213 @@ func (m *MockMounter) CreateSymlink(source, target string) error {
 
 func (m *MockMounter) RemoveSymlink(path string) error {
 	return nil // Mock
+}
+
+// ============================================================
+// Phase 2: NAS Discovery Tests
+// ============================================================
+
+func TestService_DiscoverNasDevices(t *testing.T) {
+	tmpDir := t.TempDir()
+	configPath := filepath.Join(tmpDir, "sources.json")
+
+	mockDiscoverer := &MockDiscoverer{
+		Devices: []NasDevice{
+			{Name: "NAS1", IP: "192.168.1.10", Hostname: "nas1.local"},
+			{Name: "NAS2", IP: "192.168.1.20", Hostname: "nas2.local"},
+		},
+	}
+
+	s, err := NewService(configPath, NewMockMounter())
+	if err != nil {
+		t.Fatalf("NewService failed: %v", err)
+	}
+	s.SetDiscoverer(mockDiscoverer)
+
+	result, err := s.DiscoverNasDevices()
+	if err != nil {
+		t.Fatalf("DiscoverNasDevices failed: %v", err)
+	}
+
+	if len(result.Devices) != 2 {
+		t.Errorf("DiscoverNasDevices returned %d devices, want 2", len(result.Devices))
+	}
+
+	if result.Devices[0].IP != "192.168.1.10" {
+		t.Errorf("Device[0].IP = %q, want %q", result.Devices[0].IP, "192.168.1.10")
+	}
+}
+
+func TestService_DiscoverNasDevices_Empty(t *testing.T) {
+	tmpDir := t.TempDir()
+	configPath := filepath.Join(tmpDir, "sources.json")
+
+	mockDiscoverer := &MockDiscoverer{
+		Devices: []NasDevice{},
+	}
+
+	s, err := NewService(configPath, NewMockMounter())
+	if err != nil {
+		t.Fatalf("NewService failed: %v", err)
+	}
+	s.SetDiscoverer(mockDiscoverer)
+
+	result, err := s.DiscoverNasDevices()
+	if err != nil {
+		t.Fatalf("DiscoverNasDevices failed: %v", err)
+	}
+
+	if len(result.Devices) != 0 {
+		t.Errorf("DiscoverNasDevices returned %d devices, want 0", len(result.Devices))
+	}
+}
+
+func TestService_DiscoverNasDevices_NoDiscoverer(t *testing.T) {
+	tmpDir := t.TempDir()
+	configPath := filepath.Join(tmpDir, "sources.json")
+
+	s, err := NewService(configPath, NewMockMounter())
+	if err != nil {
+		t.Fatalf("NewService failed: %v", err)
+	}
+	// No discoverer set
+
+	result, err := s.DiscoverNasDevices()
+	if err != nil {
+		t.Fatalf("DiscoverNasDevices failed: %v", err)
+	}
+
+	if result.Error == "" {
+		t.Error("Expected error when discoverer is not set")
+	}
+}
+
+func TestService_BrowseNasShares(t *testing.T) {
+	tmpDir := t.TempDir()
+	configPath := filepath.Join(tmpDir, "sources.json")
+
+	mockDiscoverer := &MockDiscoverer{
+		Shares: map[string][]ShareInfo{
+			"192.168.1.10": {
+				{Name: "Music", Type: "disk", Comment: "Music library"},
+				{Name: "Videos", Type: "disk", Comment: "Video files"},
+			},
+		},
+	}
+
+	s, err := NewService(configPath, NewMockMounter())
+	if err != nil {
+		t.Fatalf("NewService failed: %v", err)
+	}
+	s.SetDiscoverer(mockDiscoverer)
+
+	result, err := s.BrowseNasShares("192.168.1.10", "", "")
+	if err != nil {
+		t.Fatalf("BrowseNasShares failed: %v", err)
+	}
+
+	if len(result.Shares) != 2 {
+		t.Errorf("BrowseNasShares returned %d shares, want 2", len(result.Shares))
+	}
+
+	if result.Shares[0].Name != "Music" {
+		t.Errorf("Shares[0].Name = %q, want %q", result.Shares[0].Name, "Music")
+	}
+}
+
+func TestService_BrowseNasShares_WithCredentials(t *testing.T) {
+	tmpDir := t.TempDir()
+	configPath := filepath.Join(tmpDir, "sources.json")
+
+	mockDiscoverer := &MockDiscoverer{
+		Shares: map[string][]ShareInfo{
+			"192.168.1.10": {
+				{Name: "Private", Type: "disk", Comment: "Private share"},
+			},
+		},
+		RequireAuth: true,
+	}
+
+	s, err := NewService(configPath, NewMockMounter())
+	if err != nil {
+		t.Fatalf("NewService failed: %v", err)
+	}
+	s.SetDiscoverer(mockDiscoverer)
+
+	// Without credentials - should fail
+	result, err := s.BrowseNasShares("192.168.1.10", "", "")
+	if err != nil {
+		t.Fatalf("BrowseNasShares failed: %v", err)
+	}
+	if result.Error == "" {
+		t.Error("Expected error without credentials")
+	}
+
+	// With credentials - should succeed
+	result, err = s.BrowseNasShares("192.168.1.10", "user", "pass")
+	if err != nil {
+		t.Fatalf("BrowseNasShares with auth failed: %v", err)
+	}
+	if result.Error != "" {
+		t.Errorf("BrowseNasShares with auth returned error: %s", result.Error)
+	}
+	if len(result.Shares) != 1 {
+		t.Errorf("BrowseNasShares returned %d shares, want 1", len(result.Shares))
+	}
+}
+
+func TestService_BrowseNasShares_NotFound(t *testing.T) {
+	tmpDir := t.TempDir()
+	configPath := filepath.Join(tmpDir, "sources.json")
+
+	mockDiscoverer := &MockDiscoverer{
+		Shares: map[string][]ShareInfo{},
+	}
+
+	s, err := NewService(configPath, NewMockMounter())
+	if err != nil {
+		t.Fatalf("NewService failed: %v", err)
+	}
+	s.SetDiscoverer(mockDiscoverer)
+
+	result, err := s.BrowseNasShares("192.168.1.99", "", "")
+	if err != nil {
+		t.Fatalf("BrowseNasShares failed: %v", err)
+	}
+
+	if result.Error == "" {
+		t.Error("Expected error for unreachable host")
+	}
+}
+
+// MockDiscoverer implements Discoverer interface for testing
+type MockDiscoverer struct {
+	Devices     []NasDevice
+	Shares      map[string][]ShareInfo
+	RequireAuth bool
+	Error       error
+}
+
+func (m *MockDiscoverer) DiscoverDevices() ([]NasDevice, error) {
+	if m.Error != nil {
+		return nil, m.Error
+	}
+	return m.Devices, nil
+}
+
+func (m *MockDiscoverer) BrowseShares(host, username, password string) ([]ShareInfo, error) {
+	if m.Error != nil {
+		return nil, m.Error
+	}
+
+	if m.RequireAuth && (username == "" || password == "") {
+		return nil, fmt.Errorf("authentication required")
+	}
+
+	shares, ok := m.Shares[host]
+	if !ok {
+		return nil, fmt.Errorf("host not found: %s", host)
+	}
+
+	return shares, nil
 }

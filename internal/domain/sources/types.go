@@ -15,8 +15,35 @@ type NasShare struct {
 	MountPoint string `json:"mountPoint"`
 }
 
-// NOTE: NasDevice, ShareInfo, and UsbDrive types will be added in Phase 2/3
-// when NAS discovery and USB detection are implemented.
+// NasDevice represents a discovered NAS device on the network.
+type NasDevice struct {
+	Name     string `json:"name"`
+	IP       string `json:"ip"`
+	Hostname string `json:"hostname,omitempty"`
+}
+
+// ShareInfo represents an available share on a NAS device.
+type ShareInfo struct {
+	Name     string `json:"name"`
+	Type     string `json:"type"` // "disk", "printer", "ipc"
+	Comment  string `json:"comment,omitempty"`
+	Writable bool   `json:"writable"`
+}
+
+// DiscoverResult represents the result of NAS discovery.
+type DiscoverResult struct {
+	Devices []NasDevice `json:"devices"`
+	Error   string      `json:"error,omitempty"`
+}
+
+// BrowseSharesResult represents the result of browsing NAS shares.
+type BrowseSharesResult struct {
+	Shares []ShareInfo `json:"shares"`
+	Error  string      `json:"error,omitempty"`
+}
+
+// NOTE: UsbDrive types will be added in Phase 3
+// when USB detection is implemented.
 
 // SourceResult represents the result of a source operation.
 type SourceResult struct {
