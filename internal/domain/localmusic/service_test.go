@@ -1,6 +1,7 @@
 package localmusic
 
 import (
+	"fmt"
 	"testing"
 )
 
@@ -350,5 +351,293 @@ func TestSortAlbums(t *testing.T) {
 
 	if albumsCopy[0].Artist != "Artist A" || albumsCopy[1].Artist != "Artist B" || albumsCopy[2].Artist != "Artist C" {
 		t.Errorf("Artist sort failed: got %v", albumsCopy)
+	}
+}
+
+func TestService_GetAlbumTracks_EmptyURI(t *testing.T) {
+	mockMPD := &MockMPDClient{}
+	service := &Service{
+		mpd:        mockMPD,
+		classifier: NewPathClassifier("/var/lib/mpd/music"),
+	}
+
+	resp := service.GetAlbumTracks(GetAlbumTracksRequest{AlbumURI: ""})
+
+	if resp.Error != "album URI is required" {
+		t.Errorf("Expected error 'album URI is required', got %q", resp.Error)
+	}
+	if len(resp.Tracks) != 0 {
+		t.Errorf("Expected 0 tracks, got %d", len(resp.Tracks))
+	}
+}
+
+func TestService_GetAlbumTracks_DirectoryNotFound(t *testing.T) {
+	mockMPD := &MockMPDClient{
+		ListInfoError: fmt.Errorf("directory not found"),
+	}
+	service := &Service{
+		mpd:        mockMPD,
+		classifier: NewPathClassifier("/var/lib/mpd/music"),
+	}
+
+	resp := service.GetAlbumTracks(GetAlbumTracksRequest{AlbumURI: "INTERNAL/NonExistent"})
+
+	if resp.Error == "" {
+		t.Error("Expected error for non-existent directory")
+	}
+	if resp.AlbumURI != "INTERNAL/NonExistent" {
+		t.Errorf("Expected albumUri 'INTERNAL/NonExistent', got %q", resp.AlbumURI)
+	}
+}
+
+func TestService_GetAlbumTracks_WithTracks(t *testing.T) {
+	mockMPD := &MockMPDClient{
+		ListInfoResponse: map[string][]map[string]string{
+			"INTERNAL/Artist/Album": {
+				{
+					"file":   "INTERNAL/Artist/Album/01-Track1.flac",
+					"Title":  "Track One",
+					"Artist": "Test Artist",
+					"Album":  "Test Album",
+					"Track":  "1",
+					"Time":   "240",
+				},
+				{
+					"file":   "INTERNAL/Artist/Album/02-Track2.flac",
+					"Title":  "Track Two",
+					"Artist": "Test Artist",
+					"Album":  "Test Album",
+					"Track":  "2",
+					"Time":   "180",
+				},
+				{
+					"file":      "INTERNAL/Artist/Album/cover.jpg",
+					"directory": "", // Non-audio file
+				},
+			},
+		},
+	}
+
+	service := &Service{
+		mpd:        mockMPD,
+		classifier: NewPathClassifier("/var/lib/mpd/music"),
+	}
+
+	resp := service.GetAlbumTracks(GetAlbumTracksRequest{AlbumURI: "INTERNAL/Artist/Album"})
+
+	if resp.Error != "" {
+		t.Errorf("Unexpected error: %q", resp.Error)
+	}
+	if len(resp.Tracks) != 2 {
+		t.Errorf("Expected 2 tracks, got %d", len(resp.Tracks))
+	}
+	if resp.TotalCount != 2 {
+		t.Errorf("Expected TotalCount 2, got %d", resp.TotalCount)
+	}
+	if resp.AlbumURI != "INTERNAL/Artist/Album" {
+		t.Errorf("Expected albumUri 'INTERNAL/Artist/Album', got %q", resp.AlbumURI)
+	}
+
+	// Verify tracks are sorted by track number
+	if len(resp.Tracks) >= 2 {
+		if resp.Tracks[0].TrackNumber != 1 {
+			t.Errorf("First track should have TrackNumber 1, got %d", resp.Tracks[0].TrackNumber)
+		}
+		if resp.Tracks[1].TrackNumber != 2 {
+			t.Errorf("Second track should have TrackNumber 2, got %d", resp.Tracks[1].TrackNumber)
+		}
+	}
+
+	// Verify track metadata
+	if len(resp.Tracks) > 0 {
+		track := resp.Tracks[0]
+		if track.Title != "Track One" {
+			t.Errorf("Expected title 'Track One', got %q", track.Title)
+		}
+		if track.Artist != "Test Artist" {
+			t.Errorf("Expected artist 'Test Artist', got %q", track.Artist)
+		}
+		if track.Duration != 240 {
+			t.Errorf("Expected duration 240, got %d", track.Duration)
+		}
+		if track.Source != SourceLocal {
+			t.Errorf("Expected source 'local', got %q", track.Source)
+		}
+	}
+}
+
+func TestService_GetAlbumTracks_TrackNumberFormats(t *testing.T) {
+	mockMPD := &MockMPDClient{
+		ListInfoResponse: map[string][]map[string]string{
+			"USB/Album": {
+				{
+					"file":  "USB/Album/track1.flac",
+					"Title": "Track A",
+					"Track": "3/12", // Track X of Y format
+					"Time":  "200",
+				},
+				{
+					"file":  "USB/Album/track2.flac",
+					"Title": "Track B",
+					"Track": "1", // Simple format
+					"Time":  "150",
+				},
+			},
+		},
+	}
+
+	service := &Service{
+		mpd:        mockMPD,
+		classifier: NewPathClassifier("/var/lib/mpd/music"),
+	}
+
+	resp := service.GetAlbumTracks(GetAlbumTracksRequest{AlbumURI: "USB/Album"})
+
+	if len(resp.Tracks) != 2 {
+		t.Errorf("Expected 2 tracks, got %d", len(resp.Tracks))
+	}
+
+	// Tracks should be sorted by track number (1 before 3)
+	if len(resp.Tracks) >= 2 {
+		if resp.Tracks[0].TrackNumber != 1 {
+			t.Errorf("First track should be track 1, got %d", resp.Tracks[0].TrackNumber)
+		}
+		if resp.Tracks[1].TrackNumber != 3 {
+			t.Errorf("Second track should be track 3, got %d", resp.Tracks[1].TrackNumber)
+		}
+	}
+}
+
+func TestService_GetAlbumTracks_MissingMetadata(t *testing.T) {
+	mockMPD := &MockMPDClient{
+		ListInfoResponse: map[string][]map[string]string{
+			"INTERNAL/Album": {
+				{
+					"file": "INTERNAL/Album/01 - Some Song.flac",
+					// No Title, Artist, Track, or Time metadata
+				},
+			},
+		},
+	}
+
+	service := &Service{
+		mpd:        mockMPD,
+		classifier: NewPathClassifier("/var/lib/mpd/music"),
+	}
+
+	resp := service.GetAlbumTracks(GetAlbumTracksRequest{AlbumURI: "INTERNAL/Album"})
+
+	if len(resp.Tracks) != 1 {
+		t.Errorf("Expected 1 track, got %d", len(resp.Tracks))
+	}
+
+	// Should fallback to filename for title
+	if len(resp.Tracks) > 0 {
+		track := resp.Tracks[0]
+		if track.Title != "01 - Some Song" {
+			t.Errorf("Expected title '01 - Some Song' (from filename), got %q", track.Title)
+		}
+		if track.TrackNumber != 0 {
+			t.Errorf("Expected TrackNumber 0 (missing), got %d", track.TrackNumber)
+		}
+		if track.Duration != 0 {
+			t.Errorf("Expected Duration 0 (missing), got %d", track.Duration)
+		}
+	}
+}
+
+func TestService_GetAlbumTracks_DurationFormats(t *testing.T) {
+	mockMPD := &MockMPDClient{
+		ListInfoResponse: map[string][]map[string]string{
+			"INTERNAL/Album": {
+				{
+					"file":     "INTERNAL/Album/track1.flac",
+					"Title":    "Track with Time",
+					"Time":     "300", // Integer seconds
+					"duration": "",
+				},
+				{
+					"file":     "INTERNAL/Album/track2.flac",
+					"Title":    "Track with duration",
+					"duration": "245.5", // Float seconds
+				},
+			},
+		},
+	}
+
+	service := &Service{
+		mpd:        mockMPD,
+		classifier: NewPathClassifier("/var/lib/mpd/music"),
+	}
+
+	resp := service.GetAlbumTracks(GetAlbumTracksRequest{AlbumURI: "INTERNAL/Album"})
+
+	if len(resp.Tracks) != 2 {
+		t.Errorf("Expected 2 tracks, got %d", len(resp.Tracks))
+	}
+
+	// Check Time format parsing
+	if len(resp.Tracks) > 0 && resp.Tracks[0].Duration != 300 {
+		t.Errorf("Expected duration 300 from Time field, got %d", resp.Tracks[0].Duration)
+	}
+
+	// Check duration format parsing (float truncated to int)
+	if len(resp.Tracks) > 1 && resp.Tracks[1].Duration != 245 {
+		t.Errorf("Expected duration 245 from duration field, got %d", resp.Tracks[1].Duration)
+	}
+}
+
+func TestService_GetAlbumTracks_USBSource(t *testing.T) {
+	mockMPD := &MockMPDClient{
+		ListInfoResponse: map[string][]map[string]string{
+			"USB/Drive/Album": {
+				{
+					"file":  "USB/Drive/Album/track.flac",
+					"Title": "USB Track",
+				},
+			},
+		},
+	}
+
+	service := &Service{
+		mpd:        mockMPD,
+		classifier: NewPathClassifier("/var/lib/mpd/music"),
+	}
+
+	resp := service.GetAlbumTracks(GetAlbumTracksRequest{AlbumURI: "USB/Drive/Album"})
+
+	if len(resp.Tracks) != 1 {
+		t.Errorf("Expected 1 track, got %d", len(resp.Tracks))
+	}
+
+	if len(resp.Tracks) > 0 && resp.Tracks[0].Source != SourceUSB {
+		t.Errorf("Expected source 'usb', got %q", resp.Tracks[0].Source)
+	}
+}
+
+func TestService_GetAlbumTracks_AlbumArt(t *testing.T) {
+	mockMPD := &MockMPDClient{
+		ListInfoResponse: map[string][]map[string]string{
+			"INTERNAL/Album": {
+				{
+					"file":  "INTERNAL/Album/track.flac",
+					"Title": "Track",
+				},
+			},
+		},
+	}
+
+	service := &Service{
+		mpd:        mockMPD,
+		classifier: NewPathClassifier("/var/lib/mpd/music"),
+	}
+
+	resp := service.GetAlbumTracks(GetAlbumTracksRequest{AlbumURI: "INTERNAL/Album"})
+
+	if len(resp.Tracks) > 0 {
+		expectedArt := "/albumart?path=INTERNAL/Album/track.flac"
+		if resp.Tracks[0].AlbumArt != expectedArt {
+			t.Errorf("Expected albumArt %q, got %q", expectedArt, resp.Tracks[0].AlbumArt)
+		}
 	}
 }
