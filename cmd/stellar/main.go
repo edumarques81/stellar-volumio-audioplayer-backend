@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"syscall"
@@ -19,6 +20,7 @@ import (
 	"github.com/rs/zerolog/log"
 
 	"github.com/edumarques81/stellar-volumio-audioplayer-backend/internal/domain/player"
+	"github.com/edumarques81/stellar-volumio-audioplayer-backend/internal/domain/sources"
 	"github.com/edumarques81/stellar-volumio-audioplayer-backend/internal/infra/mpd"
 	"github.com/edumarques81/stellar-volumio-audioplayer-backend/internal/transport/socketio"
 	"github.com/edumarques81/stellar-volumio-audioplayer-backend/internal/version"
@@ -82,8 +84,18 @@ func main() {
 	// Create services
 	playerService := player.NewService(mpdClient)
 
+	// Create sources service for NAS/USB management
+	sourcesConfigPath := filepath.Join("/data/stellar", "sources.json")
+	sourcesService, err := sources.NewService(sourcesConfigPath, sources.NewLinuxMounter())
+	if err != nil {
+		log.Warn().Err(err).Msg("Failed to create sources service - NAS/USB management disabled")
+		sourcesService = nil
+	} else {
+		log.Info().Str("config", sourcesConfigPath).Msg("Sources service initialized")
+	}
+
 	// Create Socket.io server
-	socketServer, err := socketio.NewServer(playerService, mpdClient, *bitPerfect)
+	socketServer, err := socketio.NewServer(playerService, mpdClient, sourcesService, *bitPerfect)
 	if err != nil {
 		log.Fatal().Err(err).Msg("Failed to create Socket.io server")
 	}

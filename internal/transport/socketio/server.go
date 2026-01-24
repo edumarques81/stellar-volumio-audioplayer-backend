@@ -19,6 +19,7 @@ import (
 
 	"github.com/edumarques81/stellar-volumio-audioplayer-backend/internal/audio"
 	"github.com/edumarques81/stellar-volumio-audioplayer-backend/internal/domain/player"
+	"github.com/edumarques81/stellar-volumio-audioplayer-backend/internal/domain/sources"
 	mpdclient "github.com/edumarques81/stellar-volumio-audioplayer-backend/internal/infra/mpd"
 	"github.com/edumarques81/stellar-volumio-audioplayer-backend/internal/version"
 )
@@ -56,6 +57,7 @@ type Server struct {
 	playerService   *player.Service
 	mpdClient       *mpdclient.Client
 	audioController *audio.Controller
+	sourcesService  *sources.Service
 	mu              sync.RWMutex
 	clients         map[string]*socket.Socket
 	lastNetwork     NetworkStatus
@@ -63,7 +65,7 @@ type Server struct {
 
 // NewServer creates a new Socket.io server.
 // bitPerfect indicates whether the system is configured for bit-perfect audio output.
-func NewServer(playerService *player.Service, mpdClient *mpdclient.Client, bitPerfect bool) (*Server, error) {
+func NewServer(playerService *player.Service, mpdClient *mpdclient.Client, sourcesService *sources.Service, bitPerfect bool) (*Server, error) {
 	// Configure Socket.io server options
 	opts := socket.DefaultServerOptions()
 	opts.SetPingTimeout(20 * time.Second)
@@ -80,6 +82,7 @@ func NewServer(playerService *player.Service, mpdClient *mpdclient.Client, bitPe
 		playerService:   playerService,
 		mpdClient:       mpdClient,
 		audioController: audio.NewController(bitPerfect),
+		sourcesService:  sourcesService,
 		clients:         make(map[string]*socket.Socket),
 	}
 
@@ -399,7 +402,250 @@ func (s *Server) setupHandlers() {
 				}
 			}
 		})
+
+		// ============================================================
+		// Music Sources (NAS) Events
+		// ============================================================
+
+		// List all configured NAS shares
+		client.On("getListNasShares", func(args ...any) {
+			log.Info().Str("id", clientID).Msg("getListNasShares requested")
+			if s.sourcesService == nil {
+				client.Emit("pushListNasShares", []sources.NasShare{})
+				return
+			}
+			shares, err := s.sourcesService.ListNasShares()
+			if err != nil {
+				log.Error().Err(err).Msg("Failed to list NAS shares")
+				client.Emit("pushListNasShares", []sources.NasShare{})
+				return
+			}
+			log.Info().Int("count", len(shares)).Msg("pushListNasShares")
+			client.Emit("pushListNasShares", shares)
+		})
+
+		// Add a new NAS share
+		client.On("addNasShare", func(args ...any) {
+			log.Info().Str("id", clientID).Interface("args", args).Msg("addNasShare requested")
+			if s.sourcesService == nil {
+				client.Emit("pushNasShareResult", sources.SourceResult{
+					Success: false,
+					Error:   "sources service not available",
+				})
+				return
+			}
+
+			if len(args) == 0 {
+				client.Emit("pushNasShareResult", sources.SourceResult{
+					Success: false,
+					Error:   "missing share data",
+				})
+				return
+			}
+
+			// Parse the request
+			data, ok := args[0].(map[string]interface{})
+			if !ok {
+				client.Emit("pushNasShareResult", sources.SourceResult{
+					Success: false,
+					Error:   "invalid share data format",
+				})
+				return
+			}
+
+			req := sources.AddNasShareRequest{
+				Name:     getString(data, "name"),
+				IP:       getString(data, "ip"),
+				Path:     getString(data, "path"),
+				FSType:   getString(data, "fstype"),
+				Username: getString(data, "username"),
+				Password: getString(data, "password"),
+				Options:  getString(data, "options"),
+			}
+
+			result, err := s.sourcesService.AddNasShare(req)
+			if err != nil {
+				log.Error().Err(err).Msg("Failed to add NAS share")
+				client.Emit("pushNasShareResult", sources.SourceResult{
+					Success: false,
+					Error:   err.Error(),
+				})
+				return
+			}
+
+			log.Info().Bool("success", result.Success).Msg("pushNasShareResult")
+			client.Emit("pushNasShareResult", result)
+
+			// Also push updated list to all clients
+			if result.Success {
+				shares, _ := s.sourcesService.ListNasShares()
+				s.io.Emit("pushListNasShares", shares)
+				// Trigger MPD database update
+				exec.Command("mpc", "update").Run()
+			}
+		})
+
+		// Delete a NAS share
+		client.On("deleteNasShare", func(args ...any) {
+			log.Info().Str("id", clientID).Interface("args", args).Msg("deleteNasShare requested")
+			if s.sourcesService == nil {
+				client.Emit("pushNasShareResult", sources.SourceResult{
+					Success: false,
+					Error:   "sources service not available",
+				})
+				return
+			}
+
+			if len(args) == 0 {
+				client.Emit("pushNasShareResult", sources.SourceResult{
+					Success: false,
+					Error:   "missing share ID",
+				})
+				return
+			}
+
+			var shareID string
+			if data, ok := args[0].(map[string]interface{}); ok {
+				shareID = getString(data, "id")
+			} else if id, ok := args[0].(string); ok {
+				shareID = id
+			}
+
+			if shareID == "" {
+				client.Emit("pushNasShareResult", sources.SourceResult{
+					Success: false,
+					Error:   "invalid share ID",
+				})
+				return
+			}
+
+			result, err := s.sourcesService.DeleteNasShare(shareID)
+			if err != nil {
+				log.Error().Err(err).Msg("Failed to delete NAS share")
+				client.Emit("pushNasShareResult", sources.SourceResult{
+					Success: false,
+					Error:   err.Error(),
+				})
+				return
+			}
+
+			log.Info().Bool("success", result.Success).Msg("pushNasShareResult")
+			client.Emit("pushNasShareResult", result)
+
+			// Also push updated list to all clients
+			if result.Success {
+				shares, _ := s.sourcesService.ListNasShares()
+				s.io.Emit("pushListNasShares", shares)
+			}
+		})
+
+		// Mount a NAS share
+		client.On("mountNasShare", func(args ...any) {
+			log.Info().Str("id", clientID).Interface("args", args).Msg("mountNasShare requested")
+			if s.sourcesService == nil {
+				client.Emit("pushNasShareResult", sources.SourceResult{
+					Success: false,
+					Error:   "sources service not available",
+				})
+				return
+			}
+
+			var shareID string
+			if len(args) > 0 {
+				if data, ok := args[0].(map[string]interface{}); ok {
+					shareID = getString(data, "id")
+				} else if id, ok := args[0].(string); ok {
+					shareID = id
+				}
+			}
+
+			if shareID == "" {
+				client.Emit("pushNasShareResult", sources.SourceResult{
+					Success: false,
+					Error:   "missing share ID",
+				})
+				return
+			}
+
+			result, err := s.sourcesService.MountNasShare(shareID)
+			if err != nil {
+				log.Error().Err(err).Msg("Failed to mount NAS share")
+				client.Emit("pushNasShareResult", sources.SourceResult{
+					Success: false,
+					Error:   err.Error(),
+				})
+				return
+			}
+
+			log.Info().Bool("success", result.Success).Msg("pushNasShareResult")
+			client.Emit("pushNasShareResult", result)
+
+			// Push updated list and trigger MPD update
+			if result.Success {
+				shares, _ := s.sourcesService.ListNasShares()
+				s.io.Emit("pushListNasShares", shares)
+				exec.Command("mpc", "update").Run()
+			}
+		})
+
+		// Unmount a NAS share
+		client.On("unmountNasShare", func(args ...any) {
+			log.Info().Str("id", clientID).Interface("args", args).Msg("unmountNasShare requested")
+			if s.sourcesService == nil {
+				client.Emit("pushNasShareResult", sources.SourceResult{
+					Success: false,
+					Error:   "sources service not available",
+				})
+				return
+			}
+
+			var shareID string
+			if len(args) > 0 {
+				if data, ok := args[0].(map[string]interface{}); ok {
+					shareID = getString(data, "id")
+				} else if id, ok := args[0].(string); ok {
+					shareID = id
+				}
+			}
+
+			if shareID == "" {
+				client.Emit("pushNasShareResult", sources.SourceResult{
+					Success: false,
+					Error:   "missing share ID",
+				})
+				return
+			}
+
+			result, err := s.sourcesService.UnmountNasShare(shareID)
+			if err != nil {
+				log.Error().Err(err).Msg("Failed to unmount NAS share")
+				client.Emit("pushNasShareResult", sources.SourceResult{
+					Success: false,
+					Error:   err.Error(),
+				})
+				return
+			}
+
+			log.Info().Bool("success", result.Success).Msg("pushNasShareResult")
+			client.Emit("pushNasShareResult", result)
+
+			// Push updated list
+			if result.Success {
+				shares, _ := s.sourcesService.ListNasShares()
+				s.io.Emit("pushListNasShares", shares)
+			}
+		})
 	})
+}
+
+// getString safely extracts a string from a map.
+func getString(m map[string]interface{}, key string) string {
+	if v, ok := m[key]; ok {
+		if s, ok := v.(string); ok {
+			return s
+		}
+	}
+	return ""
 }
 
 // pushState sends current state to a client.
