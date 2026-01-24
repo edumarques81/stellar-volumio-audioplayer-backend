@@ -16,9 +16,11 @@ import (
 	"syscall"
 	"time"
 
+	gompd "github.com/fhs/gompd/v2/mpd"
 	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
 
+	"github.com/edumarques81/stellar-volumio-audioplayer-backend/internal/domain/localmusic"
 	"github.com/edumarques81/stellar-volumio-audioplayer-backend/internal/domain/player"
 	"github.com/edumarques81/stellar-volumio-audioplayer-backend/internal/domain/sources"
 	"github.com/edumarques81/stellar-volumio-audioplayer-backend/internal/infra/mpd"
@@ -125,8 +127,18 @@ func main() {
 		}
 	}
 
+	// Create local music service for local-only browsing and history
+	localMusicDataDir := filepath.Join("/data/stellar")
+	mpdMusicDir := "/var/lib/mpd/music"
+	mpdAdapter := &mpdClientAdapter{client: mpdClient}
+	localMusicService := localmusic.NewService(mpdAdapter, localMusicDataDir, mpdMusicDir)
+	log.Info().
+		Str("dataDir", localMusicDataDir).
+		Str("mpdMusicDir", mpdMusicDir).
+		Msg("Local music service initialized")
+
 	// Create Socket.io server
-	socketServer, err := socketio.NewServer(playerService, mpdClient, sourcesService, *bitPerfect)
+	socketServer, err := socketio.NewServer(playerService, mpdClient, sourcesService, localMusicService, *bitPerfect)
 	if err != nil {
 		log.Fatal().Err(err).Msg("Failed to create Socket.io server")
 	}
@@ -463,4 +475,39 @@ func getWifiInfo(iface string) (string, int) {
 	}
 
 	return ssid, signal
+}
+
+// mpdClientAdapter adapts the MPD client to the localmusic.MPDClient interface.
+// This is needed because gompd uses mpd.Attrs (a type alias) instead of map[string]string.
+type mpdClientAdapter struct {
+	client *mpd.Client
+}
+
+func (a *mpdClientAdapter) ListInfo(uri string) ([]map[string]string, error) {
+	attrs, err := a.client.ListInfo(uri)
+	if err != nil {
+		return nil, err
+	}
+	return attrsToMaps(attrs), nil
+}
+
+func (a *mpdClientAdapter) ListAllInfo(uri string) ([]map[string]string, error) {
+	attrs, err := a.client.ListAllInfo(uri)
+	if err != nil {
+		return nil, err
+	}
+	return attrsToMaps(attrs), nil
+}
+
+// attrsToMaps converts gompd Attrs slice to map slice.
+func attrsToMaps(attrs []gompd.Attrs) []map[string]string {
+	result := make([]map[string]string, len(attrs))
+	for i, attr := range attrs {
+		m := make(map[string]string, len(attr))
+		for k, v := range attr {
+			m[k] = v
+		}
+		result[i] = m
+	}
+	return result
 }

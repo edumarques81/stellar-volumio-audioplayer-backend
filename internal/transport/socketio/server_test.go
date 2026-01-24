@@ -13,7 +13,7 @@ func TestNewServer(t *testing.T) {
 	mpdClient := mpd.NewClient("localhost", 6600, "")
 	playerService := player.NewService(mpdClient)
 
-	server, err := socketio.NewServer(playerService, mpdClient, nil, true)
+	server, err := socketio.NewServer(playerService, mpdClient, nil, nil, true)
 	if err != nil {
 		t.Errorf("NewServer should not return error: %v", err)
 	}
@@ -28,7 +28,7 @@ func TestServerServeHTTP(t *testing.T) {
 	mpdClient := mpd.NewClient("localhost", 6600, "")
 	playerService := player.NewService(mpdClient)
 
-	server, err := socketio.NewServer(playerService, mpdClient, nil, true)
+	server, err := socketio.NewServer(playerService, mpdClient, nil, nil, true)
 	if err != nil {
 		t.Fatalf("NewServer failed: %v", err)
 	}
@@ -50,7 +50,7 @@ func TestServerBroadcastStateWithoutClients(t *testing.T) {
 	mpdClient := mpd.NewClient("localhost", 6600, "")
 	playerService := player.NewService(mpdClient)
 
-	server, err := socketio.NewServer(playerService, mpdClient, nil, true)
+	server, err := socketio.NewServer(playerService, mpdClient, nil, nil, true)
 	if err != nil {
 		t.Fatalf("NewServer failed: %v", err)
 	}
@@ -66,7 +66,7 @@ func TestServerBroadcastQueueWithoutClients(t *testing.T) {
 	mpdClient := mpd.NewClient("localhost", 6600, "")
 	playerService := player.NewService(mpdClient)
 
-	server, err := socketio.NewServer(playerService, mpdClient, nil, true)
+	server, err := socketio.NewServer(playerService, mpdClient, nil, nil, true)
 	if err != nil {
 		t.Fatalf("NewServer failed: %v", err)
 	}
@@ -81,7 +81,7 @@ func TestServerBroadcastNetworkStatusWithoutClients(t *testing.T) {
 	mpdClient := mpd.NewClient("localhost", 6600, "")
 	playerService := player.NewService(mpdClient)
 
-	server, err := socketio.NewServer(playerService, mpdClient, nil, true)
+	server, err := socketio.NewServer(playerService, mpdClient, nil, nil, true)
 	if err != nil {
 		t.Fatalf("NewServer failed: %v", err)
 	}
@@ -96,7 +96,7 @@ func TestServerBroadcastLCDStatusWithoutClients(t *testing.T) {
 	mpdClient := mpd.NewClient("localhost", 6600, "")
 	playerService := player.NewService(mpdClient)
 
-	server, err := socketio.NewServer(playerService, mpdClient, nil, true)
+	server, err := socketio.NewServer(playerService, mpdClient, nil, nil, true)
 	if err != nil {
 		t.Fatalf("NewServer failed: %v", err)
 	}

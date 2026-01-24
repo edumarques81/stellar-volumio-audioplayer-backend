@@ -18,6 +18,7 @@ import (
 	"github.com/zishang520/socket.io/v3/pkg/types"
 
 	"github.com/edumarques81/stellar-volumio-audioplayer-backend/internal/audio"
+	"github.com/edumarques81/stellar-volumio-audioplayer-backend/internal/domain/localmusic"
 	"github.com/edumarques81/stellar-volumio-audioplayer-backend/internal/domain/player"
 	"github.com/edumarques81/stellar-volumio-audioplayer-backend/internal/domain/sources"
 	"github.com/edumarques81/stellar-volumio-audioplayer-backend/internal/domain/streaming/qobuz"
@@ -54,20 +55,21 @@ type SystemInfo struct {
 
 // Server handles Socket.io connections and events.
 type Server struct {
-	io              *socket.Server
-	playerService   *player.Service
-	mpdClient       *mpdclient.Client
-	audioController *audio.Controller
-	sourcesService  *sources.Service
-	qobuzService    *qobuz.Service
-	mu              sync.RWMutex
-	clients         map[string]*socket.Socket
-	lastNetwork     NetworkStatus
+	io                *socket.Server
+	playerService     *player.Service
+	mpdClient         *mpdclient.Client
+	audioController   *audio.Controller
+	sourcesService    *sources.Service
+	qobuzService      *qobuz.Service
+	localMusicService *localmusic.Service
+	mu                sync.RWMutex
+	clients           map[string]*socket.Socket
+	lastNetwork       NetworkStatus
 }
 
 // NewServer creates a new Socket.io server.
 // bitPerfect indicates whether the system is configured for bit-perfect audio output.
-func NewServer(playerService *player.Service, mpdClient *mpdclient.Client, sourcesService *sources.Service, bitPerfect bool) (*Server, error) {
+func NewServer(playerService *player.Service, mpdClient *mpdclient.Client, sourcesService *sources.Service, localMusicSvc *localmusic.Service, bitPerfect bool) (*Server, error) {
 	// Configure Socket.io server options
 	opts := socket.DefaultServerOptions()
 	opts.SetPingTimeout(20 * time.Second)
@@ -87,13 +89,14 @@ func NewServer(playerService *player.Service, mpdClient *mpdclient.Client, sourc
 	}
 
 	s := &Server{
-		io:              server,
-		playerService:   playerService,
-		mpdClient:       mpdClient,
-		audioController: audio.NewController(bitPerfect),
-		sourcesService:  sourcesService,
-		qobuzService:    qobuzSvc,
-		clients:         make(map[string]*socket.Socket),
+		io:                server,
+		playerService:     playerService,
+		mpdClient:         mpdClient,
+		audioController:   audio.NewController(bitPerfect),
+		sourcesService:    sourcesService,
+		qobuzService:      qobuzSvc,
+		localMusicService: localMusicSvc,
+		clients:           make(map[string]*socket.Socket),
 	}
 
 	s.setupHandlers()
@@ -348,6 +351,31 @@ func (s *Server) setupHandlers() {
 					if uri, ok := m["uri"].(string); ok {
 						if err := s.playerService.ReplaceAndPlay(uri); err != nil {
 							log.Error().Err(err).Msg("ReplaceAndPlay failed")
+							return
+						}
+
+						// Record play history for local sources
+						if s.localMusicService != nil && s.localMusicService.IsLocalSource(uri) {
+							title := getString(m, "title")
+							artist := getString(m, "artist")
+							album := getString(m, "album")
+							albumArt := getString(m, "albumart")
+							if albumArt == "" {
+								albumArt = getString(m, "albumArt")
+							}
+
+							// Determine play origin - default to manual track
+							origin := localmusic.PlayOriginManualTrack
+							if originStr := getString(m, "origin"); originStr != "" {
+								switch originStr {
+								case "album_context":
+									origin = localmusic.PlayOriginAlbumContext
+								case "queue":
+									origin = localmusic.PlayOriginQueue
+								}
+							}
+
+							s.localMusicService.RecordTrackPlay(uri, title, artist, album, albumArt, origin)
 						}
 					}
 				}
@@ -957,6 +985,160 @@ func (s *Server) setupHandlers() {
 
 			log.Info().Str("query", query).Msg("pushQobuzSearchResult")
 			client.Emit("pushQobuzSearchResult", result)
+		})
+
+		// ============================================================
+		// Local Music Events (Local + USB only, excludes NAS/Streaming)
+		// ============================================================
+
+		// Get local albums (local disk + USB only)
+		client.On("getLocalAlbums", func(args ...any) {
+			log.Info().Str("id", clientID).Interface("args", args).Msg("getLocalAlbums requested")
+			if s.localMusicService == nil {
+				client.Emit("pushLocalAlbums", map[string]interface{}{
+					"albums":      []interface{}{},
+					"totalCount":  0,
+					"filteredOut": 0,
+					"error":       "local music service not available",
+				})
+				return
+			}
+
+			// Parse request parameters
+			req := localmusic.GetLocalAlbumsRequest{
+				Sort:  localmusic.AlbumSortAlphabetical,
+				Limit: 0, // No limit by default
+			}
+
+			if len(args) > 0 {
+				if data, ok := args[0].(map[string]interface{}); ok {
+					if sort, ok := data["sort"].(string); ok {
+						req.Sort = localmusic.AlbumSortOrder(sort)
+					}
+					if query, ok := data["query"].(string); ok {
+						req.Query = query
+					}
+					if limit, ok := data["limit"].(float64); ok {
+						req.Limit = int(limit)
+					}
+				}
+			}
+
+			resp := s.localMusicService.GetLocalAlbums(req)
+			log.Info().
+				Int("albumCount", len(resp.Albums)).
+				Int("filteredOut", resp.FilteredOut).
+				Str("sort", string(req.Sort)).
+				Msg("pushLocalAlbums")
+			client.Emit("pushLocalAlbums", resp)
+		})
+
+		// Get last played tracks (local sources + manual plays only)
+		client.On("getLastPlayedTracks", func(args ...any) {
+			log.Info().Str("id", clientID).Interface("args", args).Msg("getLastPlayedTracks requested")
+			if s.localMusicService == nil {
+				client.Emit("pushLastPlayedTracks", map[string]interface{}{
+					"tracks":     []interface{}{},
+					"totalCount": 0,
+					"error":      "local music service not available",
+				})
+				return
+			}
+
+			// Parse request parameters
+			req := localmusic.GetLastPlayedRequest{
+				Sort:  localmusic.TrackSortLastPlayed,
+				Limit: 50,
+			}
+
+			if len(args) > 0 {
+				if data, ok := args[0].(map[string]interface{}); ok {
+					if sort, ok := data["sort"].(string); ok {
+						req.Sort = localmusic.TrackSortOrder(sort)
+					}
+					if limit, ok := data["limit"].(float64); ok {
+						req.Limit = int(limit)
+					}
+				}
+			}
+
+			resp := s.localMusicService.GetLastPlayedTracks(req)
+			log.Info().
+				Int("trackCount", len(resp.Tracks)).
+				Str("sort", string(req.Sort)).
+				Msg("pushLastPlayedTracks")
+			client.Emit("pushLastPlayedTracks", resp)
+		})
+
+		// Record a manual track play (for history tracking)
+		client.On("recordTrackPlay", func(args ...any) {
+			log.Debug().Str("id", clientID).Interface("args", args).Msg("recordTrackPlay requested")
+			if s.localMusicService == nil {
+				return
+			}
+
+			if len(args) == 0 {
+				return
+			}
+
+			data, ok := args[0].(map[string]interface{})
+			if !ok {
+				return
+			}
+
+			uri := getString(data, "uri")
+			if uri == "" {
+				return
+			}
+
+			title := getString(data, "title")
+			artist := getString(data, "artist")
+			album := getString(data, "album")
+			albumArt := getString(data, "albumArt")
+			originStr := getString(data, "origin")
+
+			origin := localmusic.PlayOriginManualTrack
+			switch originStr {
+			case "album_context":
+				origin = localmusic.PlayOriginAlbumContext
+			case "autoplay_next":
+				origin = localmusic.PlayOriginAutoplayNext
+			case "queue":
+				origin = localmusic.PlayOriginQueue
+			}
+
+			s.localMusicService.RecordTrackPlay(uri, title, artist, album, albumArt, origin)
+			log.Debug().
+				Str("uri", uri).
+				Str("origin", string(origin)).
+				Msg("Track play recorded")
+		})
+
+		// Get history statistics
+		client.On("getHistoryStats", func(args ...any) {
+			log.Debug().Str("id", clientID).Msg("getHistoryStats requested")
+			if s.localMusicService == nil {
+				client.Emit("pushHistoryStats", map[string]interface{}{
+					"error": "local music service not available",
+				})
+				return
+			}
+
+			stats := s.localMusicService.GetHistoryStats()
+			client.Emit("pushHistoryStats", stats)
+		})
+
+		// Clear history
+		client.On("clearHistory", func(args ...any) {
+			log.Info().Str("id", clientID).Msg("clearHistory requested")
+			if s.localMusicService == nil {
+				return
+			}
+
+			s.localMusicService.ClearHistory()
+			client.Emit("pushHistoryCleared", map[string]interface{}{
+				"success": true,
+			})
 		})
 	})
 }
