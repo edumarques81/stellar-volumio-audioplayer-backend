@@ -78,6 +78,9 @@ func NewServer(playerService *player.Service, mpdClient *mpdclient.Client, sourc
 		Origin:      "*",
 		Credentials: true,
 	})
+	// Enable Engine.IO v3 protocol compatibility for Volumio Connect apps
+	// which use Socket.IO v2.x clients (Engine.IO v3 protocol)
+	opts.SetAllowEIO3(true)
 
 	server := socket.NewServer(nil, opts)
 
