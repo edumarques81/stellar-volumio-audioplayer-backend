@@ -19,6 +19,7 @@ import (
 	"github.com/zishang520/socket.io/v3/pkg/types"
 
 	"github.com/edumarques81/stellar-volumio-audioplayer-backend/internal/audio"
+	"github.com/edumarques81/stellar-volumio-audioplayer-backend/internal/domain/audirvana"
 	"github.com/edumarques81/stellar-volumio-audioplayer-backend/internal/domain/localmusic"
 	"github.com/edumarques81/stellar-volumio-audioplayer-backend/internal/domain/player"
 	"github.com/edumarques81/stellar-volumio-audioplayer-backend/internal/domain/sources"
@@ -63,6 +64,7 @@ type Server struct {
 	sourcesService    *sources.Service
 	qobuzService      *qobuz.Service
 	localMusicService *localmusic.Service
+	audirvanaService  *audirvana.Service
 	mu                sync.RWMutex
 	clients           map[string]*socket.Socket
 	lastNetwork       NetworkStatus
@@ -100,6 +102,7 @@ func NewServer(playerService *player.Service, mpdClient *mpdclient.Client, sourc
 		sourcesService:    sourcesService,
 		qobuzService:      qobuzSvc,
 		localMusicService: localMusicSvc,
+		audirvanaService:  audirvana.NewService(),
 		clients:           make(map[string]*socket.Socket),
 	}
 
@@ -1209,6 +1212,89 @@ func (s *Server) setupHandlers() {
 			client.Emit("pushHistoryCleared", map[string]interface{}{
 				"success": true,
 			})
+		})
+
+		// ============================================================
+		// Audirvana Integration Events
+		// ============================================================
+
+		// Get Audirvana status (detection and discovery)
+		client.On("getAudirvanaStatus", func(args ...any) {
+			log.Info().Str("id", clientID).Msg("getAudirvanaStatus requested")
+			if s.audirvanaService == nil {
+				client.Emit("pushAudirvanaStatus", audirvana.Status{
+					Installed: false,
+					Service: audirvana.ServiceStatus{
+						Loaded:  false,
+						Enabled: false,
+						Active:  false,
+						Running: false,
+					},
+					Instances: []audirvana.Instance{},
+					Error:     "audirvana service not available",
+				})
+				return
+			}
+
+			status := s.audirvanaService.GetStatus()
+			log.Info().
+				Bool("installed", status.Installed).
+				Bool("running", status.Service.Running).
+				Int("instances", len(status.Instances)).
+				Msg("pushAudirvanaStatus")
+			client.Emit("pushAudirvanaStatus", status)
+		})
+
+		// Start Audirvana service
+		client.On("audirvanaStartService", func(args ...any) {
+			log.Info().Str("id", clientID).Msg("audirvanaStartService requested")
+			if s.audirvanaService == nil {
+				client.Emit("pushAudirvanaStatus", audirvana.Status{
+					Error: "audirvana service not available",
+				})
+				return
+			}
+
+			if err := s.audirvanaService.StartService(); err != nil {
+				log.Error().Err(err).Msg("Failed to start Audirvana service")
+				client.Emit("pushAudirvanaStatus", audirvana.Status{
+					Error: "Failed to start service: " + err.Error(),
+				})
+				return
+			}
+
+			// Wait a moment for service to start, then get status
+			time.Sleep(2 * time.Second)
+			status := s.audirvanaService.GetStatus()
+			client.Emit("pushAudirvanaStatus", status)
+			// Broadcast to all clients
+			s.io.Emit("pushAudirvanaStatus", status)
+		})
+
+		// Stop Audirvana service
+		client.On("audirvanaStopService", func(args ...any) {
+			log.Info().Str("id", clientID).Msg("audirvanaStopService requested")
+			if s.audirvanaService == nil {
+				client.Emit("pushAudirvanaStatus", audirvana.Status{
+					Error: "audirvana service not available",
+				})
+				return
+			}
+
+			if err := s.audirvanaService.StopService(); err != nil {
+				log.Error().Err(err).Msg("Failed to stop Audirvana service")
+				client.Emit("pushAudirvanaStatus", audirvana.Status{
+					Error: "Failed to stop service: " + err.Error(),
+				})
+				return
+			}
+
+			// Wait a moment for service to stop, then get status
+			time.Sleep(1 * time.Second)
+			status := s.audirvanaService.GetStatus()
+			client.Emit("pushAudirvanaStatus", status)
+			// Broadcast to all clients
+			s.io.Emit("pushAudirvanaStatus", status)
 		})
 	})
 }
