@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -504,6 +505,41 @@ func (s *Server) setupHandlers() {
 					}
 				}
 			}
+		})
+
+		// Mixer mode events
+		client.On("getMixerMode", func(args ...any) {
+			log.Info().Str("id", clientID).Msg("getMixerMode requested")
+			mode := GetMixerMode()
+			log.Info().Bool("enabled", mode.Enabled).Msg("pushMixerMode")
+			client.Emit("pushMixerMode", mode)
+		})
+
+		client.On("setMixerMode", func(args ...any) {
+			log.Info().Str("id", clientID).Interface("args", args).Msg("setMixerMode requested")
+			if len(args) > 0 {
+				if m, ok := args[0].(map[string]interface{}); ok {
+					if enabled, ok := m["enabled"].(bool); ok {
+						result := SetMixerMode(enabled)
+						log.Info().Bool("success", result.Success).Bool("enabled", result.Enabled).Msg("pushMixerMode")
+						client.Emit("pushMixerMode", result)
+						// Broadcast to all clients
+						s.io.Emit("pushMixerMode", result)
+					}
+				}
+			}
+		})
+
+		// Apply all bit-perfect settings
+		client.On("applyBitPerfect", func(args ...any) {
+			log.Info().Str("id", clientID).Msg("applyBitPerfect requested")
+			result := ApplyBitPerfect()
+			log.Info().Bool("success", result.Success).Strs("applied", result.Applied).Msg("pushApplyBitPerfect")
+			client.Emit("pushApplyBitPerfect", result)
+			// Refresh bit-perfect status for all clients
+			s.io.Emit("pushBitPerfect", GetBitPerfectStatus())
+			// Refresh mixer mode for all clients
+			s.io.Emit("pushMixerMode", GetMixerMode())
 		})
 
 		// ============================================================
@@ -1885,12 +1921,12 @@ func SetPlaybackSettings(deviceName string) error {
 
 	// Write updated config
 	newContent := strings.Join(newLines, "\n")
-	if err := os.WriteFile("/etc/mpd.conf", []byte(newContent), 0644); err != nil {
+	if err := writeMPDConfig(newContent); err != nil {
 		return err
 	}
 
 	// Restart MPD to apply changes
-	cmd := exec.Command("systemctl", "restart", "mpd")
+	cmd := exec.Command("sudo", "systemctl", "restart", "mpd")
 	if err := cmd.Run(); err != nil {
 		log.Error().Err(err).Msg("Failed to restart MPD after changing audio output")
 		return err
@@ -2111,6 +2147,17 @@ func NormalizeBitPerfectStatus(status BitPerfectStatus) BitPerfectStatus {
 	return status
 }
 
+// writeMPDConfig writes the MPD config file using sudo to handle permissions.
+func writeMPDConfig(content string) error {
+	cmd := exec.Command("sudo", "tee", "/etc/mpd.conf")
+	cmd.Stdin = strings.NewReader(content)
+	cmd.Stdout = nil // Suppress stdout (tee echoes input)
+	if err := cmd.Run(); err != nil {
+		return err
+	}
+	return nil
+}
+
 // DsdModeResponse represents the DSD playback mode.
 type DsdModeResponse struct {
 	Mode    string `json:"mode"`    // "native" or "dop"
@@ -2189,14 +2236,14 @@ func SetDsdMode(mode string) DsdModeResponse {
 	}
 
 	// Write updated config
-	if err := os.WriteFile("/etc/mpd.conf", []byte(newContent), 0644); err != nil {
+	if err := writeMPDConfig(newContent); err != nil {
 		log.Error().Err(err).Msg("Failed to write MPD config")
 		response.Error = "Failed to write MPD config: " + err.Error()
 		return response
 	}
 
 	// Restart MPD
-	cmd := exec.Command("systemctl", "restart", "mpd")
+	cmd := exec.Command("sudo", "systemctl", "restart", "mpd")
 	if err := cmd.Run(); err != nil {
 		log.Error().Err(err).Msg("Failed to restart MPD")
 		response.Error = "Config updated but failed to restart MPD: " + err.Error()
@@ -2204,6 +2251,201 @@ func SetDsdMode(mode string) DsdModeResponse {
 	}
 
 	log.Info().Str("mode", mode).Msg("DSD mode changed successfully")
+	response.Success = true
+	return response
+}
+
+// MixerModeResponse represents the mixer configuration.
+type MixerModeResponse struct {
+	Enabled bool   `json:"enabled"` // true if software mixer enabled
+	Success bool   `json:"success"`
+	Error   string `json:"error,omitempty"`
+}
+
+// GetMixerMode returns whether software mixer is enabled.
+func GetMixerMode() MixerModeResponse {
+	response := MixerModeResponse{
+		Enabled: false, // Default to disabled (bit-perfect)
+		Success: true,
+	}
+
+	// Read MPD config to check mixer_type setting
+	data, err := os.ReadFile("/etc/mpd.conf")
+	if err != nil {
+		log.Error().Err(err).Msg("Failed to read MPD config")
+		response.Error = "Failed to read MPD config"
+		response.Success = false
+		return response
+	}
+
+	content := string(data)
+	// Check if mixer_type is "software" (enabled) or "none" (disabled)
+	// Use line-by-line parsing to handle variable whitespace
+	lines := strings.Split(content, "\n")
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		// Skip comments
+		if strings.HasPrefix(trimmed, "#") {
+			continue
+		}
+		// Check for mixer_type setting
+		if strings.HasPrefix(trimmed, "mixer_type") {
+			if strings.Contains(trimmed, `"software"`) {
+				response.Enabled = true
+			}
+			break
+		}
+	}
+
+	return response
+}
+
+// SetMixerMode enables or disables the software mixer in MPD config and restarts MPD.
+func SetMixerMode(enabled bool) MixerModeResponse {
+	response := MixerModeResponse{
+		Enabled: enabled,
+		Success: false,
+	}
+
+	// Read current config
+	data, err := os.ReadFile("/etc/mpd.conf")
+	if err != nil {
+		log.Error().Err(err).Msg("Failed to read MPD config")
+		response.Error = "Failed to read MPD config"
+		return response
+	}
+
+	content := string(data)
+
+	mixerValue := "none"
+	if enabled {
+		mixerValue = "software"
+	}
+
+	// Replace mixer_type setting using regex to handle variable whitespace
+	re := regexp.MustCompile(`(mixer_type\s+)"(?:software|none)"`)
+	if !re.MatchString(content) {
+		response.Error = "Could not find mixer_type setting in MPD config"
+		return response
+	}
+	newContent := re.ReplaceAllString(content, `${1}"`+mixerValue+`"`)
+
+	// Write updated config
+	if err := writeMPDConfig(newContent); err != nil {
+		log.Error().Err(err).Msg("Failed to write MPD config")
+		response.Error = "Failed to write MPD config: " + err.Error()
+		return response
+	}
+
+	// Restart MPD
+	cmd := exec.Command("sudo", "systemctl", "restart", "mpd")
+	if err := cmd.Run(); err != nil {
+		log.Error().Err(err).Msg("Failed to restart MPD")
+		response.Error = "Config updated but failed to restart MPD: " + err.Error()
+		return response
+	}
+
+	log.Info().Bool("enabled", enabled).Msg("Mixer mode changed successfully")
+	response.Success = true
+	return response
+}
+
+// ApplyBitPerfectResponse represents the result of applying all bit-perfect settings.
+type ApplyBitPerfectResponse struct {
+	Success bool     `json:"success"`
+	Applied []string `json:"applied"` // Settings that were changed
+	Errors  []string `json:"errors"`  // Any errors encountered
+}
+
+// ApplyBitPerfect applies all optimal bit-perfect settings to MPD config.
+func ApplyBitPerfect() ApplyBitPerfectResponse {
+	response := ApplyBitPerfectResponse{
+		Success: false,
+		Applied: []string{},
+		Errors:  []string{},
+	}
+
+	// Read current config
+	data, err := os.ReadFile("/etc/mpd.conf")
+	if err != nil {
+		log.Error().Err(err).Msg("Failed to read MPD config")
+		response.Errors = append(response.Errors, "Failed to read MPD config")
+		return response
+	}
+
+	content := string(data)
+	newContent := content
+
+	// Apply bit-perfect settings using regex to handle variable whitespace
+	settingsToApply := []struct {
+		name        string
+		pattern     string // Regex pattern for current non-optimal value
+		replacement string // Replacement pattern
+		checkOk     string // Regex pattern to check if already optimal
+	}{
+		{
+			name:        "mixer_type",
+			pattern:     `(mixer_type\s+)"software"`,
+			replacement: `${1}"none"`,
+			checkOk:     `mixer_type\s+"none"`,
+		},
+		{
+			name:        "auto_resample",
+			pattern:     `(auto_resample\s+)"yes"`,
+			replacement: `${1}"no"`,
+			checkOk:     `auto_resample\s+"no"`,
+		},
+		{
+			name:        "auto_format",
+			pattern:     `(auto_format\s+)"yes"`,
+			replacement: `${1}"no"`,
+			checkOk:     `auto_format\s+"no"`,
+		},
+		{
+			name:        "auto_channels",
+			pattern:     `(auto_channels\s+)"yes"`,
+			replacement: `${1}"no"`,
+			checkOk:     `auto_channels\s+"no"`,
+		},
+	}
+
+	for _, setting := range settingsToApply {
+		re := regexp.MustCompile(setting.pattern)
+		if re.MatchString(newContent) {
+			newContent = re.ReplaceAllString(newContent, setting.replacement)
+			response.Applied = append(response.Applied, setting.name+" = bit-perfect")
+		}
+	}
+
+	// If no changes were needed, check if settings are already optimal
+	if len(response.Applied) == 0 {
+		for _, setting := range settingsToApply {
+			re := regexp.MustCompile(setting.checkOk)
+			if re.MatchString(content) {
+				response.Applied = append(response.Applied, setting.name+" already set to optimal")
+			}
+		}
+		response.Success = true
+		log.Info().Strs("applied", response.Applied).Msg("Bit-perfect settings already optimal")
+		return response
+	}
+
+	// Write updated config
+	if err := writeMPDConfig(newContent); err != nil {
+		log.Error().Err(err).Msg("Failed to write MPD config")
+		response.Errors = append(response.Errors, "Failed to write MPD config: "+err.Error())
+		return response
+	}
+
+	// Restart MPD
+	cmd := exec.Command("sudo", "systemctl", "restart", "mpd")
+	if err := cmd.Run(); err != nil {
+		log.Error().Err(err).Msg("Failed to restart MPD")
+		response.Errors = append(response.Errors, "Config updated but failed to restart MPD: "+err.Error())
+		return response
+	}
+
+	log.Info().Strs("applied", response.Applied).Msg("Bit-perfect settings applied successfully")
 	response.Success = true
 	return response
 }

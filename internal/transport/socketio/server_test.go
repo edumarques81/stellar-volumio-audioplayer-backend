@@ -752,3 +752,181 @@ func containsSubstring(s, substr string) bool {
 	}
 	return false
 }
+
+// Tests for MixerMode functionality
+
+func TestMixerModeResponseStructure(t *testing.T) {
+	// Test that MixerModeResponse has required fields
+	response := socketio.MixerModeResponse{
+		Enabled: true,
+		Success: true,
+		Error:   "",
+	}
+
+	if !response.Enabled {
+		t.Error("Expected Enabled to be true")
+	}
+	if !response.Success {
+		t.Error("Expected Success to be true")
+	}
+	if response.Error != "" {
+		t.Error("Expected Error to be empty")
+	}
+}
+
+func TestGetMixerMode(t *testing.T) {
+	// GetMixerMode should return a valid response (even if config doesn't exist)
+	response := socketio.GetMixerMode()
+
+	// Should return a response with Success set (may be false if config doesn't exist)
+	// Enabled should be boolean (either true or false)
+	t.Logf("Mixer enabled: %v, success: %v, error: %s", response.Enabled, response.Success, response.Error)
+
+	// On dev machine without /etc/mpd.conf, expect Success=false
+	// On Pi with /etc/mpd.conf, expect Success=true
+}
+
+func TestApplyBitPerfectResponseStructure(t *testing.T) {
+	// Test that ApplyBitPerfectResponse has required fields
+	response := socketio.ApplyBitPerfectResponse{
+		Success: true,
+		Applied: []string{"mixer_type = bit-perfect", "auto_resample = no"},
+		Errors:  []string{},
+	}
+
+	if !response.Success {
+		t.Error("Expected Success to be true")
+	}
+	if len(response.Applied) != 2 {
+		t.Errorf("Expected 2 applied settings, got %d", len(response.Applied))
+	}
+	if len(response.Errors) != 0 {
+		t.Errorf("Expected 0 errors, got %d", len(response.Errors))
+	}
+}
+
+func TestApplyBitPerfect(t *testing.T) {
+	// ApplyBitPerfect should return a valid response (even if config doesn't exist)
+	response := socketio.ApplyBitPerfect()
+
+	// Should return a response (may fail on dev machine without /etc/mpd.conf)
+	t.Logf("Apply bit-perfect success: %v, applied: %v, errors: %v", response.Success, response.Applied, response.Errors)
+
+	// On dev machine without /etc/mpd.conf, expect an error
+	// On Pi with /etc/mpd.conf, expect success
+}
+
+// Tests for mixer mode detection in config parsing
+
+func TestCheckBitPerfectFromConfig_MixerTypeNone(t *testing.T) {
+	// Config with mixer_type "none" - bit-perfect
+	mpdConfig := `
+audio_output {
+	type            "alsa"
+	name            "My ALSA Device"
+	device          "hw:0,0"
+	mixer_type      "none"
+}
+`
+	status := socketio.CheckBitPerfectFromConfig(mpdConfig, "", "")
+
+	// Should have "Mixer: disabled" in config
+	found := false
+	for _, cfg := range status.Config {
+		if contains(cfg, "Mixer") && contains(cfg, "disabled") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("Expected 'Mixer: disabled' in config, got: %v", status.Config)
+	}
+
+	// Should not have mixer warning
+	for _, warning := range status.Warnings {
+		if contains(warning, "Mixer") && contains(warning, "software") {
+			t.Errorf("Did not expect software mixer warning, got: %v", status.Warnings)
+		}
+	}
+}
+
+func TestCheckBitPerfectFromConfig_MixerTypeSoftware(t *testing.T) {
+	// Config with mixer_type "software" - not bit-perfect
+	mpdConfig := `
+audio_output {
+	type            "alsa"
+	name            "My ALSA Device"
+	device          "hw:0,0"
+	mixer_type      "software"
+}
+`
+	status := socketio.CheckBitPerfectFromConfig(mpdConfig, "", "")
+
+	// Should have software mixer warning
+	found := false
+	for _, warning := range status.Warnings {
+		if contains(warning, "Mixer") || contains(warning, "mixer") || contains(warning, "software") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("Expected software mixer warning, got warnings: %v", status.Warnings)
+	}
+}
+
+func TestCheckBitPerfectFromConfig_MixerTypeVariableWhitespace(t *testing.T) {
+	// Test various whitespace formats for mixer_type
+	testCases := []struct {
+		name      string
+		config    string
+		expectOk  bool
+	}{
+		{
+			name: "tabs",
+			config: `audio_output {
+	mixer_type	"none"
+}`,
+			expectOk: true,
+		},
+		{
+			name: "multiple spaces",
+			config: `audio_output {
+    mixer_type      "none"
+}`,
+			expectOk: true,
+		},
+		{
+			name: "two spaces",
+			config: `audio_output {
+    mixer_type  "none"
+}`,
+			expectOk: true,
+		},
+		{
+			name: "single space",
+			config: `audio_output {
+    mixer_type "none"
+}`,
+			expectOk: true,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			status := socketio.CheckBitPerfectFromConfig(tc.config, "", "")
+
+			// Check if mixer is detected as disabled (bit-perfect)
+			found := false
+			for _, cfg := range status.Config {
+				if contains(cfg, "Mixer") && contains(cfg, "disabled") {
+					found = true
+					break
+				}
+			}
+			if tc.expectOk && !found {
+				t.Errorf("Expected 'Mixer: disabled' in config for %s, got: %v", tc.name, status.Config)
+			}
+		})
+	}
+}
