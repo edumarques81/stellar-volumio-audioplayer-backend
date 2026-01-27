@@ -91,10 +91,10 @@ func (s *CachedService) GetAlbums(req GetAlbumsRequest) AlbumsResponse {
 	// Convert cached albums to response format
 	albums := make([]Album, 0, len(cachedAlbums))
 	for _, ca := range cachedAlbums {
-		// Generate album art URL from album URI
+		// Generate album art URL from first track path (same as base Service)
 		albumArt := ""
-		if ca.URI != "" {
-			albumArt = "/albumart?path=" + ca.URI
+		if ca.FirstTrack != "" {
+			albumArt = "/albumart?path=" + ca.FirstTrack
 		}
 
 		albums = append(albums, Album{

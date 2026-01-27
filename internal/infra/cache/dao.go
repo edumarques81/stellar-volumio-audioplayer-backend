@@ -40,18 +40,19 @@ func (dao *DAO) InsertAlbum(album *CachedAlbum) error {
 	}
 
 	_, err := db.Exec(`
-		INSERT INTO albums (id, title, album_artist, uri, track_count, total_duration,
+		INSERT INTO albums (id, title, album_artist, uri, first_track, track_count, total_duration,
 			source, year, added_at, last_played, artwork_id, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(id) DO UPDATE SET
-			title = ?, album_artist = ?, uri = ?, track_count = ?, total_duration = ?,
+			title = ?, album_artist = ?, uri = ?, first_track = COALESCE(?, albums.first_track),
+			track_count = ?, total_duration = ?,
 			source = ?, year = ?, added_at = COALESCE(albums.added_at, ?),
 			last_played = COALESCE(?, albums.last_played), artwork_id = COALESCE(?, albums.artwork_id),
 			updated_at = ?
 	`,
-		album.ID, album.Title, album.AlbumArtist, album.URI, album.TrackCount, album.TotalDuration,
+		album.ID, album.Title, album.AlbumArtist, album.URI, album.FirstTrack, album.TrackCount, album.TotalDuration,
 		album.Source, album.Year, addedAt, lastPlayed, album.ArtworkID, now, now,
-		album.Title, album.AlbumArtist, album.URI, album.TrackCount, album.TotalDuration,
+		album.Title, album.AlbumArtist, album.URI, album.FirstTrack, album.TrackCount, album.TotalDuration,
 		album.Source, album.Year, addedAt, lastPlayed, album.ArtworkID, now,
 	)
 	return err
@@ -66,17 +67,18 @@ func (dao *DAO) InsertAlbumTx(tx *sql.Tx, album *CachedAlbum) error {
 	}
 
 	_, err := tx.Exec(`
-		INSERT INTO albums (id, title, album_artist, uri, track_count, total_duration,
+		INSERT INTO albums (id, title, album_artist, uri, first_track, track_count, total_duration,
 			source, year, added_at, artwork_id, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(id) DO UPDATE SET
-			title = ?, album_artist = ?, uri = ?, track_count = ?, total_duration = ?,
+			title = ?, album_artist = ?, uri = ?, first_track = COALESCE(?, albums.first_track),
+			track_count = ?, total_duration = ?,
 			source = ?, year = ?, added_at = COALESCE(albums.added_at, ?),
 			artwork_id = COALESCE(?, albums.artwork_id), updated_at = ?
 	`,
-		album.ID, album.Title, album.AlbumArtist, album.URI, album.TrackCount, album.TotalDuration,
+		album.ID, album.Title, album.AlbumArtist, album.URI, album.FirstTrack, album.TrackCount, album.TotalDuration,
 		album.Source, album.Year, addedAt, album.ArtworkID, now, now,
-		album.Title, album.AlbumArtist, album.URI, album.TrackCount, album.TotalDuration,
+		album.Title, album.AlbumArtist, album.URI, album.FirstTrack, album.TrackCount, album.TotalDuration,
 		album.Source, album.Year, addedAt, album.ArtworkID, now,
 	)
 	return err
@@ -92,14 +94,14 @@ func (dao *DAO) GetAlbum(id string) (*CachedAlbum, error) {
 	album := &CachedAlbum{}
 	var addedAt, lastPlayed, createdAt, updatedAt sql.NullString
 	var year sql.NullInt64
-	var artworkID sql.NullString
+	var artworkID, firstTrack sql.NullString
 
 	err := db.QueryRow(`
-		SELECT id, title, album_artist, uri, track_count, total_duration, source,
+		SELECT id, title, album_artist, uri, first_track, track_count, total_duration, source,
 			year, added_at, last_played, artwork_id, created_at, updated_at
 		FROM albums WHERE id = ?
 	`, id).Scan(
-		&album.ID, &album.Title, &album.AlbumArtist, &album.URI, &album.TrackCount,
+		&album.ID, &album.Title, &album.AlbumArtist, &album.URI, &firstTrack, &album.TrackCount,
 		&album.TotalDuration, &album.Source, &year, &addedAt, &lastPlayed,
 		&artworkID, &createdAt, &updatedAt,
 	)
@@ -112,6 +114,9 @@ func (dao *DAO) GetAlbum(id string) (*CachedAlbum, error) {
 
 	if year.Valid {
 		album.Year = int(year.Int64)
+	}
+	if firstTrack.Valid {
+		album.FirstTrack = firstTrack.String
 	}
 	if addedAt.Valid {
 		album.AddedAt, _ = time.Parse(time.RFC3339, addedAt.String)
@@ -192,7 +197,7 @@ func (dao *DAO) QueryAlbums(filter AlbumFilter, sort SortOrder, pag Pagination) 
 
 	// Get paginated results
 	query := fmt.Sprintf(`
-		SELECT id, title, album_artist, uri, track_count, total_duration, source,
+		SELECT id, title, album_artist, uri, first_track, track_count, total_duration, source,
 			year, added_at, last_played, artwork_id, created_at, updated_at
 		FROM albums %s %s LIMIT ? OFFSET ?
 	`, whereClause, orderClause)
@@ -209,10 +214,10 @@ func (dao *DAO) QueryAlbums(filter AlbumFilter, sort SortOrder, pag Pagination) 
 		album := &CachedAlbum{}
 		var addedAt, lastPlayed, createdAt, updatedAt sql.NullString
 		var year sql.NullInt64
-		var artworkID sql.NullString
+		var artworkID, firstTrack sql.NullString
 
 		err := rows.Scan(
-			&album.ID, &album.Title, &album.AlbumArtist, &album.URI, &album.TrackCount,
+			&album.ID, &album.Title, &album.AlbumArtist, &album.URI, &firstTrack, &album.TrackCount,
 			&album.TotalDuration, &album.Source, &year, &addedAt, &lastPlayed,
 			&artworkID, &createdAt, &updatedAt,
 		)
@@ -222,6 +227,9 @@ func (dao *DAO) QueryAlbums(filter AlbumFilter, sort SortOrder, pag Pagination) 
 
 		if year.Valid {
 			album.Year = int(year.Int64)
+		}
+		if firstTrack.Valid {
+			album.FirstTrack = firstTrack.String
 		}
 		if addedAt.Valid {
 			album.AddedAt, _ = time.Parse(time.RFC3339, addedAt.String)

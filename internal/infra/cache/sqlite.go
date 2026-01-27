@@ -122,6 +122,7 @@ func (d *DB) createSchema() error {
 		title TEXT NOT NULL,
 		album_artist TEXT NOT NULL,
 		uri TEXT NOT NULL,
+		first_track TEXT,
 		track_count INTEGER DEFAULT 0,
 		total_duration INTEGER DEFAULT 0,
 		source TEXT NOT NULL,

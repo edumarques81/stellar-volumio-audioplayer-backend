@@ -9,6 +9,7 @@ type CachedAlbum struct {
 	Title         string    `json:"title"`          // Album title
 	AlbumArtist   string    `json:"albumArtist"`    // Album artist
 	URI           string    `json:"uri"`            // Directory path for playback
+	FirstTrack    string    `json:"firstTrack"`     // Path to first track (for album art)
 	TrackCount    int       `json:"trackCount"`     // Number of tracks
 	TotalDuration int       `json:"totalDuration"`  // Total duration in seconds
 	Source        string    `json:"source"`         // 'local', 'usb', 'nas', 'streaming'

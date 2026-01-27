@@ -208,6 +208,7 @@ func (b *Builder) buildAlbums() error {
 				Title:         album.Album,
 				AlbumArtist:   album.AlbumArtist,
 				URI:           uri,
+				FirstTrack:    album.FirstTrack,
 				TrackCount:    album.TrackCount,
 				TotalDuration: album.TotalTime,
 				Source:        source,
