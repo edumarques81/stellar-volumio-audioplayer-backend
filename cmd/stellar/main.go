@@ -144,6 +144,9 @@ func main() {
 	}
 	defer socketServer.Close()
 
+	// Initialize library cache (triggers background build if empty)
+	socketServer.InitializeCache()
+
 	// Start MPD watcher
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()

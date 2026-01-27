@@ -6,13 +6,22 @@ import (
 	"github.com/zishang520/socket.io/servers/socket/v3"
 )
 
+// LibraryService is an interface for library operations (implemented by both Service and CachedService).
+type LibraryService interface {
+	GetAlbums(req library.GetAlbumsRequest) library.AlbumsResponse
+	GetArtists(req library.GetArtistsRequest) library.ArtistsResponse
+	GetArtistAlbums(req library.GetArtistAlbumsRequest) library.ArtistAlbumsResponse
+	GetAlbumTracks(req library.GetAlbumTracksRequest) library.AlbumTracksResponse
+	GetRadioStations(req library.GetRadioRequest) library.RadioResponse
+}
+
 // LibraryHandlers contains Socket.IO handlers for library operations.
 type LibraryHandlers struct {
-	libraryService *library.Service
+	libraryService LibraryService
 }
 
 // NewLibraryHandlers creates a new LibraryHandlers instance.
-func NewLibraryHandlers(libraryService *library.Service) *LibraryHandlers {
+func NewLibraryHandlers(libraryService LibraryService) *LibraryHandlers {
 	return &LibraryHandlers{
 		libraryService: libraryService,
 	}

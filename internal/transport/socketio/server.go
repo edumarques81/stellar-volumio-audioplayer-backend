@@ -89,7 +89,8 @@ func NewServer(playerService *player.Service, mpdClient *mpdclient.Client, sourc
 		classifierAdapter := NewLibraryClassifierAdapter(localMusicSvc.GetClassifier())
 		librarySvc = library.NewService(mpdAdapter, classifierAdapter)
 		cachedSvc = library.NewCachedService(mpdAdapter, classifierAdapter, cacheDB)
-		libraryHandlers = NewLibraryHandlers(librarySvc)
+		// Use CachedService for library handlers to enable caching and artwork resolution
+		libraryHandlers = NewLibraryHandlers(cachedSvc)
 	}
 
 	s := &Server{
@@ -1431,7 +1432,7 @@ func (s *Server) BroadcastQueue() {
 
 // StartMPDWatcher starts watching MPD for changes and broadcasts updates.
 func (s *Server) StartMPDWatcher(ctx context.Context) error {
-	subsystems := []string{"player", "mixer", "playlist", "options"}
+	subsystems := []string{"player", "mixer", "playlist", "options", "database"}
 	events, err := s.mpdClient.Watch(subsystems...)
 	if err != nil {
 		return err
@@ -1458,6 +1459,9 @@ func (s *Server) StartMPDWatcher(ctx context.Context) error {
 				case "playlist":
 					s.BroadcastQueue()
 					s.BroadcastState() // Also update state as position might change
+				case "database":
+					// MPD database was updated (rescan completed), rebuild cache
+					s.handleDatabaseUpdate()
 				}
 			}
 		}
@@ -1466,9 +1470,99 @@ func (s *Server) StartMPDWatcher(ctx context.Context) error {
 	return nil
 }
 
+// handleDatabaseUpdate handles MPD database changes by rebuilding the library cache.
+func (s *Server) handleDatabaseUpdate() {
+	if s.cachedService == nil {
+		return
+	}
+
+	log.Info().Msg("MPD database updated, rebuilding library cache")
+
+	go func() {
+		if err := s.cachedService.RebuildCache(); err != nil {
+			log.Error().Err(err).Msg("Failed to rebuild cache after database update")
+			return
+		}
+
+		// Get updated stats and broadcast
+		stats, err := s.cachedService.GetCacheStatus()
+		if err != nil {
+			log.Warn().Err(err).Msg("Failed to get cache status after rebuild")
+			return
+		}
+
+		log.Info().
+			Int("albums", stats.AlbumCount).
+			Int("artists", stats.ArtistCount).
+			Int("tracks", stats.TrackCount).
+			Msg("Library cache rebuilt after database update")
+
+		// Broadcast cache updated event to all clients
+		event := map[string]interface{}{
+			"timestamp":   stats.LastUpdated.Format("2006-01-02T15:04:05Z07:00"),
+			"albumCount":  stats.AlbumCount,
+			"artistCount": stats.ArtistCount,
+			"trackCount":  stats.TrackCount,
+		}
+		s.io.Emit("library:cache:updated", event)
+	}()
+}
+
 // ServeHTTP implements http.Handler for the Socket.io server.
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	s.io.ServeHandler(nil).ServeHTTP(w, r)
+}
+
+// InitializeCache checks if the cache is empty and triggers a background rebuild if needed.
+// This should be called after the server is created to ensure the cache is populated.
+func (s *Server) InitializeCache() {
+	if s.cachedService == nil {
+		return
+	}
+
+	stats, err := s.cachedService.GetCacheStatus()
+	if err != nil {
+		log.Warn().Err(err).Msg("Failed to get cache status for initialization")
+		return
+	}
+
+	// If cache is empty, trigger a background build
+	if stats.AlbumCount == 0 && stats.ArtistCount == 0 {
+		log.Info().Msg("Library cache is empty, triggering background build")
+		go func() {
+			if err := s.cachedService.RebuildCache(); err != nil {
+				log.Error().Err(err).Msg("Background cache rebuild failed")
+				return
+			}
+
+			// Get updated stats and broadcast
+			newStats, err := s.cachedService.GetCacheStatus()
+			if err != nil {
+				log.Warn().Err(err).Msg("Failed to get cache status after rebuild")
+				return
+			}
+
+			log.Info().
+				Int("albums", newStats.AlbumCount).
+				Int("artists", newStats.ArtistCount).
+				Int("tracks", newStats.TrackCount).
+				Msg("Library cache built successfully")
+
+			// Broadcast cache updated event to all clients
+			event := map[string]interface{}{
+				"timestamp":   newStats.LastUpdated.Format("2006-01-02T15:04:05Z07:00"),
+				"albumCount":  newStats.AlbumCount,
+				"artistCount": newStats.ArtistCount,
+				"trackCount":  newStats.TrackCount,
+			}
+			s.io.Emit("library:cache:updated", event)
+		}()
+	} else {
+		log.Info().
+			Int("albums", stats.AlbumCount).
+			Int("artists", stats.ArtistCount).
+			Msg("Library cache loaded from disk")
+	}
 }
 
 // Close closes the Socket.io server and cache database.
