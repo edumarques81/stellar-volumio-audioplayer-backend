@@ -22,6 +22,7 @@ import (
 	"github.com/edumarques81/stellar-volumio-audioplayer-backend/internal/domain/player"
 	"github.com/edumarques81/stellar-volumio-audioplayer-backend/internal/domain/sources"
 	"github.com/edumarques81/stellar-volumio-audioplayer-backend/internal/domain/streaming/qobuz"
+	"github.com/edumarques81/stellar-volumio-audioplayer-backend/internal/infra/cache"
 	mpdclient "github.com/edumarques81/stellar-volumio-audioplayer-backend/internal/infra/mpd"
 	"github.com/edumarques81/stellar-volumio-audioplayer-backend/internal/version"
 )
@@ -36,7 +37,10 @@ type Server struct {
 	qobuzService      *qobuz.Service
 	localMusicService *localmusic.Service
 	libraryService    *library.Service
+	cachedService     *library.CachedService
 	libraryHandlers   *LibraryHandlers
+	cacheHandlers     *CacheHandlers
+	cacheDB           *cache.DB
 	audirvanaService  *audirvana.Service
 	mu                sync.RWMutex
 	clients           map[string]*socket.Socket
@@ -67,13 +71,24 @@ func NewServer(playerService *player.Service, mpdClient *mpdclient.Client, sourc
 		log.Warn().Err(err).Msg("Failed to initialize Qobuz service, streaming features disabled")
 	}
 
+	// Initialize cache database
+	cacheDB := cache.NewDB(os.ExpandEnv("$HOME/stellar-backend/data/library.db"))
+	if err := cacheDB.Open(); err != nil {
+		log.Warn().Err(err).Msg("Failed to open cache database, caching disabled")
+		cacheDB = nil
+	} else {
+		log.Info().Msg("Library cache database initialized")
+	}
+
 	// Initialize library service with adapters (only if localMusicSvc is provided)
 	var librarySvc *library.Service
+	var cachedSvc *library.CachedService
 	var libraryHandlers *LibraryHandlers
 	if localMusicSvc != nil {
 		mpdAdapter := NewLibraryMPDAdapter(mpdClient)
 		classifierAdapter := NewLibraryClassifierAdapter(localMusicSvc.GetClassifier())
 		librarySvc = library.NewService(mpdAdapter, classifierAdapter)
+		cachedSvc = library.NewCachedService(mpdAdapter, classifierAdapter, cacheDB)
 		libraryHandlers = NewLibraryHandlers(librarySvc)
 	}
 
@@ -86,9 +101,16 @@ func NewServer(playerService *player.Service, mpdClient *mpdclient.Client, sourc
 		qobuzService:      qobuzSvc,
 		localMusicService: localMusicSvc,
 		libraryService:    librarySvc,
+		cachedService:     cachedSvc,
 		libraryHandlers:   libraryHandlers,
+		cacheDB:           cacheDB,
 		audirvanaService:  audirvana.NewService(),
 		clients:           make(map[string]*socket.Socket),
+	}
+
+	// Initialize cache handlers if cached service is available
+	if cachedSvc != nil {
+		s.cacheHandlers = NewCacheHandlers(cachedSvc, s)
 	}
 
 	s.setupHandlers()
@@ -138,6 +160,11 @@ func (s *Server) setupHandlers() {
 		// Register library handlers (MPD-driven browsing)
 		if s.libraryHandlers != nil {
 			s.libraryHandlers.RegisterHandlers(client)
+		}
+
+		// Register cache handlers
+		if s.cacheHandlers != nil {
+			s.cacheHandlers.RegisterHandlers(client)
 		}
 
 		// Player control events
@@ -1444,9 +1471,14 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	s.io.ServeHandler(nil).ServeHTTP(w, r)
 }
 
-// Close closes the Socket.io server.
+// Close closes the Socket.io server and cache database.
 func (s *Server) Close() error {
 	s.io.Close(nil)
+	if s.cacheDB != nil {
+		if err := s.cacheDB.Close(); err != nil {
+			log.Warn().Err(err).Msg("Failed to close cache database")
+		}
+	}
 	return nil
 }
 
