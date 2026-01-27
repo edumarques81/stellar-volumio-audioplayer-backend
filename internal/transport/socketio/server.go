@@ -48,8 +48,8 @@ type Server struct {
 func NewServer(playerService *player.Service, mpdClient *mpdclient.Client, sourcesService *sources.Service, localMusicSvc *localmusic.Service, bitPerfect bool) (*Server, error) {
 	// Configure Socket.io server options
 	opts := socket.DefaultServerOptions()
-	opts.SetPingTimeout(20 * time.Second)
-	opts.SetPingInterval(25 * time.Second)
+	opts.SetPingTimeout(60 * time.Second)  // Increased to prevent premature disconnects
+	opts.SetPingInterval(30 * time.Second) // Ping every 30s, allow 60s for response
 	opts.SetCors(&types.Cors{
 		Origin:      "*",
 		Credentials: true,
