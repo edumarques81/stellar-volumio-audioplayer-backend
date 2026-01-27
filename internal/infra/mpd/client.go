@@ -587,3 +587,98 @@ func (c *Client) GetAlbumDetails(basePath string) ([]AlbumDetails, error) {
 
 	return albums, nil
 }
+
+// ListArtists returns all unique album artists from the MPD database.
+func (c *Client) ListArtists() ([]string, error) {
+	if err := c.ensureConnected(); err != nil {
+		return nil, err
+	}
+
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	// Use "list albumartist" to get all unique album artists
+	// AttrsList("AlbumArtist") tells the parser each entry starts with "AlbumArtist:" key
+	attrs, err := c.client.Command("list albumartist").AttrsList("AlbumArtist")
+	if err != nil {
+		return nil, fmt.Errorf("failed to list artists: %w", err)
+	}
+
+	var artists []string
+	for _, attr := range attrs {
+		artist := attr["AlbumArtist"]
+		if artist != "" {
+			artists = append(artists, artist)
+		}
+	}
+
+	return artists, nil
+}
+
+// FindAlbumsByArtist finds all albums by a specific album artist.
+func (c *Client) FindAlbumsByArtist(artist string) ([]AlbumInfo, error) {
+	if err := c.ensureConnected(); err != nil {
+		return nil, err
+	}
+
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	// Use "list album albumartist X" to get albums by artist
+	attrs, err := c.client.Command("list album albumartist %s", artist).AttrsList("Album")
+	if err != nil {
+		return nil, fmt.Errorf("failed to find albums by artist: %w", err)
+	}
+
+	var albums []AlbumInfo
+	for _, attr := range attrs {
+		album := attr["Album"]
+		if album != "" {
+			albums = append(albums, AlbumInfo{
+				Album:       album,
+				AlbumArtist: artist,
+			})
+		}
+	}
+
+	return albums, nil
+}
+
+// ListPlaylists returns all saved playlists.
+func (c *Client) ListPlaylists() ([]string, error) {
+	if err := c.ensureConnected(); err != nil {
+		return nil, err
+	}
+
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	// Use "listplaylists" to get all saved playlists
+	attrs, err := c.client.Command("listplaylists").AttrsList("playlist")
+	if err != nil {
+		return nil, fmt.Errorf("failed to list playlists: %w", err)
+	}
+
+	var playlists []string
+	for _, attr := range attrs {
+		playlist := attr["playlist"]
+		if playlist != "" {
+			playlists = append(playlists, playlist)
+		}
+	}
+
+	return playlists, nil
+}
+
+// ListPlaylistInfo returns the contents of a specific playlist.
+func (c *Client) ListPlaylistInfo(name string) ([]mpd.Attrs, error) {
+	if err := c.ensureConnected(); err != nil {
+		return nil, err
+	}
+
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	// Use "listplaylistinfo" to get playlist contents
+	return c.client.Command("listplaylistinfo %s", name).AttrsList("file")
+}

@@ -17,6 +17,7 @@ import (
 
 	"github.com/edumarques81/stellar-volumio-audioplayer-backend/internal/audio"
 	"github.com/edumarques81/stellar-volumio-audioplayer-backend/internal/domain/audirvana"
+	"github.com/edumarques81/stellar-volumio-audioplayer-backend/internal/domain/library"
 	"github.com/edumarques81/stellar-volumio-audioplayer-backend/internal/domain/localmusic"
 	"github.com/edumarques81/stellar-volumio-audioplayer-backend/internal/domain/player"
 	"github.com/edumarques81/stellar-volumio-audioplayer-backend/internal/domain/sources"
@@ -34,6 +35,8 @@ type Server struct {
 	sourcesService    *sources.Service
 	qobuzService      *qobuz.Service
 	localMusicService *localmusic.Service
+	libraryService    *library.Service
+	libraryHandlers   *LibraryHandlers
 	audirvanaService  *audirvana.Service
 	mu                sync.RWMutex
 	clients           map[string]*socket.Socket
@@ -64,6 +67,16 @@ func NewServer(playerService *player.Service, mpdClient *mpdclient.Client, sourc
 		log.Warn().Err(err).Msg("Failed to initialize Qobuz service, streaming features disabled")
 	}
 
+	// Initialize library service with adapters (only if localMusicSvc is provided)
+	var librarySvc *library.Service
+	var libraryHandlers *LibraryHandlers
+	if localMusicSvc != nil {
+		mpdAdapter := NewLibraryMPDAdapter(mpdClient)
+		classifierAdapter := NewLibraryClassifierAdapter(localMusicSvc.GetClassifier())
+		librarySvc = library.NewService(mpdAdapter, classifierAdapter)
+		libraryHandlers = NewLibraryHandlers(librarySvc)
+	}
+
 	s := &Server{
 		io:                server,
 		playerService:     playerService,
@@ -72,6 +85,8 @@ func NewServer(playerService *player.Service, mpdClient *mpdclient.Client, sourc
 		sourcesService:    sourcesService,
 		qobuzService:      qobuzSvc,
 		localMusicService: localMusicSvc,
+		libraryService:    librarySvc,
+		libraryHandlers:   libraryHandlers,
 		audirvanaService:  audirvana.NewService(),
 		clients:           make(map[string]*socket.Socket),
 	}
@@ -119,6 +134,11 @@ func (s *Server) setupHandlers() {
 			delete(s.clients, clientID)
 			s.mu.Unlock()
 		})
+
+		// Register library handlers (MPD-driven browsing)
+		if s.libraryHandlers != nil {
+			s.libraryHandlers.RegisterHandlers(client)
+		}
 
 		// Player control events
 		client.On("getState", func(args ...any) {
