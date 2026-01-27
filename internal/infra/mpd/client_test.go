@@ -141,3 +141,63 @@ func TestClientAddWithoutConnect(t *testing.T) {
 		t.Error("Add should fail when not connected")
 	}
 }
+
+func TestClientDetectCapabilitiesWithoutConnect(t *testing.T) {
+	client := mpd.NewClient("localhost", 6600, "")
+
+	_, err := client.DetectCapabilities()
+	if err == nil {
+		t.Error("DetectCapabilities should fail when not connected")
+	}
+}
+
+func TestClientWatchDatabaseWithoutConnect(t *testing.T) {
+	client := mpd.NewClient("localhost", 6600, "")
+
+	_, err := client.WatchDatabase()
+	if err == nil {
+		t.Error("WatchDatabase should fail when not connected")
+	}
+}
+
+func TestCapabilityFlagsDefaults(t *testing.T) {
+	// Test that default CapabilityFlags has false values
+	flags := mpd.CapabilityFlags{}
+
+	if flags.HasReadPicture {
+		t.Error("Default HasReadPicture should be false")
+	}
+	if flags.HasAlbumArt {
+		t.Error("Default HasAlbumArt should be false")
+	}
+	if flags.ProtocolVersion != "" {
+		t.Error("Default ProtocolVersion should be empty")
+	}
+}
+
+func TestClientGetDatabaseStatsWithoutConnect(t *testing.T) {
+	client := mpd.NewClient("localhost", 6600, "")
+
+	_, err := client.GetDatabaseStats()
+	if err == nil {
+		t.Error("GetDatabaseStats should fail when not connected")
+	}
+}
+
+func TestClientCountAlbumsWithoutConnect(t *testing.T) {
+	client := mpd.NewClient("localhost", 6600, "")
+
+	_, err := client.CountAlbums()
+	if err == nil {
+		t.Error("CountAlbums should fail when not connected")
+	}
+}
+
+func TestClientCountArtistsWithoutConnect(t *testing.T) {
+	client := mpd.NewClient("localhost", 6600, "")
+
+	_, err := client.CountArtists()
+	if err == nil {
+		t.Error("CountArtists should fail when not connected")
+	}
+}

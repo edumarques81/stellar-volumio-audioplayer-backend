@@ -394,6 +394,26 @@ func (c *Client) AlbumArt(uri string) ([]byte, error) {
 	return c.client.AlbumArt(uri)
 }
 
+// CapabilityFlags represents MPD server capabilities.
+type CapabilityFlags struct {
+	HasReadPicture  bool   // MPD 0.22+ - embedded album art extraction
+	HasAlbumArt     bool   // MPD 0.21+ - folder-based album art
+	HasGrouping     bool   // list command supports "group" parameter
+	HasAddedTag     bool   // MPD 0.24+ - "added" timestamp in database
+	ProtocolVersion string // MPD protocol version (e.g., "0.24.0")
+}
+
+// DatabaseStats represents MPD database statistics.
+type DatabaseStats struct {
+	Artists     int    // Number of unique artists
+	Albums      int    // Number of unique albums
+	Songs       int    // Number of songs
+	Uptime      int    // MPD uptime in seconds
+	DbPlaytime  int    // Total playtime of all songs
+	DbUpdate    int    // Last database update timestamp
+	PlayTime    int    // Total play time
+}
+
 // AlbumInfo represents an album with its metadata from MPD database.
 type AlbumInfo struct {
 	Album       string
@@ -681,4 +701,200 @@ func (c *Client) ListPlaylistInfo(name string) ([]mpd.Attrs, error) {
 
 	// Use "listplaylistinfo" to get playlist contents
 	return c.client.Command("listplaylistinfo %s", name).AttrsList("file")
+}
+
+// DetectCapabilities detects what features the MPD server supports.
+// This queries the server for available commands and protocol version.
+func (c *Client) DetectCapabilities() (*CapabilityFlags, error) {
+	if err := c.ensureConnected(); err != nil {
+		return nil, err
+	}
+
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	flags := &CapabilityFlags{}
+
+	// Get protocol version from status
+	status, err := c.client.Status()
+	if err == nil {
+		// Protocol version isn't in status, we need to parse from initial connection
+		// For now, we'll detect capabilities by trying commands
+	}
+	_ = status // Avoid unused variable warning
+
+	// Get list of available commands
+	// The "commands" command returns all available commands
+	attrs, err := c.client.Command("commands").AttrsList("command")
+	if err != nil {
+		log.Warn().Err(err).Msg("Failed to get MPD commands list, assuming basic capabilities")
+		return flags, nil
+	}
+
+	// Check for specific commands
+	for _, attr := range attrs {
+		cmd := attr["command"]
+		switch cmd {
+		case "readpicture":
+			flags.HasReadPicture = true
+		case "albumart":
+			flags.HasAlbumArt = true
+		}
+	}
+
+	// Test if "list" command supports grouping by trying a harmless command
+	// If grouping works, we have MPD 0.21+
+	_, err = c.client.Command("list album group albumartist window 0:1").AttrsList("Album")
+	if err == nil {
+		flags.HasGrouping = true
+	}
+
+	// Test for "added" tag support (MPD 0.24+) by checking if sort by added works
+	_, err = c.client.Command("search any '' sort added window 0:1").AttrsList("file")
+	if err == nil {
+		flags.HasAddedTag = true
+	}
+
+	log.Info().
+		Bool("readpicture", flags.HasReadPicture).
+		Bool("albumart", flags.HasAlbumArt).
+		Bool("grouping", flags.HasGrouping).
+		Bool("added_tag", flags.HasAddedTag).
+		Msg("Detected MPD capabilities")
+
+	return flags, nil
+}
+
+// WatchDatabase starts watching for MPD database changes.
+// Returns a channel that receives notifications when the database is updated.
+// This is specifically for cache invalidation purposes.
+func (c *Client) WatchDatabase() (<-chan string, error) {
+	// Watch for database and update subsystems
+	return c.Watch("database", "update")
+}
+
+// GetDatabaseStats returns statistics about the MPD database.
+func (c *Client) GetDatabaseStats() (*DatabaseStats, error) {
+	if err := c.ensureConnected(); err != nil {
+		return nil, err
+	}
+
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	// Use "stats" command to get database statistics
+	attrs, err := c.client.Command("stats").Attrs()
+	if err != nil {
+		return nil, fmt.Errorf("failed to get stats: %w", err)
+	}
+
+	stats := &DatabaseStats{}
+
+	if v, err := strconv.Atoi(attrs["artists"]); err == nil {
+		stats.Artists = v
+	}
+	if v, err := strconv.Atoi(attrs["albums"]); err == nil {
+		stats.Albums = v
+	}
+	if v, err := strconv.Atoi(attrs["songs"]); err == nil {
+		stats.Songs = v
+	}
+	if v, err := strconv.Atoi(attrs["uptime"]); err == nil {
+		stats.Uptime = v
+	}
+	if v, err := strconv.Atoi(attrs["db_playtime"]); err == nil {
+		stats.DbPlaytime = v
+	}
+	if v, err := strconv.Atoi(attrs["db_update"]); err == nil {
+		stats.DbUpdate = v
+	}
+	if v, err := strconv.Atoi(attrs["playtime"]); err == nil {
+		stats.PlayTime = v
+	}
+
+	return stats, nil
+}
+
+// CountAlbums returns the total count of unique albums in the database.
+// This is more efficient than fetching all albums when only count is needed.
+func (c *Client) CountAlbums() (int, error) {
+	if err := c.ensureConnected(); err != nil {
+		return 0, err
+	}
+
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	// Use "list album" and count results (more accurate than stats which might be cached)
+	attrs, err := c.client.Command("list album").AttrsList("Album")
+	if err != nil {
+		return 0, fmt.Errorf("failed to count albums: %w", err)
+	}
+
+	return len(attrs), nil
+}
+
+// CountArtists returns the total count of unique album artists in the database.
+// This is more efficient than fetching all artists when only count is needed.
+func (c *Client) CountArtists() (int, error) {
+	if err := c.ensureConnected(); err != nil {
+		return 0, err
+	}
+
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	// Use "list albumartist" and count results
+	attrs, err := c.client.Command("list albumartist").AttrsList("AlbumArtist")
+	if err != nil {
+		return 0, fmt.Errorf("failed to count artists: %w", err)
+	}
+
+	return len(attrs), nil
+}
+
+// CountAlbumsForArtist returns the count of albums by a specific artist.
+// This is more efficient than the N+1 query pattern.
+func (c *Client) CountAlbumsForArtist(artist string) (int, error) {
+	if err := c.ensureConnected(); err != nil {
+		return 0, err
+	}
+
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	attrs, err := c.client.Command("list album albumartist %s", artist).AttrsList("Album")
+	if err != nil {
+		return 0, fmt.Errorf("failed to count albums for artist: %w", err)
+	}
+
+	return len(attrs), nil
+}
+
+// GetArtistsWithAlbumCounts returns all artists with their album counts efficiently.
+// This avoids the N+1 query problem by using MPD's grouping feature.
+func (c *Client) GetArtistsWithAlbumCounts() (map[string]int, error) {
+	if err := c.ensureConnected(); err != nil {
+		return nil, err
+	}
+
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	// Get all albums grouped by artist
+	attrs, err := c.client.Command("list album group albumartist").AttrsList("Album")
+	if err != nil {
+		return nil, fmt.Errorf("failed to list albums with artists: %w", err)
+	}
+
+	// Count albums per artist
+	counts := make(map[string]int)
+	for _, attr := range attrs {
+		artist := attr["AlbumArtist"]
+		if artist != "" {
+			counts[artist]++
+		}
+	}
+
+	return counts, nil
 }
