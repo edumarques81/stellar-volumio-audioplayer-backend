@@ -91,6 +91,12 @@ func (s *CachedService) GetAlbums(req GetAlbumsRequest) AlbumsResponse {
 	// Convert cached albums to response format
 	albums := make([]Album, 0, len(cachedAlbums))
 	for _, ca := range cachedAlbums {
+		// Generate album art URL from album URI
+		albumArt := ""
+		if ca.URI != "" {
+			albumArt = "/albumart?path=" + ca.URI
+		}
+
 		albums = append(albums, Album{
 			ID:         ca.ID,
 			Title:      ca.Title,
@@ -99,7 +105,7 @@ func (s *CachedService) GetAlbums(req GetAlbumsRequest) AlbumsResponse {
 			TrackCount: ca.TrackCount,
 			Source:     SourceType(ca.Source),
 			Year:       ca.Year,
-			AlbumArt:   "", // Will be set by artwork resolver
+			AlbumArt:   albumArt,
 		})
 	}
 
