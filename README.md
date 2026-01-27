@@ -21,7 +21,8 @@ This project is inspired by and builds upon the excellent work of the [Volumio](
 
 - [x] Socket.io API (Volumio-compatible)
 - [x] MPD integration for playback control
-- [x] Music library browsing
+- [x] Music library browsing with SQLite cache
+- [x] Artwork caching with multi-source fallback
 - [x] Queue management
 - [ ] Playlist and favorites
 - [x] Bit-perfect audio configuration
@@ -80,11 +81,13 @@ go build -o stellar ./cmd/stellar
 ├── internal/
 │   ├── domain/            # Business logic
 │   │   ├── player/        # Player service
-│   │   ├── library/       # Music library
+│   │   ├── library/       # Music library + cached service
+│   │   ├── artwork/       # Artwork resolution + caching
 │   │   ├── queue/         # Queue management
 │   │   └── ...
 │   ├── infra/             # Infrastructure adapters
-│   │   ├── mpd/           # MPD client
+│   │   ├── mpd/           # MPD client with capability detection
+│   │   ├── cache/         # SQLite library cache
 │   │   ├── alsa/          # ALSA control
 │   │   └── ...
 │   └── transport/         # HTTP/WebSocket handlers
