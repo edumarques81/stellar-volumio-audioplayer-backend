@@ -37,6 +37,7 @@ func (s *SQLiteJobStore) initSchema() error {
 			type TEXT NOT NULL,
 			album_id TEXT,
 			artist_id TEXT,
+			artist_name TEXT,
 			mbid TEXT NOT NULL,
 			status TEXT NOT NULL DEFAULT 'pending',
 			priority INTEGER DEFAULT 0,
@@ -52,6 +53,8 @@ func (s *SQLiteJobStore) initSchema() error {
 		CREATE INDEX IF NOT EXISTS idx_enrichment_jobs_next_retry ON enrichment_jobs(next_retry_at);
 		CREATE INDEX IF NOT EXISTS idx_enrichment_jobs_album ON enrichment_jobs(album_id);
 	`)
+	// Add artist_name column if it doesn't exist (for existing databases)
+	s.db.Exec(`ALTER TABLE enrichment_jobs ADD COLUMN artist_name TEXT`)
 	if err != nil {
 		return fmt.Errorf("create table: %w", err)
 	}
@@ -67,13 +70,14 @@ func (s *SQLiteJobStore) AddJob(job *EnrichmentJob) error {
 
 	_, err := s.db.Exec(`
 		INSERT OR REPLACE INTO enrichment_jobs
-		(id, type, album_id, artist_id, mbid, status, priority, retry_count, max_retries, next_retry_at, last_error, created_at, updated_at, completed_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		(id, type, album_id, artist_id, artist_name, mbid, status, priority, retry_count, max_retries, next_retry_at, last_error, created_at, updated_at, completed_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`,
 		job.ID,
 		string(job.Type),
 		job.AlbumID,
 		job.ArtistID,
+		job.ArtistName,
 		job.MBID,
 		string(job.Status),
 		job.Priority,
@@ -98,7 +102,7 @@ func (s *SQLiteJobStore) GetJob(id string) (*EnrichmentJob, error) {
 	defer s.mu.RUnlock()
 
 	row := s.db.QueryRow(`
-		SELECT id, type, album_id, artist_id, mbid, status, priority, retry_count, max_retries, next_retry_at, last_error, created_at, updated_at, completed_at
+		SELECT id, type, album_id, artist_id, artist_name, mbid, status, priority, retry_count, max_retries, next_retry_at, last_error, created_at, updated_at, completed_at
 		FROM enrichment_jobs
 		WHERE id = ?
 	`, id)
@@ -121,7 +125,7 @@ func (s *SQLiteJobStore) GetPendingJobs(limit int) ([]*EnrichmentJob, error) {
 
 	now := formatTime(time.Now())
 	rows, err := s.db.Query(`
-		SELECT id, type, album_id, artist_id, mbid, status, priority, retry_count, max_retries, next_retry_at, last_error, created_at, updated_at, completed_at
+		SELECT id, type, album_id, artist_id, artist_name, mbid, status, priority, retry_count, max_retries, next_retry_at, last_error, created_at, updated_at, completed_at
 		FROM enrichment_jobs
 		WHERE status = 'pending' AND (next_retry_at IS NULL OR next_retry_at <= ?)
 		ORDER BY priority DESC, created_at ASC
@@ -277,13 +281,14 @@ func scanJob(row *sql.Row) (*EnrichmentJob, error) {
 	var jobType, status string
 	var nextRetryAt, createdAt, updatedAt string
 	var completedAt sql.NullString
-	var albumID, artistID sql.NullString
+	var albumID, artistID, artistName sql.NullString
 
 	err := row.Scan(
 		&job.ID,
 		&jobType,
 		&albumID,
 		&artistID,
+		&artistName,
 		&job.MBID,
 		&status,
 		&job.Priority,
@@ -303,6 +308,7 @@ func scanJob(row *sql.Row) (*EnrichmentJob, error) {
 	job.Status = JobStatus(status)
 	job.AlbumID = albumID.String
 	job.ArtistID = artistID.String
+	job.ArtistName = artistName.String
 	job.NextRetryAt = parseTime(nextRetryAt)
 	job.CreatedAt = parseTime(createdAt)
 	job.UpdatedAt = parseTime(updatedAt)
@@ -316,13 +322,14 @@ func scanJobRow(rows *sql.Rows) (*EnrichmentJob, error) {
 	var jobType, status string
 	var nextRetryAt, createdAt, updatedAt string
 	var completedAt sql.NullString
-	var albumID, artistID sql.NullString
+	var albumID, artistID, artistName sql.NullString
 
 	err := rows.Scan(
 		&job.ID,
 		&jobType,
 		&albumID,
 		&artistID,
+		&artistName,
 		&job.MBID,
 		&status,
 		&job.Priority,
@@ -342,6 +349,7 @@ func scanJobRow(rows *sql.Rows) (*EnrichmentJob, error) {
 	job.Status = JobStatus(status)
 	job.AlbumID = albumID.String
 	job.ArtistID = artistID.String
+	job.ArtistName = artistName.String
 	job.NextRetryAt = parseTime(nextRetryAt)
 	job.CreatedAt = parseTime(createdAt)
 	job.UpdatedAt = parseTime(updatedAt)

@@ -139,13 +139,29 @@ func (h *EnrichmentHandlers) Initialize() {
 
 // QueueMissingArtwork triggers the coordinator to queue missing artwork jobs.
 // This should be called after cache builds complete.
+// It will also trigger artist enrichment after album artwork is queued.
 func (h *EnrichmentHandlers) QueueMissingArtwork() {
 	if h.coordinator == nil {
 		return
 	}
 	go func() {
+		// First queue album artwork
 		if err := h.coordinator.QueueMissingArtwork(h.ctx); err != nil {
 			log.Warn().Err(err).Msg("Failed to queue missing artwork for enrichment")
+		}
+		// Then queue artist artwork
+		h.QueueMissingArtistImages()
+	}()
+}
+
+// QueueMissingArtistImages triggers the coordinator to queue missing artist image jobs.
+func (h *EnrichmentHandlers) QueueMissingArtistImages() {
+	if h.coordinator == nil {
+		return
+	}
+	go func() {
+		if err := h.coordinator.QueueMissingArtistImages(h.ctx); err != nil {
+			log.Warn().Err(err).Msg("Failed to queue missing artist images for enrichment")
 		}
 	}()
 }
