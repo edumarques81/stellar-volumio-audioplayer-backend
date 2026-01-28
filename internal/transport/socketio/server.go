@@ -1623,6 +1623,71 @@ func (s *Server) broadcastCacheUpdated() {
 	s.io.Emit("library:cache:updated", event)
 }
 
+// ArtistArtworkInfo contains artist artwork information for HTTP serving.
+type ArtistArtworkInfo struct {
+	IsURL bool
+	URL   string
+	Data  []byte
+}
+
+// GetArtistArtwork retrieves artist artwork by ID or name.
+// Returns artwork info for HTTP serving, or nil if not found.
+func (s *Server) GetArtistArtwork(artistID, artistName string) *ArtistArtworkInfo {
+	if s.cacheDAO == nil {
+		return nil
+	}
+
+	var artwork *cache.CachedArtwork
+	var err error
+
+	// Try by ID first
+	if artistID != "" {
+		artwork, err = s.cacheDAO.GetArtworkByArtist(artistID)
+		if err != nil {
+			log.Debug().Err(err).Str("artistID", artistID).Msg("Failed to get artist artwork by ID")
+		}
+	}
+
+	// If not found by ID and we have a name, try to find the artist first
+	if artwork == nil && artistName != "" {
+		// Query artists to find by name
+		artists, _, err := s.cacheDAO.QueryArtists(artistName, cache.Pagination{Limit: 1, Offset: 0})
+		if err == nil && len(artists) > 0 {
+			artwork, _ = s.cacheDAO.GetArtworkByArtist(artists[0].ID)
+		}
+	}
+
+	if artwork == nil || artwork.FilePath == "" {
+		return nil
+	}
+
+	// Check if it's a URL (Deezer hotlink or album art)
+	if strings.HasPrefix(artwork.FilePath, "http") {
+		return &ArtistArtworkInfo{
+			IsURL: true,
+			URL:   artwork.FilePath,
+		}
+	}
+
+	// Read local file
+	cacheDir := os.ExpandEnv("$HOME/stellar-backend/data/cache")
+	filePath := artwork.FilePath
+	if !strings.HasPrefix(filePath, "/") {
+		filePath = cacheDir + "/artwork/artists/" + artistID + ".jpg"
+	}
+
+	data, err := os.ReadFile(filePath)
+	if err != nil {
+		log.Debug().Err(err).Str("path", filePath).Msg("Failed to read artist artwork file")
+		return nil
+	}
+
+	return &ArtistArtworkInfo{
+		IsURL: false,
+		Data:  data,
+	}
+}
+
 // Close closes the Socket.io server and cache database.
 func (s *Server) Close() error {
 	s.io.Close(nil)

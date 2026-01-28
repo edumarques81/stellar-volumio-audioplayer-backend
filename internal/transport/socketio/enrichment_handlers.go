@@ -50,10 +50,29 @@ func NewEnrichmentHandlers(cfg EnrichmentConfig, server *Server) *EnrichmentHand
 	// Create Cover Art Archive client
 	caaClient := enrichment.NewCAAClient()
 
+	// Create Fanart.tv client for artist images (API key from environment)
+	fanartAPIKey := os.Getenv("FANART_API_KEY")
+	var fanartClient *enrichment.FanartClient
+	if fanartAPIKey != "" {
+		fanartClient = enrichment.NewFanartClient(fanartAPIKey)
+		log.Info().Msg("Fanart.tv client initialized for artist images")
+	} else {
+		log.Info().Msg("FANART_API_KEY not set - Fanart.tv artist images disabled, will use Deezer fallback")
+	}
+
+	// Create Deezer client for artist images (no API key needed)
+	deezerClient := enrichment.NewDeezerClient()
+
 	// Create album provider adapter
 	var albumProvider enrichment.AlbumProvider
 	if cfg.CacheDAO != nil {
 		albumProvider = &cacheDAOAlbumProvider{dao: cfg.CacheDAO}
+	}
+
+	// Create artist provider adapter
+	var artistProvider enrichment.ArtistProvider
+	if cfg.CacheDAO != nil {
+		artistProvider = &cacheDAOArtistProvider{dao: cfg.CacheDAO}
 	}
 
 	// Create coordinator
@@ -63,9 +82,22 @@ func NewEnrichmentHandlers(cfg EnrichmentConfig, server *Server) *EnrichmentHand
 	}
 	coordinator := enrichment.NewCoordinator(mbClient, caaClient, jobStore, albumProvider, cacheDir)
 
+	// Add artist support to coordinator
+	if fanartClient != nil {
+		coordinator.WithFanartClient(fanartClient)
+	}
+	coordinator.WithDeezerClient(deezerClient)
+	if artistProvider != nil {
+		coordinator.WithArtistProvider(artistProvider)
+	}
+
 	// Create worker with save function
 	worker := enrichment.NewWorker(caaClient, jobStore,
 		enrichment.WithSaveFunc(coordinator.CreateSaveFunc()),
+		enrichment.WithSaveFuncArtist(coordinator.CreateArtistSaveFunc()),
+		enrichment.WithWorkerFanartClient(fanartClient),
+		enrichment.WithWorkerDeezerClient(deezerClient),
+		enrichment.WithWorkerArtistProvider(artistProvider),
 		enrichment.WithBatchSize(5),
 	)
 
@@ -89,6 +121,10 @@ func (h *EnrichmentHandlers) RegisterHandlers(client *socket.Socket) {
 
 	client.On("enrichment:queue", func(args ...interface{}) {
 		h.handleQueueMissing(client)
+	})
+
+	client.On("enrichment:artists:queue", func(args ...interface{}) {
+		h.handleQueueArtistImages(client)
 	})
 }
 
@@ -206,4 +242,73 @@ func (p *cacheDAOAlbumProvider) GetAlbumsWithoutArtwork() ([]enrichment.Album, e
 
 func (p *cacheDAOAlbumProvider) UpdateAlbumArtwork(albumID, artworkID string) error {
 	return p.dao.UpdateAlbumArtwork(albumID, artworkID)
+}
+
+// handleQueueArtistImages queues missing artist images for enrichment.
+func (h *EnrichmentHandlers) handleQueueArtistImages(client *socket.Socket) {
+	log.Info().Msg("Received enrichment:artists:queue - queuing missing artist images")
+
+	if h.coordinator == nil {
+		client.Emit("pushEnrichmentArtistQueueResult", map[string]interface{}{
+			"success": false,
+			"error":   "enrichment coordinator not available",
+		})
+		return
+	}
+
+	go func() {
+		if err := h.coordinator.QueueMissingArtistImages(h.ctx); err != nil {
+			log.Error().Err(err).Msg("Failed to queue missing artist images")
+			return
+		}
+		if h.server != nil && h.server.io != nil {
+			h.server.io.Emit("pushEnrichmentStatus", h.getStatus())
+		}
+	}()
+
+	client.Emit("pushEnrichmentArtistQueueResult", map[string]interface{}{
+		"success": true,
+		"message": "Artist image enrichment queue processing started",
+	})
+}
+
+// cacheDAOArtistProvider adapts cache.DAO to enrichment.ArtistProvider.
+type cacheDAOArtistProvider struct {
+	dao *cache.DAO
+}
+
+func (p *cacheDAOArtistProvider) GetArtistsWithoutArtwork() ([]enrichment.Artist, error) {
+	artists, err := p.dao.GetArtistsWithoutArtwork()
+	if err != nil {
+		return nil, err
+	}
+	result := make([]enrichment.Artist, len(artists))
+	for i, a := range artists {
+		result[i] = enrichment.Artist{
+			ID:         a.ID,
+			Name:       a.Name,
+			HasArtwork: a.HasArtwork,
+		}
+	}
+	return result, nil
+}
+
+func (p *cacheDAOArtistProvider) UpdateArtistArtwork(artistID, artworkID string) error {
+	return p.dao.UpdateArtistArtwork(artistID, artworkID)
+}
+
+func (p *cacheDAOArtistProvider) UpdateArtistArtworkURL(artistID, url string, source string) error {
+	return p.dao.UpdateArtistArtworkURL(artistID, url, source)
+}
+
+func (p *cacheDAOArtistProvider) GetFirstAlbumArtwork(artistName string) (string, error) {
+	album, err := p.dao.GetFirstAlbumByArtist(artistName)
+	if err != nil {
+		return "", err
+	}
+	if album == nil || album.FirstTrack == "" {
+		return "", nil
+	}
+	// Return the album art URL
+	return "/albumart?path=" + album.FirstTrack, nil
 }

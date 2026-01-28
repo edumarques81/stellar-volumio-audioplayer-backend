@@ -759,3 +759,205 @@ func (dao *DAO) GetAlbumsWithoutArtwork() ([]AlbumInfo, error) {
 
 	return albums, nil
 }
+
+// --- Artist Artwork Operations ---
+
+// ArtistInfo contains basic artist info for enrichment queries.
+type ArtistInfo struct {
+	ID         string
+	Name       string
+	HasArtwork bool
+}
+
+// GetArtistsWithoutArtwork returns artists that don't have cached artwork.
+func (dao *DAO) GetArtistsWithoutArtwork() ([]ArtistInfo, error) {
+	db := dao.db.DB()
+	if db == nil {
+		return nil, fmt.Errorf("database not open")
+	}
+
+	rows, err := db.Query(`
+		SELECT a.id, a.name, a.artwork_id
+		FROM artists a
+		WHERE a.artwork_id IS NULL OR a.artwork_id = ''
+		ORDER BY a.name COLLATE NOCASE
+	`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var artists []ArtistInfo
+	for rows.Next() {
+		var artist ArtistInfo
+		var artworkID sql.NullString
+
+		err := rows.Scan(&artist.ID, &artist.Name, &artworkID)
+		if err != nil {
+			return nil, err
+		}
+
+		artist.HasArtwork = artworkID.Valid && artworkID.String != ""
+		artists = append(artists, artist)
+	}
+
+	return artists, nil
+}
+
+// UpdateArtistArtwork links an artist to an artwork entry.
+func (dao *DAO) UpdateArtistArtwork(artistID, artworkID string) error {
+	db := dao.db.DB()
+	if db == nil {
+		return fmt.Errorf("database not open")
+	}
+
+	now := time.Now().Format(time.RFC3339)
+	_, err := db.Exec("UPDATE artists SET artwork_id = ?, updated_at = ? WHERE id = ?", artworkID, now, artistID)
+	return err
+}
+
+// UpdateArtistArtworkURL stores a hotlink URL for an artist (Deezer/album fallback).
+// This creates or updates an artwork record with a URL instead of a file path.
+func (dao *DAO) UpdateArtistArtworkURL(artistID, url string, source string) error {
+	db := dao.db.DB()
+	if db == nil {
+		return fmt.Errorf("database not open")
+	}
+
+	now := time.Now().Format(time.RFC3339)
+
+	// Generate artwork ID based on artist ID
+	artworkID := artistID + "_artwork"
+
+	// Insert or update artwork record with URL as file_path
+	_, err := db.Exec(`
+		INSERT INTO artwork (id, artist_id, type, file_path, source, created_at)
+		VALUES (?, ?, 'artist', ?, ?, ?)
+		ON CONFLICT(id) DO UPDATE SET
+			file_path = ?, source = ?
+	`,
+		artworkID, artistID, url, source, now,
+		url, source,
+	)
+	if err != nil {
+		return fmt.Errorf("insert artwork: %w", err)
+	}
+
+	// Link artwork to artist
+	_, err = db.Exec("UPDATE artists SET artwork_id = ?, updated_at = ? WHERE id = ?", artworkID, now, artistID)
+	return err
+}
+
+// GetArtworkByArtist retrieves artwork by artist ID.
+func (dao *DAO) GetArtworkByArtist(artistID string) (*CachedArtwork, error) {
+	db := dao.db.DB()
+	if db == nil {
+		return nil, fmt.Errorf("database not open")
+	}
+
+	art := &CachedArtwork{}
+	var albumID, filePath, mimeType, checksum sql.NullString
+	var width, height, fileSize sql.NullInt64
+	var fetchedAt, expiresAt, createdAt sql.NullString
+
+	err := db.QueryRow(`
+		SELECT id, album_id, artist_id, type, file_path, source, mime_type, width, height, file_size, checksum, fetched_at, expires_at, created_at
+		FROM artwork WHERE artist_id = ?
+	`, artistID).Scan(
+		&art.ID, &albumID, &art.ArtistID, &art.Type, &filePath, &art.Source,
+		&mimeType, &width, &height, &fileSize, &checksum, &fetchedAt, &expiresAt, &createdAt,
+	)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	if albumID.Valid {
+		art.AlbumID = albumID.String
+	}
+	if filePath.Valid {
+		art.FilePath = filePath.String
+	}
+	if mimeType.Valid {
+		art.MimeType = mimeType.String
+	}
+	if width.Valid {
+		art.Width = int(width.Int64)
+	}
+	if height.Valid {
+		art.Height = int(height.Int64)
+	}
+	if fileSize.Valid {
+		art.FileSize = int(fileSize.Int64)
+	}
+	if checksum.Valid {
+		art.Checksum = checksum.String
+	}
+	if fetchedAt.Valid {
+		art.FetchedAt, _ = time.Parse(time.RFC3339, fetchedAt.String)
+	}
+	if expiresAt.Valid {
+		art.ExpiresAt, _ = time.Parse(time.RFC3339, expiresAt.String)
+	}
+	if createdAt.Valid {
+		art.CreatedAt, _ = time.Parse(time.RFC3339, createdAt.String)
+	}
+
+	return art, nil
+}
+
+// GetFirstAlbumByArtist returns the first album for an artist (for fallback artwork).
+func (dao *DAO) GetFirstAlbumByArtist(artistName string) (*CachedAlbum, error) {
+	db := dao.db.DB()
+	if db == nil {
+		return nil, fmt.Errorf("database not open")
+	}
+
+	album := &CachedAlbum{}
+	var addedAt, lastPlayed, createdAt, updatedAt sql.NullString
+	var year sql.NullInt64
+	var artworkID, firstTrack sql.NullString
+
+	err := db.QueryRow(`
+		SELECT id, title, album_artist, uri, first_track, track_count, total_duration, source,
+			year, added_at, last_played, artwork_id, created_at, updated_at
+		FROM albums WHERE album_artist = ? COLLATE NOCASE
+		ORDER BY title COLLATE NOCASE LIMIT 1
+	`, artistName).Scan(
+		&album.ID, &album.Title, &album.AlbumArtist, &album.URI, &firstTrack, &album.TrackCount,
+		&album.TotalDuration, &album.Source, &year, &addedAt, &lastPlayed,
+		&artworkID, &createdAt, &updatedAt,
+	)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	if year.Valid {
+		album.Year = int(year.Int64)
+	}
+	if firstTrack.Valid {
+		album.FirstTrack = firstTrack.String
+	}
+	if addedAt.Valid {
+		album.AddedAt, _ = time.Parse(time.RFC3339, addedAt.String)
+	}
+	if lastPlayed.Valid {
+		album.LastPlayed, _ = time.Parse(time.RFC3339, lastPlayed.String)
+	}
+	if artworkID.Valid {
+		album.ArtworkID = artworkID.String
+	}
+	if createdAt.Valid {
+		album.CreatedAt, _ = time.Parse(time.RFC3339, createdAt.String)
+	}
+	if updatedAt.Valid {
+		album.UpdatedAt, _ = time.Parse(time.RFC3339, updatedAt.String)
+	}
+
+	return album, nil
+}

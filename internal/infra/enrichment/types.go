@@ -29,6 +29,8 @@ const (
 	SourceCoverArtArchive Source = "cover_art_archive"
 	SourceLastFM          Source = "lastfm"
 	SourceFanartTV        Source = "fanarttv"
+	SourceDeezer          Source = "deezer"   // Hotlink only - cannot cache per ToS
+	SourceAlbumArt        Source = "albumart" // First album artwork fallback
 	SourceMPD             Source = "mpd"
 	SourceEmbedded        Source = "embedded"
 	SourceFolder          Source = "folder"
@@ -72,6 +74,7 @@ type EnrichmentJob struct {
 	Type        JobType
 	AlbumID     string    // For album art jobs
 	ArtistID    string    // For artist art jobs
+	ArtistName  string    // Artist name (for fallback searches)
 	MBID        string    // MusicBrainz ID
 	Status      JobStatus
 	Priority    int       // Higher = more important
@@ -93,15 +96,44 @@ type JobStore interface {
 	DeleteJob(id string) error
 }
 
-// SaveFunc is a callback function for saving fetched artwork
+// SaveFunc is a callback function for saving fetched album artwork
 type SaveFunc func(albumID string, result *FetchResult) error
+
+// SaveFuncArtist is a callback function for saving fetched artist artwork
+type SaveFuncArtist func(artistID string, result *FetchResult) error
+
+// ArtistArtworkProvider defines the interface for fetching artist images
+type ArtistArtworkProvider interface {
+	FetchArtistImage(ctx context.Context, mbid string) (*FetchResult, error)
+}
+
+// ArtistURLProvider returns a URL for hotlinking (no caching)
+type ArtistURLProvider interface {
+	SearchArtistImageURL(ctx context.Context, artistName string) (string, error)
+}
+
+// Artist represents minimal artist info for enrichment
+type Artist struct {
+	ID         string
+	Name       string
+	HasArtwork bool
+}
+
+// ArtistProvider provides artist info for enrichment
+type ArtistProvider interface {
+	GetArtistsWithoutArtwork() ([]Artist, error)
+	UpdateArtistArtwork(artistID, artworkID string) error
+	UpdateArtistArtworkURL(artistID, url string, source string) error // For Deezer hotlinks
+	GetFirstAlbumArtwork(artistName string) (string, error)           // Last resort fallback
+}
 
 // WorkerConfig contains configuration for the enrichment worker
 type WorkerConfig struct {
-	BatchSize    int
-	Interval     time.Duration
-	MaxRetries   int
-	SaveFunc     SaveFunc
+	BatchSize      int
+	Interval       time.Duration
+	MaxRetries     int
+	SaveFunc       SaveFunc
+	SaveFuncArtist SaveFuncArtist
 }
 
 // DefaultWorkerConfig returns the default worker configuration

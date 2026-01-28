@@ -228,6 +228,38 @@ func main() {
 		http.Error(w, "album art not found", http.StatusNotFound)
 	})
 
+	// Artist art endpoint - serves artist images from cache or redirects to external URLs
+	mux.HandleFunc("/artistart", func(w http.ResponseWriter, r *http.Request) {
+		artistID := r.URL.Query().Get("id")
+		artistName := r.URL.Query().Get("name")
+
+		if artistID == "" && artistName == "" {
+			http.Error(w, "id or name parameter required", http.StatusBadRequest)
+			return
+		}
+
+		// Try to get artist artwork from the cache via socket server
+		artworkInfo := socketServer.GetArtistArtwork(artistID, artistName)
+		if artworkInfo == nil {
+			http.Error(w, "artist artwork not found", http.StatusNotFound)
+			return
+		}
+
+		// If it's a URL (Deezer hotlink or album art URL), redirect to it
+		if artworkInfo.IsURL {
+			http.Redirect(w, r, artworkInfo.URL, http.StatusFound)
+			return
+		}
+
+		// Serve from cached file
+		if artworkInfo.Data != nil {
+			serveArtwork(w, artworkInfo.Data)
+			return
+		}
+
+		http.Error(w, "artist artwork not found", http.StatusNotFound)
+	})
+
 	// Network status endpoint
 	mux.HandleFunc("/api/v1/network", func(w http.ResponseWriter, r *http.Request) {
 		status := getNetworkStatus()

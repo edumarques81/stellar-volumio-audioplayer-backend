@@ -34,8 +34,11 @@ type Coordinator struct {
 	mu             sync.Mutex
 	mbClient       *MusicBrainzClient
 	caaClient      *CAAClient
+	fanartClient   *FanartClient
+	deezerClient   *DeezerClient
 	jobStore       JobStore
 	albumProvider  AlbumProvider
+	artistProvider ArtistProvider
 	cacheDir       string
 	running        bool
 	processingDone chan struct{}
@@ -56,6 +59,24 @@ func NewCoordinator(
 		albumProvider: albumProvider,
 		cacheDir:      cacheDir,
 	}
+}
+
+// WithFanartClient adds a Fanart.tv client for artist images.
+func (c *Coordinator) WithFanartClient(fc *FanartClient) *Coordinator {
+	c.fanartClient = fc
+	return c
+}
+
+// WithDeezerClient adds a Deezer client for artist images (fallback).
+func (c *Coordinator) WithDeezerClient(dc *DeezerClient) *Coordinator {
+	c.deezerClient = dc
+	return c
+}
+
+// WithArtistProvider adds an artist provider for artist enrichment.
+func (c *Coordinator) WithArtistProvider(ap ArtistProvider) *Coordinator {
+	c.artistProvider = ap
+	return c
 }
 
 // QueueMissingArtwork finds albums without artwork, looks up MBIDs,
@@ -224,4 +245,160 @@ func (c *Coordinator) WaitForDone() {
 func generateArtworkID(albumID, artType string) string {
 	data := albumID + "\x00" + artType
 	return fmt.Sprintf("%x", md5.Sum([]byte(data)))
+}
+
+// QueueMissingArtistImages finds artists without images, looks up MBIDs,
+// and queues enrichment jobs. This is called after album artwork processing.
+func (c *Coordinator) QueueMissingArtistImages(ctx context.Context) error {
+	if c.artistProvider == nil {
+		log.Debug().Msg("Artist provider not configured, skipping artist enrichment")
+		return nil
+	}
+
+	c.mu.Lock()
+	if c.running {
+		c.mu.Unlock()
+		return nil // Already running
+	}
+	c.running = true
+	c.processingDone = make(chan struct{})
+	c.mu.Unlock()
+
+	defer func() {
+		c.mu.Lock()
+		c.running = false
+		close(c.processingDone)
+		c.mu.Unlock()
+	}()
+
+	log.Info().Msg("Starting artist image enrichment queue processing")
+
+	// Get artists without artwork
+	artists, err := c.artistProvider.GetArtistsWithoutArtwork()
+	if err != nil {
+		return fmt.Errorf("get artists without artwork: %w", err)
+	}
+
+	if len(artists) == 0 {
+		log.Info().Msg("No artists missing artwork")
+		return nil
+	}
+
+	log.Info().Int("count", len(artists)).Msg("Found artists missing artwork")
+
+	queued := 0
+	skipped := 0
+
+	for _, artist := range artists {
+		select {
+		case <-ctx.Done():
+			log.Info().Msg("Artist enrichment queue processing cancelled")
+			return ctx.Err()
+		default:
+		}
+
+		// Look up Artist MBID
+		mbid, err := c.mbClient.SearchArtist(ctx, artist.Name)
+		if err != nil {
+			log.Debug().
+				Err(err).
+				Str("artist", artist.Name).
+				Msg("MusicBrainz artist lookup failed")
+			// Continue without MBID - will use Deezer fallback
+		}
+
+		// Queue job (even without MBID - will use Deezer/album fallback)
+		job := &EnrichmentJob{
+			ID:          generateJobID(artist.ID, "artist:"+artist.Name),
+			Type:        JobTypeArtistArt,
+			ArtistID:    artist.ID,
+			ArtistName:  artist.Name,
+			MBID:        mbid,
+			Status:      JobStatusPending,
+			Priority:    0,
+			MaxRetries:  3,
+			NextRetryAt: time.Now(),
+			CreatedAt:   time.Now(),
+			UpdatedAt:   time.Now(),
+		}
+
+		if err := c.jobStore.AddJob(job); err != nil {
+			log.Warn().Err(err).Str("artistID", artist.ID).Msg("Failed to queue artist enrichment job")
+			skipped++
+			continue
+		}
+
+		queued++
+		log.Debug().
+			Str("artist", artist.Name).
+			Str("mbid", mbid).
+			Msg("Queued artist enrichment job")
+	}
+
+	log.Info().
+		Int("queued", queued).
+		Int("skipped", skipped).
+		Msg("Artist enrichment queue processing complete")
+
+	return nil
+}
+
+// CreateArtistSaveFunc returns a SaveFuncArtist that saves artist artwork to disk and updates the cache.
+func (c *Coordinator) CreateArtistSaveFunc() SaveFuncArtist {
+	return func(artistID string, result *FetchResult) error {
+		// Determine file extension
+		ext := ".jpg"
+		switch result.MimeType {
+		case "image/png":
+			ext = ".png"
+		case "image/gif":
+			ext = ".gif"
+		case "image/webp":
+			ext = ".webp"
+		}
+
+		// Create cache directory for artist artwork
+		artworkDir := filepath.Join(c.cacheDir, "artwork", "artists")
+		if err := os.MkdirAll(artworkDir, 0755); err != nil {
+			return fmt.Errorf("create artist artwork dir: %w", err)
+		}
+
+		// Save file
+		filename := artistID + ext
+		filePath := filepath.Join(artworkDir, filename)
+		if err := os.WriteFile(filePath, result.Data, 0644); err != nil {
+			return fmt.Errorf("write artist artwork file: %w", err)
+		}
+
+		// Generate artwork ID and update artist
+		artworkID := generateArtworkID(artistID, "artist")
+		if c.artistProvider != nil {
+			if err := c.artistProvider.UpdateArtistArtwork(artistID, artworkID); err != nil {
+				log.Warn().Err(err).Str("artistID", artistID).Msg("Failed to update artist artwork")
+			}
+		}
+
+		log.Info().
+			Str("artistID", artistID).
+			Str("path", filePath).
+			Int("size", len(result.Data)).
+			Msg("Saved enriched artist artwork")
+
+		return nil
+	}
+}
+
+// GetFanartClient returns the Fanart.tv client.
+func (c *Coordinator) GetFanartClient() *FanartClient {
+	return c.fanartClient
+}
+
+// GetDeezerClient returns the Deezer client.
+func (c *Coordinator) GetDeezerClient() *DeezerClient {
+	return c.deezerClient
+}
+
+// GetArtistProvider returns the artist provider.
+func (c *Coordinator) GetArtistProvider() ArtistProvider {
+	return c.artistProvider
 }

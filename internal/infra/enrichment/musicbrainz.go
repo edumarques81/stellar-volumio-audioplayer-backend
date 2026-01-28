@@ -199,6 +199,121 @@ func (c *MusicBrainzClient) SearchRelease(ctx context.Context, artist, album str
 	return "", nil
 }
 
+// MBArtist represents an artist from MusicBrainz API.
+type MBArtist struct {
+	ID    string `json:"id"`    // MusicBrainz Artist ID (MBID)
+	Name  string `json:"name"`  // Artist name
+	Score int    `json:"score"` // Search relevance score (0-100)
+	Type  string `json:"type"`  // Artist type (Person, Group, etc.)
+}
+
+// MBArtistSearchResponse represents the MusicBrainz artist search API response.
+type MBArtistSearchResponse struct {
+	Artists []MBArtist `json:"artists"`
+	Count   int        `json:"count"`
+	Offset  int        `json:"offset"`
+}
+
+// SearchArtist searches for an artist by name.
+// Returns the best matching artist MBID or empty string if not found.
+func (c *MusicBrainzClient) SearchArtist(ctx context.Context, artistName string) (string, error) {
+	// Wait for rate limiter
+	if err := c.limiter.Wait(ctx); err != nil {
+		return "", fmt.Errorf("rate limiter: %w", err)
+	}
+
+	// Build search query using Lucene syntax
+	query := fmt.Sprintf(`artist:"%s"`, escapeQuery(artistName))
+
+	// Build URL
+	reqURL := fmt.Sprintf("%s/artist?query=%s&fmt=json&limit=5",
+		c.baseURL, url.QueryEscape(query))
+
+	log.Debug().
+		Str("artistName", artistName).
+		Str("url", reqURL).
+		Msg("Searching MusicBrainz for artist")
+
+	// Create request
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, reqURL, nil)
+	if err != nil {
+		return "", fmt.Errorf("create request: %w", err)
+	}
+
+	req.Header.Set("User-Agent", c.userAgent)
+	req.Header.Set("Accept", "application/json")
+
+	// Execute request
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("http request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	// Handle response status
+	switch resp.StatusCode {
+	case http.StatusOK:
+		// Success
+	case http.StatusTooManyRequests:
+		log.Warn().Msg("MusicBrainz rate limit exceeded")
+		return "", ErrRateLimited
+	case http.StatusServiceUnavailable, http.StatusBadGateway, http.StatusGatewayTimeout:
+		log.Warn().Int("status", resp.StatusCode).Msg("MusicBrainz temporary error")
+		return "", ErrTemporaryFailure
+	default:
+		return "", fmt.Errorf("unexpected status: %d", resp.StatusCode)
+	}
+
+	// Read response body
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", fmt.Errorf("read response: %w", err)
+	}
+
+	// Parse JSON response
+	var searchResp MBArtistSearchResponse
+	if err := json.Unmarshal(body, &searchResp); err != nil {
+		return "", fmt.Errorf("parse response: %w", err)
+	}
+
+	// Find best match
+	if len(searchResp.Artists) == 0 {
+		log.Debug().
+			Str("artistName", artistName).
+			Msg("No MusicBrainz artists found")
+		return "", nil
+	}
+
+	// Return the highest-scored artist (first result with score >= 80)
+	for _, artist := range searchResp.Artists {
+		if artist.Score >= 80 {
+			log.Debug().
+				Str("artistName", artistName).
+				Str("mbid", artist.ID).
+				Int("score", artist.Score).
+				Msg("Found MusicBrainz artist")
+			return artist.ID, nil
+		}
+	}
+
+	// If no high-confidence match, return first result if score > 50
+	if searchResp.Artists[0].Score > 50 {
+		artist := searchResp.Artists[0]
+		log.Debug().
+			Str("artistName", artistName).
+			Str("mbid", artist.ID).
+			Int("score", artist.Score).
+			Msg("Found MusicBrainz artist (lower confidence)")
+		return artist.ID, nil
+	}
+
+	log.Debug().
+		Str("artistName", artistName).
+		Int("bestScore", searchResp.Artists[0].Score).
+		Msg("MusicBrainz artist matches too low confidence")
+	return "", nil
+}
+
 // escapeQuery escapes special characters in Lucene query.
 func escapeQuery(s string) string {
 	// Escape Lucene special characters: + - && || ! ( ) { } [ ] ^ " ~ * ? : \ /

@@ -1,6 +1,8 @@
 package library
 
 import (
+	"strings"
+
 	"github.com/edumarques81/stellar-volumio-audioplayer-backend/internal/infra/cache"
 	"github.com/rs/zerolog/log"
 )
@@ -151,9 +153,26 @@ func (s *CachedService) GetArtists(req GetArtistsRequest) ArtistsResponse {
 	// Convert cached artists to response format
 	artists := make([]Artist, 0, len(cachedArtists))
 	for _, ca := range cachedArtists {
+		// Generate artist art URL if artwork exists
+		artistArt := ""
+		if ca.ArtworkID != "" {
+			// Check if it's a URL or file reference by looking up the artwork
+			artwork, _ := s.cacheDAO.GetArtworkByArtist(ca.ID)
+			if artwork != nil && artwork.FilePath != "" {
+				if strings.HasPrefix(artwork.FilePath, "http") {
+					// It's an external URL (Deezer hotlink)
+					artistArt = artwork.FilePath
+				} else {
+					// Local file - use endpoint
+					artistArt = "/artistart?id=" + ca.ID
+				}
+			}
+		}
+
 		artists = append(artists, Artist{
 			Name:       ca.Name,
 			AlbumCount: ca.AlbumCount,
+			AlbumArt:   artistArt,
 		})
 	}
 
