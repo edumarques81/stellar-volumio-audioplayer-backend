@@ -481,6 +481,27 @@ func (s *Server) setupHandlers() {
 			client.Emit("pushSystemInfo", GetSystemInfo())
 		})
 
+		// Rescan database event - triggers MPD to scan for new/changed music files
+		client.On("rescanDb", func(args ...any) {
+			log.Info().Str("id", clientID).Msg("rescanDb requested")
+			jobID, err := s.mpdClient.Update("")
+			if err != nil {
+				log.Error().Err(err).Msg("Failed to start database update")
+				client.Emit("pushToastMessage", map[string]interface{}{
+					"type":    "error",
+					"title":   "Rescan Failed",
+					"message": err.Error(),
+				})
+				return
+			}
+			log.Info().Int("jobID", jobID).Msg("MPD database update started")
+			client.Emit("pushToastMessage", map[string]interface{}{
+				"type":    "success",
+				"title":   "Rescan Started",
+				"message": "Music library rescan has started. This may take a while.",
+			})
+		})
+
 		// Bit-perfect configuration check event
 		client.On("getBitPerfect", func(args ...any) {
 			log.Info().Str("id", clientID).Msg("getBitPerfect requested")

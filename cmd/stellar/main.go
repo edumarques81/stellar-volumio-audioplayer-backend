@@ -20,6 +20,7 @@ import (
 	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
 
+	"github.com/edumarques81/stellar-volumio-audioplayer-backend/internal/domain/artwork"
 	"github.com/edumarques81/stellar-volumio-audioplayer-backend/internal/domain/localmusic"
 	"github.com/edumarques81/stellar-volumio-audioplayer-backend/internal/domain/player"
 	"github.com/edumarques81/stellar-volumio-audioplayer-backend/internal/domain/sources"
@@ -182,6 +183,9 @@ func main() {
 		json.NewEncoder(w).Encode(version.GetInfo())
 	})
 
+	// Create filesystem artwork finder
+	filesystemFinder := artwork.NewFilesystemFinder(mpdMusicDir)
+
 	// Album art endpoint
 	mux.HandleFunc("/albumart", func(w http.ResponseWriter, r *http.Request) {
 		path := r.URL.Query().Get("path")
@@ -190,34 +194,38 @@ func main() {
 			return
 		}
 
-		// Try embedded picture first (ReadPicture)
-		data, err := mpdClient.ReadPicture(path)
-		if err != nil {
-			// Fall back to album art file in directory (AlbumArt)
-			data, err = mpdClient.AlbumArt(path)
-			if err != nil {
-				log.Debug().Err(err).Str("path", path).Msg("Album art not found")
-				http.Error(w, "album art not found", http.StatusNotFound)
+		var data []byte
+		var err error
+
+		// 1. Try filesystem search first (various filenames, parent dirs)
+		artPath, fsErr := filesystemFinder.FindArtwork(path)
+		if fsErr == nil && artPath != "" {
+			data, err = filesystemFinder.ReadArtwork(artPath)
+			if err == nil && len(data) > 0 {
+				log.Debug().Str("path", path).Str("artPath", artPath).Msg("Serving artwork from filesystem")
+				serveArtwork(w, data)
 				return
 			}
 		}
 
-		// Detect content type from image magic bytes
-		contentType := "image/jpeg" // default
-		if len(data) >= 8 {
-			if data[0] == 0x89 && data[1] == 0x50 && data[2] == 0x4E && data[3] == 0x47 {
-				contentType = "image/png"
-			} else if data[0] == 0x47 && data[1] == 0x49 && data[2] == 0x46 {
-				contentType = "image/gif"
-			} else if data[0] == 0x52 && data[1] == 0x49 && data[2] == 0x46 && data[3] == 0x46 {
-				contentType = "image/webp"
-			}
+		// 2. Try MPD albumart (folder-based) - fallback for remote sources
+		data, err = mpdClient.AlbumArt(path)
+		if err == nil && len(data) > 0 {
+			log.Debug().Str("path", path).Msg("Serving artwork from MPD albumart")
+			serveArtwork(w, data)
+			return
 		}
 
-		w.Header().Set("Content-Type", contentType)
-		w.Header().Set("Cache-Control", "public, max-age=86400") // Cache for 1 day
-		w.Header().Set("Access-Control-Allow-Origin", "*")
-		w.Write(data)
+		// 3. Try embedded picture (ReadPicture)
+		data, err = mpdClient.ReadPicture(path)
+		if err == nil && len(data) > 0 {
+			log.Debug().Str("path", path).Msg("Serving artwork from embedded picture")
+			serveArtwork(w, data)
+			return
+		}
+
+		log.Debug().Str("path", path).Msg("Album art not found")
+		http.Error(w, "album art not found", http.StatusNotFound)
 	})
 
 	// Network status endpoint
@@ -314,6 +322,15 @@ func main() {
 	}
 
 	log.Info().Msg("Server stopped")
+}
+
+// serveArtwork writes artwork data to the HTTP response with appropriate headers.
+func serveArtwork(w http.ResponseWriter, data []byte) {
+	contentType := artwork.DetectMimeType(data)
+	w.Header().Set("Content-Type", contentType)
+	w.Header().Set("Cache-Control", "public, max-age=86400") // Cache for 1 day
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	w.Write(data)
 }
 
 func itoa(i int) string {

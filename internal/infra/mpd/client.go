@@ -898,3 +898,22 @@ func (c *Client) GetArtistsWithAlbumCounts() (map[string]int, error) {
 
 	return counts, nil
 }
+
+// Update initiates a database update (rescan) for the music directory.
+// If uri is empty, it updates the entire database.
+// Returns the job ID for the update.
+func (c *Client) Update(uri string) (int, error) {
+	if err := c.ensureConnected(); err != nil {
+		return 0, err
+	}
+
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	jobID, err := c.client.Update(uri)
+	if err != nil {
+		return 0, fmt.Errorf("failed to update database: %w", err)
+	}
+
+	return jobID, nil
+}

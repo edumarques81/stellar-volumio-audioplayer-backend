@@ -52,3 +52,12 @@ type ArtworkDAO interface {
 	// SaveArtwork saves artwork metadata to the cache
 	SaveArtwork(art *CachedArtwork) error
 }
+
+// FilesystemArtworkFinder defines the interface for filesystem-based artwork lookup.
+type FilesystemArtworkFinder interface {
+	// FindArtwork searches for artwork file starting from the track's directory,
+	// checking parent directories up to a configured limit.
+	FindArtwork(trackURI string) (string, error)
+	// ReadArtwork reads the artwork file and returns its data.
+	ReadArtwork(path string) ([]byte, error)
+}

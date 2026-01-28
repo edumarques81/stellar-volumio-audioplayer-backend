@@ -14,14 +14,16 @@ import (
 // Resolver handles artwork resolution with multi-source fallback.
 // Resolution order:
 // 1. Check cache (artwork table + file on disk)
-// 2. MPD albumart (folder-based: cover.jpg, folder.jpg, etc.)
-// 3. MPD readpicture (embedded in audio file tags)
-// 4. Web fetch (MusicBrainz/Cover Art Archive) - handled by enrichment subsystem
-// 5. Placeholder
+// 2. Filesystem search (various filenames, parent dirs) - NEW
+// 3. MPD albumart (folder-based: cover.jpg, folder.jpg, etc.)
+// 4. MPD readpicture (embedded in audio file tags)
+// 5. Web fetch (MusicBrainz/Cover Art Archive) - handled by enrichment subsystem
+// 6. Placeholder
 type Resolver struct {
-	mpd      MPDArtworkProvider
-	dao      ArtworkDAO
-	cacheDir string
+	mpd        MPDArtworkProvider
+	filesystem FilesystemArtworkFinder
+	dao        ArtworkDAO
+	cacheDir   string
 }
 
 // NewResolver creates a new artwork resolver.
@@ -33,6 +35,12 @@ func NewResolver(mpd MPDArtworkProvider, dao ArtworkDAO, cacheDir string) *Resol
 	}
 }
 
+// WithFilesystem sets the filesystem artwork finder for the resolver.
+func (r *Resolver) WithFilesystem(fs FilesystemArtworkFinder) *Resolver {
+	r.filesystem = fs
+	return r
+}
+
 // Resolve attempts to find or fetch artwork for an album.
 // Returns a ResolveResult with the artwork path and source.
 // If no artwork is found, returns a placeholder result (never returns error for missing art).
@@ -42,17 +50,22 @@ func (r *Resolver) Resolve(albumID, trackURI string) (*ResolveResult, error) {
 		return result, nil
 	}
 
-	// 2. Try MPD albumart (folder-based)
+	// 2. Try filesystem search (various filenames, parent dirs)
+	if result, err := r.tryFilesystemArtwork(albumID, trackURI); err == nil && result != nil {
+		return result, nil
+	}
+
+	// 3. Try MPD albumart (folder-based) - fallback for remote sources
 	if result, err := r.tryMPDAlbumArt(albumID, trackURI); err == nil && result != nil {
 		return result, nil
 	}
 
-	// 3. Try MPD readpicture (embedded)
+	// 4. Try MPD readpicture (embedded)
 	if result, err := r.tryMPDReadPicture(albumID, trackURI); err == nil && result != nil {
 		return result, nil
 	}
 
-	// 4. Return placeholder (web enrichment handled separately)
+	// 5. Return placeholder (web enrichment handled separately)
 	return r.placeholder(), nil
 }
 
@@ -86,6 +99,39 @@ func (r *Resolver) checkCache(albumID string) *ResolveResult {
 		Height:   cached.Height,
 		FileSize: int(info.Size()),
 	}
+}
+
+// tryFilesystemArtwork attempts to find artwork via direct filesystem access.
+// This searches for various artwork filenames and checks parent directories.
+func (r *Resolver) tryFilesystemArtwork(albumID, trackURI string) (*ResolveResult, error) {
+	if r.filesystem == nil {
+		return nil, ErrNoArtwork
+	}
+
+	artPath, err := r.filesystem.FindArtwork(trackURI)
+	if err != nil || artPath == "" {
+		return nil, ErrNoArtwork
+	}
+
+	// Read the file
+	data, err := r.filesystem.ReadArtwork(artPath)
+	if err != nil {
+		log.Debug().Err(err).Str("path", artPath).Msg("Failed to read artwork file")
+		return nil, ErrNoArtwork
+	}
+
+	if len(data) == 0 {
+		return nil, ErrNoArtwork
+	}
+
+	log.Debug().
+		Str("albumID", albumID).
+		Str("artPath", artPath).
+		Int("size", len(data)).
+		Msg("Found artwork via filesystem")
+
+	// Save to cache and return result
+	return r.saveToCache(albumID, data, "folder")
 }
 
 // tryMPDAlbumArt attempts to fetch folder-based album art from MPD.
