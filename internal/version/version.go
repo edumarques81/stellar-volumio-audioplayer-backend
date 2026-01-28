@@ -9,7 +9,7 @@ var (
 	Name = "Stellar"
 
 	// Version is the semantic version (set via -ldflags at build time)
-	Version = "1.3.0"
+	Version = "1.4.0"
 
 	// BuildTime is the build timestamp (set via -ldflags at build time)
 	BuildTime = ""

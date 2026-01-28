@@ -711,3 +711,51 @@ func (dao *DAO) LogCacheStats() {
 		Int("radio", stats.RadioCount).
 		Msg("Cache statistics")
 }
+
+// AlbumInfo contains basic album info for enrichment queries.
+type AlbumInfo struct {
+	ID          string
+	Title       string
+	AlbumArtist string
+	FirstTrack  string
+	HasArtwork  bool
+}
+
+// GetAlbumsWithoutArtwork returns albums that don't have cached artwork.
+func (dao *DAO) GetAlbumsWithoutArtwork() ([]AlbumInfo, error) {
+	db := dao.db.DB()
+	if db == nil {
+		return nil, fmt.Errorf("database not open")
+	}
+
+	rows, err := db.Query(`
+		SELECT a.id, a.title, a.album_artist, a.first_track, a.artwork_id
+		FROM albums a
+		WHERE a.artwork_id IS NULL OR a.artwork_id = ''
+		ORDER BY a.title COLLATE NOCASE
+	`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var albums []AlbumInfo
+	for rows.Next() {
+		var album AlbumInfo
+		var firstTrack, artworkID sql.NullString
+
+		err := rows.Scan(&album.ID, &album.Title, &album.AlbumArtist, &firstTrack, &artworkID)
+		if err != nil {
+			return nil, err
+		}
+
+		if firstTrack.Valid {
+			album.FirstTrack = firstTrack.String
+		}
+		album.HasArtwork = artworkID.Valid && artworkID.String != ""
+
+		albums = append(albums, album)
+	}
+
+	return albums, nil
+}

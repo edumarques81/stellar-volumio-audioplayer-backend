@@ -29,22 +29,24 @@ import (
 
 // Server handles Socket.io connections and events.
 type Server struct {
-	io                *socket.Server
-	playerService     *player.Service
-	mpdClient         *mpdclient.Client
-	audioController   *audio.Controller
-	sourcesService    *sources.Service
-	qobuzService      *qobuz.Service
-	localMusicService *localmusic.Service
-	libraryService    *library.Service
-	cachedService     *library.CachedService
-	libraryHandlers   *LibraryHandlers
-	cacheHandlers     *CacheHandlers
-	cacheDB           *cache.DB
-	audirvanaService  *audirvana.Service
-	mu                sync.RWMutex
-	clients           map[string]*socket.Socket
-	lastNetwork       NetworkStatus
+	io                  *socket.Server
+	playerService       *player.Service
+	mpdClient           *mpdclient.Client
+	audioController     *audio.Controller
+	sourcesService      *sources.Service
+	qobuzService        *qobuz.Service
+	localMusicService   *localmusic.Service
+	libraryService      *library.Service
+	cachedService       *library.CachedService
+	libraryHandlers     *LibraryHandlers
+	cacheHandlers       *CacheHandlers
+	enrichmentHandlers  *EnrichmentHandlers
+	cacheDB             *cache.DB
+	cacheDAO            *cache.DAO
+	audirvanaService    *audirvana.Service
+	mu                  sync.RWMutex
+	clients             map[string]*socket.Socket
+	lastNetwork         NetworkStatus
 }
 
 // NewServer creates a new Socket.io server.
@@ -93,6 +95,12 @@ func NewServer(playerService *player.Service, mpdClient *mpdclient.Client, sourc
 		libraryHandlers = NewLibraryHandlers(cachedSvc)
 	}
 
+	// Create cache DAO for enrichment
+	var cacheDAO *cache.DAO
+	if cacheDB != nil {
+		cacheDAO = cache.NewDAO(cacheDB)
+	}
+
 	s := &Server{
 		io:                server,
 		playerService:     playerService,
@@ -105,6 +113,7 @@ func NewServer(playerService *player.Service, mpdClient *mpdclient.Client, sourc
 		cachedService:     cachedSvc,
 		libraryHandlers:   libraryHandlers,
 		cacheDB:           cacheDB,
+		cacheDAO:          cacheDAO,
 		audirvanaService:  audirvana.NewService(),
 		clients:           make(map[string]*socket.Socket),
 	}
@@ -112,6 +121,15 @@ func NewServer(playerService *player.Service, mpdClient *mpdclient.Client, sourc
 	// Initialize cache handlers if cached service is available
 	if cachedSvc != nil {
 		s.cacheHandlers = NewCacheHandlers(cachedSvc, s)
+	}
+
+	// Initialize enrichment handlers if cache is available
+	if cacheDB != nil && cacheDAO != nil {
+		s.enrichmentHandlers = NewEnrichmentHandlers(EnrichmentConfig{
+			CacheDir: os.ExpandEnv("$HOME/stellar-backend/data/cache"),
+			DB:       cacheDB.DB(),
+			CacheDAO: cacheDAO,
+		}, s)
 	}
 
 	s.setupHandlers()
@@ -166,6 +184,11 @@ func (s *Server) setupHandlers() {
 		// Register cache handlers
 		if s.cacheHandlers != nil {
 			s.cacheHandlers.RegisterHandlers(client)
+		}
+
+		// Register enrichment handlers
+		if s.enrichmentHandlers != nil {
+			s.enrichmentHandlers.RegisterHandlers(client)
 		}
 
 		// Player control events
@@ -1483,28 +1506,8 @@ func (s *Server) handleDatabaseUpdate() {
 			log.Error().Err(err).Msg("Failed to rebuild cache after database update")
 			return
 		}
-
-		// Get updated stats and broadcast
-		stats, err := s.cachedService.GetCacheStatus()
-		if err != nil {
-			log.Warn().Err(err).Msg("Failed to get cache status after rebuild")
-			return
-		}
-
-		log.Info().
-			Int("albums", stats.AlbumCount).
-			Int("artists", stats.ArtistCount).
-			Int("tracks", stats.TrackCount).
-			Msg("Library cache rebuilt after database update")
-
-		// Broadcast cache updated event to all clients
-		event := map[string]interface{}{
-			"timestamp":   stats.LastUpdated.Format("2006-01-02T15:04:05Z07:00"),
-			"albumCount":  stats.AlbumCount,
-			"artistCount": stats.ArtistCount,
-			"trackCount":  stats.TrackCount,
-		}
-		s.io.Emit("library:cache:updated", event)
+		s.broadcastCacheUpdated()
+		s.triggerEnrichment()
 	}()
 }
 
@@ -1516,6 +1519,11 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 // InitializeCache checks if the cache is empty and triggers a background rebuild if needed.
 // This should be called after the server is created to ensure the cache is populated.
 func (s *Server) InitializeCache() {
+	// Start enrichment worker
+	if s.enrichmentHandlers != nil {
+		s.enrichmentHandlers.Initialize()
+	}
+
 	if s.cachedService == nil {
 		return
 	}
@@ -1534,40 +1542,53 @@ func (s *Server) InitializeCache() {
 				log.Error().Err(err).Msg("Background cache rebuild failed")
 				return
 			}
-
-			// Get updated stats and broadcast
-			newStats, err := s.cachedService.GetCacheStatus()
-			if err != nil {
-				log.Warn().Err(err).Msg("Failed to get cache status after rebuild")
-				return
-			}
-
-			log.Info().
-				Int("albums", newStats.AlbumCount).
-				Int("artists", newStats.ArtistCount).
-				Int("tracks", newStats.TrackCount).
-				Msg("Library cache built successfully")
-
-			// Broadcast cache updated event to all clients
-			event := map[string]interface{}{
-				"timestamp":   newStats.LastUpdated.Format("2006-01-02T15:04:05Z07:00"),
-				"albumCount":  newStats.AlbumCount,
-				"artistCount": newStats.ArtistCount,
-				"trackCount":  newStats.TrackCount,
-			}
-			s.io.Emit("library:cache:updated", event)
+			s.broadcastCacheUpdated()
+			s.triggerEnrichment()
 		}()
 	} else {
 		log.Info().
 			Int("albums", stats.AlbumCount).
 			Int("artists", stats.ArtistCount).
 			Msg("Library cache loaded from disk")
+		s.triggerEnrichment()
 	}
+}
+
+// triggerEnrichment queues missing artwork for enrichment.
+func (s *Server) triggerEnrichment() {
+	if s.enrichmentHandlers != nil {
+		s.enrichmentHandlers.QueueMissingArtwork()
+	}
+}
+
+// broadcastCacheUpdated broadcasts cache update event to all clients.
+func (s *Server) broadcastCacheUpdated() {
+	stats, err := s.cachedService.GetCacheStatus()
+	if err != nil {
+		log.Warn().Err(err).Msg("Failed to get cache status after rebuild")
+		return
+	}
+	log.Info().
+		Int("albums", stats.AlbumCount).
+		Int("artists", stats.ArtistCount).
+		Int("tracks", stats.TrackCount).
+		Msg("Library cache built successfully")
+
+	event := map[string]interface{}{
+		"timestamp":   stats.LastUpdated.Format("2006-01-02T15:04:05Z07:00"),
+		"albumCount":  stats.AlbumCount,
+		"artistCount": stats.ArtistCount,
+		"trackCount":  stats.TrackCount,
+	}
+	s.io.Emit("library:cache:updated", event)
 }
 
 // Close closes the Socket.io server and cache database.
 func (s *Server) Close() error {
 	s.io.Close(nil)
+	if s.enrichmentHandlers != nil {
+		s.enrichmentHandlers.Close()
+	}
 	if s.cacheDB != nil {
 		if err := s.cacheDB.Close(); err != nil {
 			log.Warn().Err(err).Msg("Failed to close cache database")

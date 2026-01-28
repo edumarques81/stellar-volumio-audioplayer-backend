@@ -16,7 +16,7 @@ const (
 	DefaultCAABaseURL = "https://coverartarchive.org"
 
 	// DefaultUserAgent follows MusicBrainz guidelines
-	DefaultUserAgent = "Stellar/1.3.0 (https://github.com/edumarques81/stellar-volumio-audioplayer-backend)"
+	DefaultUserAgent = "Stellar/1.4.0 (https://github.com/edumarques81/stellar-volumio-audioplayer-backend)"
 
 	// DefaultRateLimit is 1 request per second (MusicBrainz guideline)
 	DefaultRateLimit = 1
