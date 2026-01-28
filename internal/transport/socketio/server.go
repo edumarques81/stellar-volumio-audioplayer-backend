@@ -17,6 +17,7 @@ import (
 
 	"github.com/edumarques81/stellar-volumio-audioplayer-backend/internal/audio"
 	"github.com/edumarques81/stellar-volumio-audioplayer-backend/internal/domain/audirvana"
+	"github.com/edumarques81/stellar-volumio-audioplayer-backend/internal/domain/device"
 	"github.com/edumarques81/stellar-volumio-audioplayer-backend/internal/domain/library"
 	"github.com/edumarques81/stellar-volumio-audioplayer-backend/internal/domain/localmusic"
 	"github.com/edumarques81/stellar-volumio-audioplayer-backend/internal/domain/player"
@@ -44,6 +45,8 @@ type Server struct {
 	cacheDB             *cache.DB
 	cacheDAO            *cache.DAO
 	audirvanaService    *audirvana.Service
+	deviceService       *device.Service   // Volumio device identity
+	volumioHandlers     *VolumioHandlers  // Volumio Connect compatibility
 	mu                  sync.RWMutex
 	clients             map[string]*socket.Socket
 	lastNetwork         NetworkStatus
@@ -101,6 +104,13 @@ func NewServer(playerService *player.Service, mpdClient *mpdclient.Client, sourc
 		cacheDAO = cache.NewDAO(cacheDB)
 	}
 
+	// Initialize device service for Volumio Connect app compatibility
+	deviceConfigPath := os.ExpandEnv("$HOME/.stellar/device.json")
+	deviceSvc, err := device.NewService(deviceConfigPath)
+	if err != nil {
+		log.Warn().Err(err).Msg("Failed to initialize device service, Volumio integration may be limited")
+	}
+
 	s := &Server{
 		io:                server,
 		playerService:     playerService,
@@ -115,8 +125,12 @@ func NewServer(playerService *player.Service, mpdClient *mpdclient.Client, sourc
 		cacheDB:           cacheDB,
 		cacheDAO:          cacheDAO,
 		audirvanaService:  audirvana.NewService(),
+		deviceService:     deviceSvc,
 		clients:           make(map[string]*socket.Socket),
 	}
+
+	// Initialize Volumio handlers (must be after s is created)
+	s.volumioHandlers = NewVolumioHandlers(deviceSvc, playerService, s)
 
 	// Initialize cache handlers if cached service is available
 	if cachedSvc != nil {
@@ -189,6 +203,11 @@ func (s *Server) setupHandlers() {
 		// Register enrichment handlers
 		if s.enrichmentHandlers != nil {
 			s.enrichmentHandlers.RegisterHandlers(client)
+		}
+
+		// Register Volumio Connect compatibility handlers
+		if s.volumioHandlers != nil {
+			s.volumioHandlers.RegisterHandlers(client)
 		}
 
 		// Player control events

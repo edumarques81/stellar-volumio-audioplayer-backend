@@ -917,3 +917,127 @@ func (c *Client) Update(uri string) (int, error) {
 
 	return jobID, nil
 }
+
+// ============================================================
+// Queue Manipulation Methods (for Volumio integration)
+// ============================================================
+
+// AddId adds a URI to the queue and returns the song ID.
+// If position is -1, adds to the end of the queue.
+// If position >= 0, inserts at that position.
+func (c *Client) AddId(uri string, position int) (int, error) {
+	if err := c.ensureConnected(); err != nil {
+		return 0, err
+	}
+
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	// Use addid command which returns the song ID
+	var attrs mpd.Attrs
+	var err error
+
+	if position >= 0 {
+		attrs, err = c.client.Command("addid %s %d", uri, position).Attrs()
+	} else {
+		attrs, err = c.client.Command("addid %s", uri).Attrs()
+	}
+
+	if err != nil {
+		return 0, fmt.Errorf("failed to add song: %w", err)
+	}
+
+	// Parse the returned ID
+	idStr := attrs["Id"]
+	if idStr == "" {
+		return 0, fmt.Errorf("no song ID returned")
+	}
+
+	id, err := strconv.Atoi(idStr)
+	if err != nil {
+		return 0, fmt.Errorf("invalid song ID: %w", err)
+	}
+
+	return id, nil
+}
+
+// Move moves a song in the queue from one position to another.
+// Note: gompd's Move function takes (start, end, to) for range moves.
+// We use (from, from+1, to) to move a single song from position 'from' to 'to'.
+func (c *Client) Move(from, to int) error {
+	if err := c.ensureConnected(); err != nil {
+		return err
+	}
+
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	return c.client.Move(from, from+1, to)
+}
+
+// Delete removes a song from the queue by position.
+func (c *Client) Delete(pos int) error {
+	if err := c.ensureConnected(); err != nil {
+		return err
+	}
+
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	return c.client.Delete(pos, pos+1)
+}
+
+// GetCurrentPosition returns the position of the currently playing song.
+// Returns -1 if nothing is playing.
+func (c *Client) GetCurrentPosition() (int, error) {
+	if err := c.ensureConnected(); err != nil {
+		return 0, err
+	}
+
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	status, err := c.client.Status()
+	if err != nil {
+		return 0, err
+	}
+
+	songPos := status["song"]
+	if songPos == "" {
+		return -1, nil
+	}
+
+	pos, err := strconv.Atoi(songPos)
+	if err != nil {
+		return -1, nil
+	}
+
+	return pos, nil
+}
+
+// GetQueueLength returns the number of songs in the queue.
+func (c *Client) GetQueueLength() (int, error) {
+	if err := c.ensureConnected(); err != nil {
+		return 0, err
+	}
+
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	status, err := c.client.Status()
+	if err != nil {
+		return 0, err
+	}
+
+	lengthStr := status["playlistlength"]
+	if lengthStr == "" {
+		return 0, nil
+	}
+
+	length, err := strconv.Atoi(lengthStr)
+	if err != nil {
+		return 0, nil
+	}
+
+	return length, nil
+}

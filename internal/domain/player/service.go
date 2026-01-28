@@ -507,3 +507,69 @@ func isAudioFile(uri string) bool {
 	ext := strings.ToLower(path.Ext(uri))
 	return audioExtensions[ext]
 }
+
+// ============================================================
+// Volumio Integration Methods
+// ============================================================
+
+// Toggle toggles between play and pause based on current state.
+// This is commonly used by Volumio Connect apps instead of separate play/pause commands.
+func (s *Service) Toggle() error {
+	status, err := s.mpd.Status()
+	if err != nil {
+		return err
+	}
+
+	state := status["state"]
+	log.Info().Str("state", state).Msg("Toggle")
+
+	switch state {
+	case "play":
+		// Currently playing -> pause
+		return s.mpd.Pause(true)
+	case "pause", "stop":
+		// Currently paused or stopped -> resume/play
+		return s.mpd.Play(-1)
+	default:
+		// Unknown state -> try to play
+		return s.mpd.Play(-1)
+	}
+}
+
+// AddAndPlay clears the queue, adds the URI, and starts playing.
+// This is equivalent to replaceAndPlay but using the Volumio event name.
+func (s *Service) AddAndPlay(uri string) error {
+	log.Info().Str("uri", uri).Msg("AddAndPlay")
+	return s.ReplaceAndPlay(uri)
+}
+
+// InsertNext adds a URI to the queue right after the currently playing track.
+// If nothing is playing (currentPos == -1), it adds to position 0 (beginning of queue).
+func (s *Service) InsertNext(uri string) error {
+	log.Info().Str("uri", uri).Msg("InsertNext")
+
+	// Get current position (-1 if nothing playing)
+	currentPos, err := s.mpd.GetCurrentPosition()
+	if err != nil {
+		currentPos = -1
+	}
+
+	// Insert after current track: if currentPos is -1, insertPos becomes 0 (beginning)
+	// if currentPos is 3, insertPos becomes 4 (after the current track)
+	insertPos := currentPos + 1
+
+	_, err = s.mpd.AddId(uri, insertPos)
+	return err
+}
+
+// MoveQueueItem moves a track from one position to another in the queue.
+func (s *Service) MoveQueueItem(from, to int) error {
+	log.Info().Int("from", from).Int("to", to).Msg("MoveQueueItem")
+	return s.mpd.Move(from, to)
+}
+
+// RemoveQueueItem removes a track at the specified position from the queue.
+func (s *Service) RemoveQueueItem(pos int) error {
+	log.Info().Int("position", pos).Msg("RemoveQueueItem")
+	return s.mpd.Delete(pos)
+}

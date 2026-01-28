@@ -201,3 +201,59 @@ func TestClientCountArtistsWithoutConnect(t *testing.T) {
 		t.Error("CountArtists should fail when not connected")
 	}
 }
+
+// Tests for Volumio integration queue manipulation methods
+
+func TestClientAddIdWithoutConnect(t *testing.T) {
+	client := mpd.NewClient("localhost", 6600, "")
+
+	_, err := client.AddId("test.flac", -1)
+	if err == nil {
+		t.Error("AddId should fail when not connected")
+	}
+}
+
+func TestClientAddIdAtPositionWithoutConnect(t *testing.T) {
+	client := mpd.NewClient("localhost", 6600, "")
+
+	_, err := client.AddId("test.flac", 0)
+	if err == nil {
+		t.Error("AddId at position should fail when not connected")
+	}
+}
+
+func TestClientMoveWithoutConnect(t *testing.T) {
+	client := mpd.NewClient("localhost", 6600, "")
+
+	err := client.Move(0, 1)
+	if err == nil {
+		t.Error("Move should fail when not connected")
+	}
+}
+
+func TestClientDeleteWithoutConnect(t *testing.T) {
+	client := mpd.NewClient("localhost", 6600, "")
+
+	err := client.Delete(0)
+	if err == nil {
+		t.Error("Delete should fail when not connected")
+	}
+}
+
+func TestClientGetCurrentPositionWithoutConnect(t *testing.T) {
+	client := mpd.NewClient("localhost", 6600, "")
+
+	_, err := client.GetCurrentPosition()
+	if err == nil {
+		t.Error("GetCurrentPosition should fail when not connected")
+	}
+}
+
+func TestClientGetQueueLengthWithoutConnect(t *testing.T) {
+	client := mpd.NewClient("localhost", 6600, "")
+
+	_, err := client.GetQueueLength()
+	if err == nil {
+		t.Error("GetQueueLength should fail when not connected")
+	}
+}
