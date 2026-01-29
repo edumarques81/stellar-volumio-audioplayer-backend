@@ -1377,6 +1377,259 @@ func (s *Server) setupHandlers() {
 			// Broadcast to all clients
 			s.io.Emit("pushAudirvanaStatus", status)
 		})
+
+		// ==================== PLAYLIST HANDLERS ====================
+
+		// List all playlists
+		client.On("listPlaylist", func(args ...any) {
+			log.Debug().Str("id", clientID).Msg("listPlaylist requested")
+			playlists, err := s.mpdClient.ListPlaylists()
+			if err != nil {
+				log.Error().Err(err).Msg("Failed to list playlists")
+				client.Emit("pushListPlaylist", []string{})
+				return
+			}
+			client.Emit("pushListPlaylist", playlists)
+		})
+
+		// Create a new playlist (saves current queue)
+		client.On("createPlaylist", func(args ...any) {
+			log.Debug().Str("id", clientID).Msg("createPlaylist requested")
+			if len(args) == 0 {
+				log.Warn().Msg("createPlaylist: no arguments")
+				return
+			}
+
+			var name string
+			switch v := args[0].(type) {
+			case map[string]interface{}:
+				name = getString(v, "name")
+			case string:
+				name = v
+			}
+
+			if name == "" {
+				log.Warn().Msg("createPlaylist: empty name")
+				client.Emit("pushToastMessage", map[string]interface{}{
+					"type":    "error",
+					"title":   "Error",
+					"message": "Playlist name cannot be empty",
+				})
+				return
+			}
+
+			// Save current queue as playlist
+			if err := s.mpdClient.SavePlaylist(name); err != nil {
+				log.Error().Err(err).Str("name", name).Msg("Failed to create playlist")
+				client.Emit("pushToastMessage", map[string]interface{}{
+					"type":    "error",
+					"title":   "Error",
+					"message": "Failed to create playlist: " + err.Error(),
+				})
+				return
+			}
+
+			log.Info().Str("name", name).Msg("Playlist created")
+			client.Emit("pushToastMessage", map[string]interface{}{
+				"type":    "success",
+				"title":   "Playlist Created",
+				"message": "Playlist '" + name + "' created",
+			})
+
+			// Refresh playlist list
+			playlists, _ := s.mpdClient.ListPlaylists()
+			client.Emit("pushListPlaylist", playlists)
+		})
+
+		// Delete a playlist
+		client.On("deletePlaylist", func(args ...any) {
+			log.Debug().Str("id", clientID).Msg("deletePlaylist requested")
+			if len(args) == 0 {
+				log.Warn().Msg("deletePlaylist: no arguments")
+				return
+			}
+
+			var name string
+			switch v := args[0].(type) {
+			case map[string]interface{}:
+				name = getString(v, "name")
+			case string:
+				name = v
+			}
+
+			if name == "" {
+				log.Warn().Msg("deletePlaylist: empty name")
+				return
+			}
+
+			if err := s.mpdClient.DeletePlaylist(name); err != nil {
+				log.Error().Err(err).Str("name", name).Msg("Failed to delete playlist")
+				client.Emit("pushToastMessage", map[string]interface{}{
+					"type":    "error",
+					"title":   "Error",
+					"message": "Failed to delete playlist: " + err.Error(),
+				})
+				return
+			}
+
+			log.Info().Str("name", name).Msg("Playlist deleted")
+			client.Emit("pushToastMessage", map[string]interface{}{
+				"type":    "success",
+				"title":   "Playlist Deleted",
+				"message": "Playlist '" + name + "' deleted",
+			})
+
+			// Refresh playlist list
+			playlists, _ := s.mpdClient.ListPlaylists()
+			client.Emit("pushListPlaylist", playlists)
+		})
+
+		// Play a playlist (load and start playing)
+		client.On("playPlaylist", func(args ...any) {
+			log.Debug().Str("id", clientID).Msg("playPlaylist requested")
+			if len(args) == 0 {
+				log.Warn().Msg("playPlaylist: no arguments")
+				return
+			}
+
+			var name string
+			switch v := args[0].(type) {
+			case map[string]interface{}:
+				name = getString(v, "name")
+			case string:
+				name = v
+			}
+
+			if name == "" {
+				log.Warn().Msg("playPlaylist: empty name")
+				return
+			}
+
+			if err := s.mpdClient.LoadPlaylist(name, true); err != nil {
+				log.Error().Err(err).Str("name", name).Msg("Failed to play playlist")
+				client.Emit("pushToastMessage", map[string]interface{}{
+					"type":    "error",
+					"title":   "Error",
+					"message": "Failed to play playlist: " + err.Error(),
+				})
+				return
+			}
+
+			log.Info().Str("name", name).Msg("Playing playlist")
+
+			// Push updated state and queue
+			s.pushState(client)
+			s.pushQueue(client)
+			s.BroadcastState()
+			s.BroadcastQueue()
+		})
+
+		// Add item to a playlist
+		client.On("addToPlaylist", func(args ...any) {
+			log.Debug().Str("id", clientID).Msg("addToPlaylist requested")
+			if len(args) == 0 {
+				log.Warn().Msg("addToPlaylist: no arguments")
+				return
+			}
+
+			data, ok := args[0].(map[string]interface{})
+			if !ok {
+				log.Warn().Msg("addToPlaylist: invalid argument type")
+				return
+			}
+
+			playlistName := getString(data, "name")
+			uri := getString(data, "uri")
+			title := getString(data, "title")
+
+			if playlistName == "" || uri == "" {
+				log.Warn().Msg("addToPlaylist: missing name or uri")
+				return
+			}
+
+			if err := s.mpdClient.PlaylistAdd(playlistName, uri); err != nil {
+				log.Error().Err(err).Str("playlist", playlistName).Str("uri", uri).Msg("Failed to add to playlist")
+				client.Emit("pushToastMessage", map[string]interface{}{
+					"type":    "error",
+					"title":   "Error",
+					"message": "Failed to add to playlist: " + err.Error(),
+				})
+				return
+			}
+
+			displayName := title
+			if displayName == "" {
+				displayName = uri
+			}
+			log.Info().Str("playlist", playlistName).Str("uri", uri).Msg("Added to playlist")
+			client.Emit("pushToastMessage", map[string]interface{}{
+				"type":    "success",
+				"title":   "Added to Playlist",
+				"message": displayName + " added to '" + playlistName + "'",
+			})
+		})
+
+		// Remove item from a playlist
+		client.On("removeFromPlaylist", func(args ...any) {
+			log.Debug().Str("id", clientID).Msg("removeFromPlaylist requested")
+			if len(args) == 0 {
+				log.Warn().Msg("removeFromPlaylist: no arguments")
+				return
+			}
+
+			data, ok := args[0].(map[string]interface{})
+			if !ok {
+				log.Warn().Msg("removeFromPlaylist: invalid argument type")
+				return
+			}
+
+			playlistName := getString(data, "name")
+			uri := getString(data, "uri")
+
+			if playlistName == "" || uri == "" {
+				log.Warn().Msg("removeFromPlaylist: missing name or uri")
+				return
+			}
+
+			// Find the position of the song in the playlist
+			pos, err := s.mpdClient.FindSongInPlaylist(playlistName, uri)
+			if err != nil {
+				log.Error().Err(err).Msg("Failed to find song in playlist")
+				client.Emit("pushToastMessage", map[string]interface{}{
+					"type":    "error",
+					"title":   "Error",
+					"message": "Failed to find song in playlist",
+				})
+				return
+			}
+
+			if pos < 0 {
+				log.Warn().Str("uri", uri).Msg("Song not found in playlist")
+				client.Emit("pushToastMessage", map[string]interface{}{
+					"type":    "error",
+					"title":   "Not Found",
+					"message": "Song not found in playlist",
+				})
+				return
+			}
+
+			if err := s.mpdClient.PlaylistDelete(playlistName, pos); err != nil {
+				log.Error().Err(err).Str("playlist", playlistName).Int("pos", pos).Msg("Failed to remove from playlist")
+				client.Emit("pushToastMessage", map[string]interface{}{
+					"type":    "error",
+					"title":   "Error",
+					"message": "Failed to remove from playlist: " + err.Error(),
+				})
+				return
+			}
+
+			log.Info().Str("playlist", playlistName).Str("uri", uri).Msg("Removed from playlist")
+			client.Emit("pushToastMessage", map[string]interface{}{
+				"type":    "success",
+				"title":   "Removed",
+				"message": "Item removed from '" + playlistName + "'",
+			})
+		})
 	})
 }
 

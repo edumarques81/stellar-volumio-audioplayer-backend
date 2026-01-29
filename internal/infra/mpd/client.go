@@ -703,6 +703,102 @@ func (c *Client) ListPlaylistInfo(name string) ([]mpd.Attrs, error) {
 	return c.client.Command("listplaylistinfo %s", name).AttrsList("file")
 }
 
+// SavePlaylist saves the current queue as a new playlist.
+func (c *Client) SavePlaylist(name string) error {
+	if err := c.ensureConnected(); err != nil {
+		return err
+	}
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	// Use "save" to save current queue as playlist
+	return c.client.Command("save %s", name).OK()
+}
+
+// DeletePlaylist removes a saved playlist.
+func (c *Client) DeletePlaylist(name string) error {
+	if err := c.ensureConnected(); err != nil {
+		return err
+	}
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	// Use "rm" to delete playlist
+	return c.client.Command("rm %s", name).OK()
+}
+
+// LoadPlaylist loads a playlist into the queue and optionally plays it.
+func (c *Client) LoadPlaylist(name string, play bool) error {
+	if err := c.ensureConnected(); err != nil {
+		return err
+	}
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	// Clear the queue first
+	if err := c.client.Clear(); err != nil {
+		return fmt.Errorf("failed to clear queue: %w", err)
+	}
+
+	// Load the playlist
+	if err := c.client.Command("load %s", name).OK(); err != nil {
+		return fmt.Errorf("failed to load playlist: %w", err)
+	}
+
+	// Start playback if requested
+	if play {
+		if err := c.client.Play(0); err != nil {
+			return fmt.Errorf("failed to start playback: %w", err)
+		}
+	}
+
+	return nil
+}
+
+// PlaylistAdd adds a URI to a saved playlist.
+func (c *Client) PlaylistAdd(playlistName, uri string) error {
+	if err := c.ensureConnected(); err != nil {
+		return err
+	}
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	// Use "playlistadd" to add song to playlist
+	return c.client.Command("playlistadd %s %s", playlistName, uri).OK()
+}
+
+// PlaylistDelete removes a song at position from a saved playlist.
+func (c *Client) PlaylistDelete(playlistName string, pos int) error {
+	if err := c.ensureConnected(); err != nil {
+		return err
+	}
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	// Use "playlistdelete" to remove song from playlist
+	return c.client.Command("playlistdelete %s %d", playlistName, pos).OK()
+}
+
+// FindSongInPlaylist finds the position of a URI in a playlist, returns -1 if not found.
+func (c *Client) FindSongInPlaylist(playlistName, uri string) (int, error) {
+	items, err := c.ListPlaylistInfo(playlistName)
+	if err != nil {
+		return -1, err
+	}
+
+	for i, item := range items {
+		if item["file"] == uri {
+			return i, nil
+		}
+	}
+	return -1, nil
+}
+
 // DetectCapabilities detects what features the MPD server supports.
 // This queries the server for available commands and protocol version.
 func (c *Client) DetectCapabilities() (*CapabilityFlags, error) {
