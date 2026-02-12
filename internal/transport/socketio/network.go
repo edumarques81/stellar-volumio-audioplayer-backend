@@ -160,7 +160,7 @@ func (s *Server) BroadcastNetworkStatus() {
 func (s *Server) StartNetworkWatcher(ctx context.Context) {
 	go func() {
 		log.Info().Msg("Network watcher started")
-		ticker := time.NewTicker(10 * time.Second)
+		ticker := time.NewTicker(30 * time.Second)
 		defer ticker.Stop()
 
 		// Get initial status

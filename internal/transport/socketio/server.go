@@ -4,6 +4,7 @@ package socketio
 import (
 	"context"
 	"encoding/json"
+	"net"
 	"net/http"
 	"os"
 	"os/exec"
@@ -1666,18 +1667,16 @@ func (s *Server) setupHandlers() {
 }
 
 // extractRemoteIP gets the client's remote IP from the Socket.IO handshake.
+// Handles both IPv4 ("192.168.1.100:54321") and IPv6 ("[::1]:45862") formats.
 func extractRemoteIP(client *socket.Socket) string {
 	hs := client.Handshake()
 	if hs == nil {
 		return ""
 	}
 	addr := hs.Address
-	// Address may contain port (e.g., "192.168.1.100:54321"), strip it
-	if idx := strings.LastIndex(addr, ":"); idx > 0 {
-		// Check if this looks like an IPv4:port (not IPv6)
-		if !strings.Contains(addr[:idx], ":") {
-			return addr[:idx]
-		}
+	// net.SplitHostPort handles both IPv4:port and [IPv6]:port
+	if host, _, err := net.SplitHostPort(addr); err == nil {
+		return host
 	}
 	return addr
 }
@@ -1792,9 +1791,12 @@ func (s *Server) BroadcastState() {
 }
 
 // stateCompareKeys are the fields checked for state diffing.
+// stateCompareKeys excludes "seek" because the frontend interpolates seek
+// client-side (1-second timer in player.ts). Including seek causes unnecessary
+// broadcasts when seek is the only field that drifted since the last broadcast.
 var stateCompareKeys = []string{
 	"status", "position", "title", "artist", "album",
-	"volume", "seek", "duration", "random", "repeat", "repeatSingle",
+	"volume", "duration", "random", "repeat", "repeatSingle",
 	"samplerate", "bitdepth", "trackType",
 }
 
