@@ -140,10 +140,8 @@ func (h *VolumioHandlers) registerQueueHandlers(client *socket.Socket, clientID 
 				if uri, ok := m["uri"].(string); ok && uri != "" {
 					if err := h.playerService.AddAndPlay(uri); err != nil {
 						log.Error().Err(err).Str("uri", uri).Msg("AddPlay failed")
-					} else {
-						// Broadcast updated queue to all clients
-						h.server.BroadcastQueue()
 					}
+					// MPD watcher handles broadcast via debouncer
 				}
 			}
 		}
@@ -174,10 +172,8 @@ func (h *VolumioHandlers) registerQueueHandlers(client *socket.Socket, clientID 
 				if from >= 0 && to >= 0 {
 					if err := h.playerService.MoveQueueItem(from, to); err != nil {
 						log.Error().Err(err).Int("from", from).Int("to", to).Msg("MoveQueue failed")
-					} else {
-						// Broadcast updated queue to all clients
-						h.server.BroadcastQueue()
 					}
+					// MPD watcher handles broadcast via debouncer
 				}
 			}
 		}
@@ -211,10 +207,8 @@ func (h *VolumioHandlers) registerQueueHandlers(client *socket.Socket, clientID 
 			if pos >= 0 {
 				if err := h.playerService.RemoveQueueItem(pos); err != nil {
 					log.Error().Err(err).Int("position", pos).Msg("RemoveFromQueue failed")
-				} else {
-					// Broadcast updated queue to all clients
-					h.server.BroadcastQueue()
 				}
+				// MPD watcher handles broadcast via debouncer
 			}
 		}
 	})
@@ -234,10 +228,8 @@ func (h *VolumioHandlers) handlePlayNext(args []any, clientID string) {
 			if uri, ok := m["uri"].(string); ok && uri != "" {
 				if err := h.playerService.InsertNext(uri); err != nil {
 					log.Error().Err(err).Str("uri", uri).Msg("PlayNext failed")
-				} else {
-					// Broadcast updated queue to all clients
-					h.server.BroadcastQueue()
 				}
+				// MPD watcher handles broadcast via debouncer
 			}
 		}
 	}

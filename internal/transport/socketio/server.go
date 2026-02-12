@@ -47,9 +47,12 @@ type Server struct {
 	audirvanaService    *audirvana.Service
 	deviceService       *device.Service   // Volumio device identity
 	volumioHandlers     *VolumioHandlers  // Volumio Connect compatibility
+	connLimiter         *ConnectionLimiter // Limits concurrent external connections
 	mu                  sync.RWMutex
 	clients             map[string]*socket.Socket
 	lastNetwork         NetworkStatus
+	lastBroadcastMu     sync.Mutex
+	lastBroadcastState  map[string]interface{} // Last state sent via BroadcastState for diffing
 }
 
 // NewServer creates a new Socket.io server.
@@ -126,6 +129,7 @@ func NewServer(playerService *player.Service, mpdClient *mpdclient.Client, sourc
 		cacheDAO:          cacheDAO,
 		audirvanaService:  audirvana.NewService(),
 		deviceService:     deviceSvc,
+		connLimiter:       NewConnectionLimiter(1), // 1 external + unlimited local
 		clients:           make(map[string]*socket.Socket),
 	}
 
@@ -157,7 +161,36 @@ func (s *Server) setupHandlers() {
 		client := clients[0].(*socket.Socket)
 		clientID := string(client.Id())
 
-		log.Info().Str("id", clientID).Msg("Client connected")
+		// Extract remote IP for connection limiting
+		remoteIP := extractRemoteIP(client)
+		log.Info().Str("id", clientID).Str("ip", remoteIP).Msg("Client connected")
+
+		// Check connection limit
+		allowed, evictedID := s.connLimiter.TryAdd(clientID, remoteIP)
+		if !allowed {
+			log.Warn().Str("id", clientID).Msg("Connection rejected by limiter")
+			client.Disconnect(true)
+			return
+		}
+
+		// Evict old client if needed
+		if evictedID != "" {
+			s.mu.RLock()
+			oldClient, exists := s.clients[evictedID]
+			s.mu.RUnlock()
+			if exists {
+				log.Info().Str("evicted", evictedID).Str("newClient", clientID).Msg("Evicting old external client")
+				oldClient.Emit("pushToastMessage", map[string]interface{}{
+					"type":    "warning",
+					"title":   "Session Ended",
+					"message": "Another device has connected",
+				})
+				oldClient.Disconnect(true)
+				s.mu.Lock()
+				delete(s.clients, evictedID)
+				s.mu.Unlock()
+			}
+		}
 
 		s.mu.Lock()
 		s.clients[clientID] = client
@@ -185,6 +218,7 @@ func (s *Server) setupHandlers() {
 			}
 			log.Info().Str("id", clientID).Str("reason", reason).Msg("Client disconnected")
 
+			s.connLimiter.Remove(clientID)
 			s.mu.Lock()
 			delete(s.clients, clientID)
 			s.mu.Unlock()
@@ -1517,11 +1551,9 @@ func (s *Server) setupHandlers() {
 
 			log.Info().Str("name", name).Msg("Playing playlist")
 
-			// Push updated state and queue
+			// Unicast to requesting client only; MPD watcher handles broadcast
 			s.pushState(client)
 			s.pushQueue(client)
-			s.BroadcastState()
-			s.BroadcastQueue()
 		})
 
 		// Add item to a playlist
@@ -1633,6 +1665,23 @@ func (s *Server) setupHandlers() {
 	})
 }
 
+// extractRemoteIP gets the client's remote IP from the Socket.IO handshake.
+func extractRemoteIP(client *socket.Socket) string {
+	hs := client.Handshake()
+	if hs == nil {
+		return ""
+	}
+	addr := hs.Address
+	// Address may contain port (e.g., "192.168.1.100:54321"), strip it
+	if idx := strings.LastIndex(addr, ":"); idx > 0 {
+		// Check if this looks like an IPv4:port (not IPv6)
+		if !strings.Contains(addr[:idx], ":") {
+			return addr[:idx]
+		}
+	}
+	return addr
+}
+
 // getString safely extracts a string from a map.
 func getString(m map[string]interface{}, key string) string {
 	if v, ok := m[key]; ok {
@@ -1699,13 +1748,20 @@ func (s *Server) pushQueue(client *socket.Socket) {
 	client.Emit("pushQueue", queue)
 }
 
-// BroadcastState sends state to all connected clients.
+// BroadcastState sends state to all connected clients, skipping if unchanged.
 func (s *Server) BroadcastState() {
 	state, err := s.playerService.GetState()
 	if err != nil {
 		log.Error().Err(err).Msg("Failed to get state for broadcast")
 		return
 	}
+
+	// State diffing: skip broadcast if key fields haven't changed
+	if s.isStateSame(state) {
+		log.Debug().Msg("State unchanged, skipping broadcast")
+		return
+	}
+	s.saveLastState(state)
 
 	s.io.Emit("pushState", state)
 
@@ -1735,6 +1791,49 @@ func (s *Server) BroadcastState() {
 	}
 }
 
+// stateCompareKeys are the fields checked for state diffing.
+var stateCompareKeys = []string{
+	"status", "position", "title", "artist", "album",
+	"volume", "seek", "duration", "random", "repeat", "repeatSingle",
+	"samplerate", "bitdepth", "trackType",
+}
+
+// isStateSame returns true if the new state matches the last broadcast state
+// on all key fields.
+func (s *Server) isStateSame(state map[string]interface{}) bool {
+	s.lastBroadcastMu.Lock()
+	defer s.lastBroadcastMu.Unlock()
+
+	if s.lastBroadcastState == nil {
+		return false
+	}
+
+	for _, key := range stateCompareKeys {
+		newVal, newOk := state[key]
+		oldVal, oldOk := s.lastBroadcastState[key]
+		if newOk != oldOk {
+			return false
+		}
+		if newOk && newVal != oldVal {
+			return false
+		}
+	}
+	return true
+}
+
+// saveLastState stores a copy of the state for future diffing.
+func (s *Server) saveLastState(state map[string]interface{}) {
+	s.lastBroadcastMu.Lock()
+	defer s.lastBroadcastMu.Unlock()
+
+	s.lastBroadcastState = make(map[string]interface{}, len(stateCompareKeys))
+	for _, key := range stateCompareKeys {
+		if v, ok := state[key]; ok {
+			s.lastBroadcastState[key] = v
+		}
+	}
+}
+
 // BroadcastQueue sends queue to all connected clients.
 func (s *Server) BroadcastQueue() {
 	queue, err := s.playerService.GetQueue()
@@ -1747,6 +1846,7 @@ func (s *Server) BroadcastQueue() {
 }
 
 // StartMPDWatcher starts watching MPD for changes and broadcasts updates.
+// Uses a debouncer to collapse rapid events (e.g., volume knob) into single broadcasts.
 func (s *Server) StartMPDWatcher(ctx context.Context) error {
 	subsystems := []string{"player", "mixer", "playlist", "options", "database"}
 	events, err := s.mpdClient.Watch(subsystems...)
@@ -1754,7 +1854,10 @@ func (s *Server) StartMPDWatcher(ctx context.Context) error {
 		return err
 	}
 
+	debouncer := NewBroadcastDebouncer(100*time.Millisecond, s.BroadcastState, s.BroadcastQueue)
+
 	go func() {
+		defer debouncer.Stop()
 		log.Info().Strs("subsystems", subsystems).Msg("MPD watcher started")
 		for {
 			select {
@@ -1769,15 +1872,11 @@ func (s *Server) StartMPDWatcher(ctx context.Context) error {
 
 				log.Debug().Str("subsystem", subsystem).Msg("MPD subsystem changed")
 
-				switch subsystem {
-				case "player", "mixer", "options":
-					s.BroadcastState()
-				case "playlist":
-					s.BroadcastQueue()
-					s.BroadcastState() // Also update state as position might change
-				case "database":
-					// MPD database was updated (rescan completed), rebuild cache
+				if subsystem == "database" {
+					// Database events bypass debouncer (immediate cache rebuild)
 					s.handleDatabaseUpdate()
+				} else {
+					debouncer.Trigger(subsystem)
 				}
 			}
 		}
