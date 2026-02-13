@@ -7,7 +7,6 @@ import (
 	"net"
 	"net/http"
 	"os"
-	"os/exec"
 	"strings"
 	"sync"
 	"time"
@@ -739,7 +738,9 @@ func (s *Server) setupHandlers() {
 				shares, _ := s.sourcesService.ListNasShares()
 				s.io.Emit("pushListNasShares", shares)
 				// Trigger MPD database update
-				exec.Command("mpc", "update").Run()
+				if _, err := s.mpdClient.Update(""); err != nil {
+					log.Warn().Err(err).Msg("Failed to trigger MPD update after adding NAS share")
+				}
 			}
 		})
 
@@ -842,7 +843,9 @@ func (s *Server) setupHandlers() {
 			if result.Success {
 				shares, _ := s.sourcesService.ListNasShares()
 				s.io.Emit("pushListNasShares", shares)
-				exec.Command("mpc", "update").Run()
+				if _, err := s.mpdClient.Update(""); err != nil {
+					log.Warn().Err(err).Msg("Failed to trigger MPD update after mounting NAS share")
+				}
 			}
 		})
 

@@ -1,14 +1,17 @@
 package sources
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/google/uuid"
+	"github.com/rs/zerolog/log"
 )
 
 const (
@@ -510,6 +513,95 @@ func (s *Service) MountAllShares() []MountResult {
 	}
 
 	return results
+}
+
+// GetUnmountedShares returns the IDs of configured shares that are not currently mounted.
+func (s *Service) GetUnmountedShares() []string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	var unmounted []string
+	for _, cfg := range s.config.NasShares {
+		mountPoint := filepath.Join(NasMountBase, sanitizeName(cfg.Name))
+		if s.mounter == nil || !s.mounter.IsMounted(mountPoint) {
+			unmounted = append(unmounted, cfg.ID)
+		}
+	}
+	return unmounted
+}
+
+// RemountUnmountedShares attempts to mount all configured shares that are currently unmounted.
+// Returns the number of shares successfully mounted.
+func (s *Service) RemountUnmountedShares() int {
+	unmounted := s.GetUnmountedShares()
+	mounted := 0
+	for _, id := range unmounted {
+		result, err := s.MountNasShare(id)
+		if err != nil {
+			log.Warn().Err(err).Str("id", id).Msg("Failed to remount share")
+			continue
+		}
+		if result.Success {
+			mounted++
+			log.Info().Str("id", id).Msg("Successfully remounted share")
+		}
+	}
+	return mounted
+}
+
+// MountAllSharesWithRetry attempts to mount all configured shares, retrying unmounted
+// shares with exponential backoff. It returns once all shares are mounted or maxAttempts
+// is exhausted. The ctx parameter allows cancellation (e.g., during shutdown).
+func (s *Service) MountAllSharesWithRetry(ctx context.Context, maxAttempts int, initialDelay time.Duration) []MountResult {
+	results := s.MountAllShares()
+
+	// Count unmounted shares
+	unmountedCount := 0
+	for _, r := range results {
+		if !r.Mounted {
+			unmountedCount++
+		}
+	}
+
+	if unmountedCount == 0 {
+		return results
+	}
+
+	delay := initialDelay
+	const maxDelay = 60 * time.Second
+
+	for attempt := 2; attempt <= maxAttempts; attempt++ {
+		log.Info().
+			Int("attempt", attempt).
+			Int("unmounted", unmountedCount).
+			Dur("delay", delay).
+			Msg("Retrying unmounted NAS shares")
+
+		select {
+		case <-ctx.Done():
+			log.Info().Msg("Mount retry cancelled")
+			return results
+		case <-time.After(delay):
+		}
+
+		// Only retry unmounted shares
+		mounted := s.RemountUnmountedShares()
+		unmountedCount -= mounted
+
+		if unmountedCount <= 0 {
+			log.Info().Int("attempt", attempt).Msg("All NAS shares mounted successfully")
+			break
+		}
+
+		// Exponential backoff, capped at maxDelay
+		delay *= 2
+		if delay > maxDelay {
+			delay = maxDelay
+		}
+	}
+
+	// Return final state
+	return s.MountAllShares()
 }
 
 // BrowseNasShares lists available shares on a NAS host.

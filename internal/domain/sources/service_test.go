@@ -1,9 +1,11 @@
 package sources
 
 import (
+	"context"
 	"fmt"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 func TestNewService(t *testing.T) {
@@ -684,6 +686,236 @@ func TestService_MountAllShares_MountFailure(t *testing.T) {
 	}
 	if results[0].Error == "" {
 		t.Error("Expected error message")
+	}
+}
+
+// ============================================================
+// GetUnmountedShares Tests
+// ============================================================
+
+func TestService_GetUnmountedShares_AllMounted(t *testing.T) {
+	tmpDir := t.TempDir()
+	configPath := filepath.Join(tmpDir, "sources.json")
+
+	mounter := NewMockMounter()
+	s, err := NewService(configPath, mounter)
+	if err != nil {
+		t.Fatalf("NewService failed: %v", err)
+	}
+
+	// Add a share (it gets mounted by AddNasShare)
+	_, err = s.AddNasShare(AddNasShareRequest{
+		Name: "Share1", IP: "192.168.1.100", Path: "Music", FSType: "cifs",
+	})
+	if err != nil {
+		t.Fatalf("AddNasShare failed: %v", err)
+	}
+
+	unmounted := s.GetUnmountedShares()
+	if len(unmounted) != 0 {
+		t.Errorf("GetUnmountedShares returned %d, want 0", len(unmounted))
+	}
+}
+
+func TestService_GetUnmountedShares_SomeUnmounted(t *testing.T) {
+	tmpDir := t.TempDir()
+	configPath := filepath.Join(tmpDir, "sources.json")
+
+	mounter := NewMockMounter()
+	s, err := NewService(configPath, mounter)
+	if err != nil {
+		t.Fatalf("NewService failed: %v", err)
+	}
+
+	// Add two shares
+	_, _ = s.AddNasShare(AddNasShareRequest{
+		Name: "Share1", IP: "192.168.1.100", Path: "Music1", FSType: "cifs",
+	})
+	_, _ = s.AddNasShare(AddNasShareRequest{
+		Name: "Share2", IP: "192.168.1.101", Path: "Music2", FSType: "cifs",
+	})
+
+	// Simulate one becoming unmounted
+	mounter.MountedPaths = make(map[string]bool)
+	// Only keep Share1 mounted
+	shares, _ := s.ListNasShares()
+	for _, sh := range shares {
+		if sh.Name == "Share1" {
+			mounter.MountedPaths[sh.MountPoint] = true
+		}
+	}
+
+	unmounted := s.GetUnmountedShares()
+	if len(unmounted) != 1 {
+		t.Errorf("GetUnmountedShares returned %d, want 1", len(unmounted))
+	}
+}
+
+// ============================================================
+// RemountUnmountedShares Tests
+// ============================================================
+
+func TestService_RemountUnmountedShares_Success(t *testing.T) {
+	tmpDir := t.TempDir()
+	configPath := filepath.Join(tmpDir, "sources.json")
+
+	mounter := NewMockMounter()
+	s, err := NewService(configPath, mounter)
+	if err != nil {
+		t.Fatalf("NewService failed: %v", err)
+	}
+
+	_, _ = s.AddNasShare(AddNasShareRequest{
+		Name: "Share1", IP: "192.168.1.100", Path: "Music", FSType: "cifs",
+	})
+
+	// Simulate unmounted
+	mounter.MountedPaths = make(map[string]bool)
+
+	mounted := s.RemountUnmountedShares()
+	if mounted != 1 {
+		t.Errorf("RemountUnmountedShares returned %d, want 1", mounted)
+	}
+}
+
+func TestService_RemountUnmountedShares_Failure(t *testing.T) {
+	tmpDir := t.TempDir()
+	configPath := filepath.Join(tmpDir, "sources.json")
+
+	mounter := NewMockMounter()
+	s, err := NewService(configPath, mounter)
+	if err != nil {
+		t.Fatalf("NewService failed: %v", err)
+	}
+
+	_, _ = s.AddNasShare(AddNasShareRequest{
+		Name: "Share1", IP: "192.168.1.100", Path: "Music", FSType: "cifs",
+	})
+
+	// Simulate unmounted and mount will fail
+	mounter.MountedPaths = make(map[string]bool)
+	mounter.MountError = fmt.Errorf("connection refused")
+
+	mounted := s.RemountUnmountedShares()
+	if mounted != 0 {
+		t.Errorf("RemountUnmountedShares returned %d, want 0", mounted)
+	}
+}
+
+// ============================================================
+// MountAllSharesWithRetry Tests
+// ============================================================
+
+func TestService_MountAllSharesWithRetry_AllMountedFirstTry(t *testing.T) {
+	tmpDir := t.TempDir()
+	configPath := filepath.Join(tmpDir, "sources.json")
+
+	mounter := NewMockMounter()
+	s, err := NewService(configPath, mounter)
+	if err != nil {
+		t.Fatalf("NewService failed: %v", err)
+	}
+
+	_, _ = s.AddNasShare(AddNasShareRequest{
+		Name: "Share1", IP: "192.168.1.100", Path: "Music", FSType: "cifs",
+	})
+
+	// Share is already mounted from AddNasShare, so retry should not be needed
+	ctx := context.Background()
+	results := s.MountAllSharesWithRetry(ctx, 3, 10*time.Millisecond)
+
+	if len(results) != 1 {
+		t.Fatalf("got %d results, want 1", len(results))
+	}
+	if !results[0].Mounted {
+		t.Error("share should be mounted")
+	}
+}
+
+func TestService_MountAllSharesWithRetry_SucceedsOnRetry(t *testing.T) {
+	tmpDir := t.TempDir()
+	configPath := filepath.Join(tmpDir, "sources.json")
+
+	mounter := NewMockMounter()
+	s, err := NewService(configPath, mounter)
+	if err != nil {
+		t.Fatalf("NewService failed: %v", err)
+	}
+
+	_, _ = s.AddNasShare(AddNasShareRequest{
+		Name: "Share1", IP: "192.168.1.100", Path: "Music", FSType: "cifs",
+	})
+
+	// Simulate unmounted + mount fails initially
+	mounter.MountedPaths = make(map[string]bool)
+	mounter.MountError = fmt.Errorf("connection refused")
+
+	// Clear error after a short delay (simulate NAS becoming available)
+	go func() {
+		time.Sleep(15 * time.Millisecond)
+		mounter.MountError = nil
+	}()
+
+	ctx := context.Background()
+	results := s.MountAllSharesWithRetry(ctx, 5, 10*time.Millisecond)
+
+	// Should eventually succeed
+	mountedCount := 0
+	for _, r := range results {
+		if r.Mounted {
+			mountedCount++
+		}
+	}
+	if mountedCount != 1 {
+		t.Errorf("mounted %d shares, want 1", mountedCount)
+	}
+}
+
+func TestService_MountAllSharesWithRetry_CancelledByContext(t *testing.T) {
+	tmpDir := t.TempDir()
+	configPath := filepath.Join(tmpDir, "sources.json")
+
+	mounter := NewMockMounter()
+	s, err := NewService(configPath, mounter)
+	if err != nil {
+		t.Fatalf("NewService failed: %v", err)
+	}
+
+	_, _ = s.AddNasShare(AddNasShareRequest{
+		Name: "Share1", IP: "192.168.1.100", Path: "Music", FSType: "cifs",
+	})
+
+	// Simulate unmounted + mount always fails
+	mounter.MountedPaths = make(map[string]bool)
+	mounter.MountError = fmt.Errorf("connection refused")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 25*time.Millisecond)
+	defer cancel()
+
+	start := time.Now()
+	s.MountAllSharesWithRetry(ctx, 10, 50*time.Millisecond)
+	elapsed := time.Since(start)
+
+	// Should have been cancelled before all 10 attempts (which would take >500ms)
+	if elapsed > 200*time.Millisecond {
+		t.Errorf("MountAllSharesWithRetry took %v, should have been cancelled sooner", elapsed)
+	}
+}
+
+func TestService_MountAllSharesWithRetry_Empty(t *testing.T) {
+	tmpDir := t.TempDir()
+	configPath := filepath.Join(tmpDir, "sources.json")
+
+	s, err := NewService(configPath, NewMockMounter())
+	if err != nil {
+		t.Fatalf("NewService failed: %v", err)
+	}
+
+	ctx := context.Background()
+	results := s.MountAllSharesWithRetry(ctx, 5, 10*time.Millisecond)
+
+	if len(results) != 0 {
+		t.Errorf("got %d results, want 0", len(results))
 	}
 }
 

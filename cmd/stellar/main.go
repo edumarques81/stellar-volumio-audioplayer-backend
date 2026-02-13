@@ -100,14 +100,17 @@ func main() {
 
 		// Auto-mount all configured NAS shares on startup
 		mountResults := sourcesService.MountAllShares()
+		mountedCount := 0
+		unmountedCount := 0
 		for _, result := range mountResults {
-			if result.Success {
+			if result.Mounted {
+				mountedCount++
 				log.Info().
 					Str("name", result.ShareName).
-					Bool("mounted", result.Mounted).
 					Str("message", result.Message).
 					Msg("NAS share ready")
 			} else {
+				unmountedCount++
 				log.Warn().
 					Str("name", result.ShareName).
 					Str("error", result.Error).
@@ -115,16 +118,31 @@ func main() {
 			}
 		}
 		if len(mountResults) > 0 {
-			mounted := 0
-			for _, r := range mountResults {
-				if r.Mounted {
-					mounted++
-				}
-			}
 			log.Info().
 				Int("total", len(mountResults)).
-				Int("mounted", mounted).
+				Int("mounted", mountedCount).
 				Msg("NAS shares initialization complete")
+		}
+
+		// Retry unmounted shares in background with exponential backoff
+		if unmountedCount > 0 {
+			svc := sourcesService // capture for goroutine
+			mpdC := mpdClient
+			go func() {
+				retryCtx, retryCancel := context.WithTimeout(context.Background(), 5*time.Minute)
+				defer retryCancel()
+				results := svc.MountAllSharesWithRetry(retryCtx, 5, 5*time.Second)
+				finalMounted := 0
+				for _, r := range results {
+					if r.Mounted {
+						finalMounted++
+					}
+				}
+				if finalMounted > mountedCount {
+					log.Info().Int("mounted", finalMounted).Msg("NAS shares mounted after retry, triggering MPD update")
+					mpdC.Update("")
+				}
+			}()
 		}
 	}
 
@@ -159,6 +177,9 @@ func main() {
 	// Start network watcher for Socket.IO push notifications
 	socketServer.StartNetworkWatcher(ctx)
 
+	// Start mount watcher for periodic NAS share re-mount
+	socketServer.StartMountWatcher(ctx)
+
 	// Setup HTTP server
 	mux := http.NewServeMux()
 
@@ -179,7 +200,6 @@ func main() {
 	// Version endpoint
 	mux.HandleFunc("/api/v1/version", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		w.Header().Set("Access-Control-Allow-Origin", "*")
 		json.NewEncoder(w).Encode(version.GetInfo())
 	})
 
@@ -264,7 +284,6 @@ func main() {
 	mux.HandleFunc("/api/v1/network", func(w http.ResponseWriter, r *http.Request) {
 		status := getNetworkStatus()
 		w.Header().Set("Content-Type", "application/json")
-		w.Header().Set("Access-Control-Allow-Origin", "*")
 		json.NewEncoder(w).Encode(status)
 	})
 
@@ -276,7 +295,6 @@ func main() {
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
-		w.Header().Set("Access-Control-Allow-Origin", "*")
 		// Simple JSON encoding
 		data := "{"
 		first := true
@@ -326,7 +344,7 @@ func main() {
 	// Start HTTP server
 	server := &http.Server{
 		Addr:         ":" + *port,
-		Handler:      mux,
+		Handler:      corsMiddleware(mux),
 		ReadTimeout:  30 * time.Second,
 		WriteTimeout: 30 * time.Second,
 	}
@@ -361,7 +379,6 @@ func serveArtwork(w http.ResponseWriter, data []byte) {
 	contentType := artwork.DetectMimeType(data)
 	w.Header().Set("Content-Type", contentType)
 	w.Header().Set("Cache-Control", "public, max-age=86400") // Cache for 1 day
-	w.Header().Set("Access-Control-Allow-Origin", "*")
 	w.Write(data)
 }
 
