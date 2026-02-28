@@ -1,8 +1,10 @@
 package socketio
 
 import (
+	"context"
 	"os/exec"
 	"strings"
+	"time"
 
 	"github.com/rs/zerolog/log"
 	"github.com/zishang520/socket.io/servers/socket/v3"
@@ -47,6 +49,62 @@ func (s *Server) pushAudioEngineState(client *socket.Socket) {
 func (s *Server) BroadcastAudioEngineState() {
 	state := s.GetAudioEngineState()
 	s.io.Emit("pushAudioEngineState", state)
+}
+
+// StartAudirvanaPoller starts a background poller that broadcasts Audirvana
+// now-playing state every 2 seconds when Audirvana is the active engine.
+//
+// TODO: Audirvana Studio on Linux does not expose a REST API, DBus interface,
+// or state file for current track info. Possible future approaches:
+// - Parse ~/.local/share/audirvana/audirvana_studio.log for track changes
+// - Monitor ALSA/PulseAudio output to detect playback
+// - Use the Audirvana mDNS/DAAP protocol (port discovered via avahi-browse)
+// For now, this emits a stub state so the frontend knows Audirvana is playing.
+func (s *Server) StartAudirvanaPoller(ctx context.Context) {
+	go func() {
+		ticker := time.NewTicker(2 * time.Second)
+		defer ticker.Stop()
+
+		wasActive := false
+
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				state := s.GetAudioEngineState()
+				isActive := state.AudirvanaRunning
+
+				if isActive {
+					// Audirvana is running — broadcast now-playing stub
+					s.io.Emit("pushState", map[string]interface{}{
+						"status":   "play",
+						"service":  "audirvana",
+						"title":    "Audirvana Active",
+						"artist":   "",
+						"album":    "",
+						"duration": 0,
+						"seek":     0,
+						"volume":   0,
+					})
+
+					if !wasActive {
+						log.Info().Msg("Audirvana became active, broadcasting state")
+						s.BroadcastAudioEngineState()
+					}
+				} else if wasActive {
+					// Audirvana just stopped — broadcast engine change back to MPD
+					log.Info().Msg("Audirvana became inactive, switching to MPD state")
+					s.BroadcastAudioEngineState()
+					s.BroadcastState()
+				}
+
+				wasActive = isActive
+			}
+		}
+	}()
+
+	log.Info().Msg("Audirvana now-playing poller started (2s interval)")
 }
 
 // isServiceActive checks if a systemd service is currently active.

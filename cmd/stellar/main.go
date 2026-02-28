@@ -180,6 +180,9 @@ func main() {
 	// Start mount watcher for periodic NAS share re-mount
 	socketServer.StartMountWatcher(ctx)
 
+	// Start Audirvana now-playing poller
+	socketServer.StartAudirvanaPoller(ctx)
+
 	// Setup HTTP server
 	mux := http.NewServeMux()
 
