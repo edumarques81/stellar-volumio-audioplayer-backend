@@ -2,6 +2,7 @@ package enrichment
 
 import (
 	"context"
+	"fmt"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -380,6 +381,97 @@ func TestWorker_Stop_Graceful(t *testing.T) {
 		// Good - worker stopped
 	case <-time.After(500 * time.Millisecond):
 		t.Error("worker did not stop gracefully")
+	}
+}
+
+func TestWorker_RetryableErrors_Classified(t *testing.T) {
+	tests := []struct {
+		name           string
+		err            error
+		wantRetry      bool
+		wantLastError  bool
+	}{
+		{
+			name:          "temporary failure retries",
+			err:           ErrTemporaryFailure,
+			wantRetry:     true,
+			wantLastError: true,
+		},
+		{
+			name:          "rate limited retries",
+			err:           ErrRateLimited,
+			wantRetry:     true,
+			wantLastError: true,
+		},
+		{
+			name:          "wrapped temporary error retries",
+			err:           fmt.Errorf("http request: %w: connection refused", ErrTemporaryFailure),
+			wantRetry:     true,
+			wantLastError: true,
+		},
+		{
+			name:          "artwork not found is permanent",
+			err:           ErrArtworkNotFound,
+			wantRetry:     false,
+			wantLastError: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			provider := newMockProvider()
+			provider.SetError("mbid-test", tt.err)
+
+			store := newMockJobStore()
+			store.AddJob(&EnrichmentJob{
+				ID:          "job-test",
+				AlbumID:     "album-test",
+				MBID:        "mbid-test",
+				Status:      JobStatusPending,
+				Priority:    1,
+				RetryCount:  0,
+				NextRetryAt: time.Now().Add(-time.Minute),
+			})
+
+			worker := NewWorker(
+				provider,
+				store,
+				WithBatchSize(10),
+				WithWorkerInterval(50*time.Millisecond),
+				WithMaxRetries(3),
+				WithSaveFunc(func(albumID string, result *FetchResult) error {
+					return nil
+				}),
+			)
+
+			ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+			defer cancel()
+
+			go worker.Start(ctx)
+			time.Sleep(200 * time.Millisecond)
+
+			job, _ := store.GetJob("job-test")
+
+			if tt.wantRetry {
+				if job.Status != JobStatusPending {
+					t.Errorf("expected status pending (retry), got %s", job.Status)
+				}
+				if job.RetryCount < 1 {
+					t.Errorf("expected retry count >= 1, got %d", job.RetryCount)
+				}
+				if !job.NextRetryAt.After(time.Now().Add(-time.Second)) {
+					t.Error("expected NextRetryAt to be set for future")
+				}
+			} else {
+				if job.Status != JobStatusFailed {
+					t.Errorf("expected status failed (permanent), got %s", job.Status)
+				}
+			}
+
+			if tt.wantLastError && job.LastError == "" {
+				t.Error("expected LastError to be set")
+			}
+		})
 	}
 }
 

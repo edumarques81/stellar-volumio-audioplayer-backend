@@ -117,7 +117,9 @@ func (c *CAAClient) FetchAlbumArt(ctx context.Context, mbid string) (*FetchResul
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("http request: %w", err)
+		// Network errors (timeouts, connection refused, DNS failures) are temporary
+		log.Debug().Err(err).Str("mbid", mbid).Msg("CAA network error (retryable)")
+		return nil, fmt.Errorf("http request: %w: %w", ErrTemporaryFailure, err)
 	}
 	defer resp.Body.Close()
 
