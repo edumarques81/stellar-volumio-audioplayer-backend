@@ -5,11 +5,65 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/edumarques81/stellar-volumio-audioplayer-backend/internal/infra/enrichment"
 )
+
+func TestNormalizeForSearch(t *testing.T) {
+	tests := []struct {
+		input string
+		want  string
+	}{
+		{"Pink Floyd", "pink floyd"},
+		{"The Wall (Remaster)", "the wall"},
+		{"The Wall (Deluxe Edition)", "the wall"},
+		{"The Wall [2011 Remaster]", "the wall"},
+		{"AC/DC", "ac dc"},
+		{"Guns N' Roses", "guns n roses"},
+		{"  Extra   Spaces  ", "extra spaces"},
+		{"UPPER CASE", "upper case"},
+		{"Album: Part 1", "album part 1"},
+		{"Hello (Live) (Bonus Track)", "hello"},
+		{"Nirvana [Remastered] [Deluxe]", "nirvana"},
+		{"", ""},
+		{"  ", ""},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.input, func(t *testing.T) {
+			got := enrichment.NormalizeForSearch(tt.input)
+			if got != tt.want {
+				t.Errorf("NormalizeForSearch(%q) = %q, want %q", tt.input, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestLongestWord(t *testing.T) {
+	tests := []struct {
+		input string
+		want  string
+	}{
+		{"pink floyd", "floyd"},
+		{"a bb ccc", "ccc"},
+		{"single", "single"},
+		{"", ""},
+		{"a b c", "a"}, // all same length, first wins
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.input, func(t *testing.T) {
+			got := enrichment.LongestWord(tt.input)
+			if got != tt.want {
+				t.Errorf("LongestWord(%q) = %q, want %q", tt.input, got, tt.want)
+			}
+		})
+	}
+}
 
 func TestMusicBrainzClientSearchRelease(t *testing.T) {
 	tests := []struct {
@@ -199,4 +253,136 @@ func TestMusicBrainzClientSpecialCharacters(t *testing.T) {
 	if receivedQuery == "" {
 		t.Error("expected query to be sent")
 	}
+}
+
+func TestSearchReleaseFuzzyFallback(t *testing.T) {
+	t.Run("exact match fails, unquoted succeeds", func(t *testing.T) {
+		var requestCount int32
+
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			count := atomic.AddInt32(&requestCount, 1)
+			query := r.URL.Query().Get("query")
+
+			if count == 1 {
+				// First request (exact quoted) - return no results
+				if !strings.Contains(query, `"`) {
+					t.Errorf("expected quoted query on first attempt, got: %s", query)
+				}
+				json.NewEncoder(w).Encode(enrichment.MBSearchResponse{})
+			} else if count == 2 {
+				// Second request (unquoted) - return match
+				json.NewEncoder(w).Encode(enrichment.MBSearchResponse{
+					Releases: []enrichment.MBRelease{
+						{ID: "fuzzy-match", Title: "The Wall", Score: 90},
+					},
+				})
+			}
+		}))
+		defer server.Close()
+
+		client := enrichment.NewMusicBrainzClient(enrichment.WithMBBaseURL(server.URL))
+		mbid, err := client.SearchRelease(context.Background(), "pink floyd", "The Wall (Remaster)")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if mbid != "fuzzy-match" {
+			t.Errorf("expected fuzzy-match, got %s", mbid)
+		}
+		if atomic.LoadInt32(&requestCount) < 2 {
+			t.Error("expected at least 2 requests (exact + unquoted)")
+		}
+	})
+
+	t.Run("artist-only fallback with title matching", func(t *testing.T) {
+		var requestCount int32
+
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			count := atomic.AddInt32(&requestCount, 1)
+
+			if count <= 2 {
+				// First two strategies return no results
+				json.NewEncoder(w).Encode(enrichment.MBSearchResponse{})
+			} else {
+				// Third (artist-only) - return releases, one matching album
+				json.NewEncoder(w).Encode(enrichment.MBSearchResponse{
+					Releases: []enrichment.MBRelease{
+						{ID: "wrong-album", Title: "Different Album", Score: 95},
+						{ID: "correct-album", Title: "The Wall", Score: 90},
+					},
+				})
+			}
+		}))
+		defer server.Close()
+
+		client := enrichment.NewMusicBrainzClient(enrichment.WithMBBaseURL(server.URL))
+		mbid, err := client.SearchRelease(context.Background(), "Pink Floyd", "The Wall")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if mbid != "correct-album" {
+			t.Errorf("expected correct-album, got %s", mbid)
+		}
+	})
+}
+
+func TestSearchArtistFuzzyFallback(t *testing.T) {
+	t.Run("exact fails, unquoted succeeds", func(t *testing.T) {
+		var requestCount int32
+
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			count := atomic.AddInt32(&requestCount, 1)
+
+			if count == 1 {
+				// Exact quoted - no results
+				json.NewEncoder(w).Encode(enrichment.MBArtistSearchResponse{})
+			} else {
+				// Unquoted - match
+				json.NewEncoder(w).Encode(enrichment.MBArtistSearchResponse{
+					Artists: []enrichment.MBArtist{
+						{ID: "fuzzy-artist", Name: "Pink Floyd", Score: 95, Type: "Group"},
+					},
+				})
+			}
+		}))
+		defer server.Close()
+
+		client := enrichment.NewMusicBrainzClient(enrichment.WithMBBaseURL(server.URL))
+		mbid, err := client.SearchArtist(context.Background(), "pink floyd")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if mbid != "fuzzy-artist" {
+			t.Errorf("expected fuzzy-artist, got %s", mbid)
+		}
+	})
+
+	t.Run("longest word fallback", func(t *testing.T) {
+		var requestCount int32
+
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			count := atomic.AddInt32(&requestCount, 1)
+
+			if count <= 2 {
+				// First two strategies fail
+				json.NewEncoder(w).Encode(enrichment.MBArtistSearchResponse{})
+			} else {
+				// Longest word search succeeds
+				json.NewEncoder(w).Encode(enrichment.MBArtistSearchResponse{
+					Artists: []enrichment.MBArtist{
+						{ID: "longest-match", Name: "Beethoven", Score: 90, Type: "Person"},
+					},
+				})
+			}
+		}))
+		defer server.Close()
+
+		client := enrichment.NewMusicBrainzClient(enrichment.WithMBBaseURL(server.URL))
+		mbid, err := client.SearchArtist(context.Background(), "Ludwig van Beethoven")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if mbid != "longest-match" {
+			t.Errorf("expected longest-match, got %s", mbid)
+		}
+	})
 }
