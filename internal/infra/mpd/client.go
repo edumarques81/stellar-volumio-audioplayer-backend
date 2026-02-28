@@ -337,8 +337,8 @@ func (c *Client) Watch(subsystems ...string) (<-chan string, error) {
 				ch <- subsystem
 			case err := <-watcher.Error:
 				log.Error().Err(err).Msg("MPD watcher error")
-				// Try to reconnect after a delay
-				time.Sleep(time.Second)
+				// Reconnect after 5s to avoid CPU waste on repeated failures
+				time.Sleep(5 * time.Second)
 			}
 		}
 	}()

@@ -7,6 +7,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -1905,6 +1906,7 @@ func (s *Server) handleDatabaseUpdate() {
 			log.Error().Err(err).Msg("Failed to rebuild cache after database update")
 			return
 		}
+		runtime.GC() // Release memory after cache rebuild
 		s.broadcastCacheUpdated()
 		s.triggerEnrichment()
 	}()
@@ -1941,6 +1943,7 @@ func (s *Server) InitializeCache() {
 				log.Error().Err(err).Msg("Background cache rebuild failed")
 				return
 			}
+			runtime.GC() // Release memory after initial cache build
 			s.broadcastCacheUpdated()
 			s.triggerEnrichment()
 		}()

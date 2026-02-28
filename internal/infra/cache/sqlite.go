@@ -64,6 +64,11 @@ func (d *DB) Open() error {
 
 	d.db = db
 
+	// Set cache size to 2MB (negative value = KiB) to reduce memory footprint
+	if _, err := db.Exec("PRAGMA cache_size = -2000"); err != nil {
+		log.Warn().Err(err).Msg("Failed to set SQLite cache_size")
+	}
+
 	// Initialize schema
 	if err := d.initSchema(); err != nil {
 		d.db.Close()

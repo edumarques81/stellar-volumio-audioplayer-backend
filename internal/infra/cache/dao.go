@@ -733,6 +733,7 @@ func (dao *DAO) GetAlbumsWithoutArtwork() ([]AlbumInfo, error) {
 		FROM albums a
 		WHERE a.artwork_id IS NULL OR a.artwork_id = ''
 		ORDER BY a.title COLLATE NOCASE
+		LIMIT 100
 	`)
 	if err != nil {
 		return nil, err
@@ -781,6 +782,7 @@ func (dao *DAO) GetArtistsWithoutArtwork() ([]ArtistInfo, error) {
 		FROM artists a
 		WHERE a.artwork_id IS NULL OR a.artwork_id = ''
 		ORDER BY a.name COLLATE NOCASE
+		LIMIT 100
 	`)
 	if err != nil {
 		return nil, err
