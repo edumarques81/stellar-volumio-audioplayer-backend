@@ -24,6 +24,7 @@ import (
 	"github.com/edumarques81/stellar-volumio-audioplayer-backend/internal/domain/localmusic"
 	"github.com/edumarques81/stellar-volumio-audioplayer-backend/internal/domain/player"
 	"github.com/edumarques81/stellar-volumio-audioplayer-backend/internal/domain/sources"
+	"github.com/edumarques81/stellar-volumio-audioplayer-backend/internal/domain/upnp"
 	"github.com/edumarques81/stellar-volumio-audioplayer-backend/internal/infra/mpd"
 	"github.com/edumarques81/stellar-volumio-audioplayer-backend/internal/transport/socketio"
 	"github.com/edumarques81/stellar-volumio-audioplayer-backend/internal/version"
@@ -182,6 +183,21 @@ func main() {
 
 	// Start Audirvana now-playing poller
 	socketServer.StartAudirvanaPoller(ctx)
+
+	// Start UPnP AV Renderer for Audirvana discovery
+	upnpService := upnp.NewService(
+		upnp.DeviceConfig{
+			FriendlyName: "Stellar Audio",
+			UDN:          "4d696e69-4469-5343-9a61-5374656c6c61", // Stable UUID for Stellar
+			Port:         9180,
+		},
+		&upnpBridge{player: playerService, mpd: mpdClient},
+	)
+	if err := upnpService.Start(); err != nil {
+		log.Warn().Err(err).Msg("UPnP AV Renderer failed to start — Audirvana discovery disabled")
+	} else {
+		defer upnpService.Stop()
+	}
 
 	// Setup HTTP server
 	mux := http.NewServeMux()
