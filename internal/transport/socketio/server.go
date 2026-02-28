@@ -206,6 +206,8 @@ func (s *Server) setupHandlers() {
 			client.Emit("pushSystemInfo", GetSystemInfo())
 			client.Emit("pushLcdStatus", GetLCDStatus())
 			client.Emit("pushAudioStatus", s.audioController.GetStatus())
+			// Broadcast actual audio engine state (MPD vs Audirvana)
+			s.pushAudioEngineState(client)
 		}()
 
 		// Handle disconnect
