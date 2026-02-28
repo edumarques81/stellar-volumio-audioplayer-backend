@@ -14,6 +14,7 @@
 ### Streaming Services
 
 - [ ] **Qobuz integration** - Hi-Res streaming service
+  - **⚠️ Auth note:** Eduardo's Qobuz account was created via "Continue with Google" — no password set. To fix: qobuz.com → Account Settings → set a standalone password. Then `gobuz` (email+password) will work.
   - [ ] Implement Qobuz client using [gobuz](https://pkg.go.dev/github.com/markhc/gobuz) library
   - [ ] Web player credential extraction (development mode)
   - [ ] User login/logout via Socket.IO
@@ -30,10 +31,20 @@
   - [ ] Streaming URL resolution
   - [ ] MQA support (if applicable)
 
-- [ ] **Audirvana integration** - Desktop audio player
-  - [ ] Research Audirvana integration options
-  - [ ] Debian package installation
-  - [ ] API/control integration
+- [ ] **Audirvana integration** - UPnP/DLNA Renderer (Phase 2)
+  - **Architecture:** Expose Stellar as a UPnP AV renderer so Audirvana auto-discovers it via SSDP and can stream to it
+  - **Background:** Audirvana is a UPnP Control Point (strings `urn:schemas-upnp-org:service:AVTransport:1`, `RenderingControl:1`, `ConnectionManager:1` confirmed in binary). No reverse-engineering needed — standard UPnP.
+  - **Data flow:** Audirvana discovers "Stellar" → user selects it as output → Audirvana sends `SetAVTransportURI` (stream URL + full metadata: title, artist, album, art, duration) → Stellar passes URL to MPD → emits `pushState` to frontend. `Play/Pause/Stop/Seek` forwarded via `AVTransport`.
+  - **What to build in Go** (`internal/domain/upnp/`):
+    - [ ] UPnP device description XML (`AVTransport` + `RenderingControl` + `ConnectionManager`)
+    - [ ] HTTP server serving device description + SOAP action endpoints
+    - [ ] SSDP announcements for auto-discovery on local network
+    - [ ] `SetAVTransportURI` handler → extract stream URL + metadata → MPD play → `pushState`
+    - [ ] `Play/Pause/Stop/Seek` SOAP handlers → forward to MPD coordinator
+    - [ ] `GetPositionInfo` / `GetTransportInfo` handlers (Audirvana polls these for playback position)
+  - **Go libraries:** `github.com/huin/goupnp` or `gitlab.com/mipimipi/go-upnp`
+  - **Research doc:** `docs/AUDIRVANA_INVESTIGATION.md` — full prior investigation (Jan 2026)
+  - **Complexity:** Medium-high. 2–3 evenings with agent. UPnP XML schema verbose but well-documented.
 
 ## Investigation / Experiments
 
