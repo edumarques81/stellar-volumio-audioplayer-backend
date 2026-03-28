@@ -84,6 +84,36 @@ func (dao *DAO) InsertAlbumTx(tx *sql.Tx, album *CachedAlbum) error {
 	return err
 }
 
+// FindAlbumByFirstTrack finds an album whose first_track matches the given path.
+// Falls back to matching any album whose first_track directory contains the path.
+func (dao *DAO) FindAlbumByFirstTrack(trackPath string) (*CachedAlbum, error) {
+	db := dao.db.DB()
+	if db == nil {
+		return nil, fmt.Errorf("database not open")
+	}
+
+	// Direct match first
+	var id, title string
+	err := db.QueryRow(`SELECT id, title FROM albums WHERE first_track = ?`, trackPath).Scan(&id, &title)
+	if err == nil {
+		return &CachedAlbum{ID: id, Title: title}, nil
+	}
+
+	// Fallback: match by directory — the request path might be any track from the album,
+	// not just the first_track. Extract directory and match albums whose first_track
+	// starts with the same directory prefix.
+	dir := trackPath
+	if idx := strings.LastIndex(dir, "/"); idx > 0 {
+		dir = dir[:idx+1] // include trailing slash
+	}
+	err = db.QueryRow(`SELECT id, title FROM albums WHERE first_track LIKE ? LIMIT 1`, dir+"%").Scan(&id, &title)
+	if err == nil {
+		return &CachedAlbum{ID: id, Title: title}, nil
+	}
+
+	return nil, fmt.Errorf("no album found for track path: %s", trackPath)
+}
+
 // GetAlbum retrieves an album by ID.
 func (dao *DAO) GetAlbum(id string) (*CachedAlbum, error) {
 	db := dao.db.DB()

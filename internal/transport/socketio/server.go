@@ -7,6 +7,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"sync"
@@ -17,6 +18,7 @@ import (
 	"github.com/zishang520/socket.io/v3/pkg/types"
 
 	"github.com/edumarques81/stellar-volumio-audioplayer-backend/internal/audio"
+	"github.com/edumarques81/stellar-volumio-audioplayer-backend/internal/domain/artwork"
 	"github.com/edumarques81/stellar-volumio-audioplayer-backend/internal/domain/audirvana"
 	"github.com/edumarques81/stellar-volumio-audioplayer-backend/internal/domain/device"
 	"github.com/edumarques81/stellar-volumio-audioplayer-backend/internal/domain/library"
@@ -130,7 +132,7 @@ func NewServer(playerService *player.Service, mpdClient *mpdclient.Client, sourc
 		cacheDAO:          cacheDAO,
 		audirvanaService:  audirvana.NewService(),
 		deviceService:     deviceSvc,
-		connLimiter:       NewConnectionLimiter(1), // 1 external + unlimited local
+		connLimiter:       NewConnectionLimiter(100), // Connection limit disabled for development (was 1)
 		clients:           make(map[string]*socket.Socket),
 	}
 
@@ -1994,6 +1996,41 @@ type ArtistArtworkInfo struct {
 
 // GetArtistArtwork retrieves artist artwork by ID or name.
 // Returns artwork info for HTTP serving, or nil if not found.
+// GetAlbumArtworkByTrackPath looks up cached album artwork by the track's URI path.
+// This enables serving album art even when the NAS is offline, using previously cached artwork.
+// Returns the artwork data and mime type, or nil if not found.
+func (s *Server) GetAlbumArtworkByTrackPath(trackPath string) ([]byte, string) {
+	if s.cacheDAO == nil {
+		return nil, ""
+	}
+
+	// Find album whose first_track matches this path
+	album, err := s.cacheDAO.FindAlbumByFirstTrack(trackPath)
+	if err != nil || album == nil {
+		return nil, ""
+	}
+
+	// Try to find cached artwork file on disk using the album ID
+	cacheDir := os.ExpandEnv("$HOME/stellar-backend/data/cache/artwork/albums")
+	extensions := []string{".jpg", ".jpeg", ".png", ".webp"}
+	for _, ext := range extensions {
+		filePath := filepath.Join(cacheDir, album.ID+ext)
+		data, err := os.ReadFile(filePath)
+		if err == nil && len(data) > 0 {
+			mimeType := artwork.DetectMimeType(data)
+			log.Debug().
+				Str("trackPath", trackPath).
+				Str("albumID", album.ID).
+				Str("albumTitle", album.Title).
+				Str("filePath", filePath).
+				Msg("Serving album artwork from enrichment cache")
+			return data, mimeType
+		}
+	}
+
+	return nil, ""
+}
+
 func (s *Server) GetArtistArtwork(artistID, artistName string) *ArtistArtworkInfo {
 	if s.cacheDAO == nil {
 		return nil

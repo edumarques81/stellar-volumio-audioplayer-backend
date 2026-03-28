@@ -247,7 +247,15 @@ func main() {
 			}
 		}
 
-		// 2. Try MPD albumart (folder-based) - fallback for remote sources
+		// 2. Try enrichment cache (works even when NAS is offline)
+		if cachedData, mimeType := socketServer.GetAlbumArtworkByTrackPath(path); cachedData != nil {
+			w.Header().Set("Content-Type", mimeType)
+			w.Header().Set("Cache-Control", "public, max-age=86400")
+			w.Write(cachedData)
+			return
+		}
+
+		// 3. Try MPD albumart (folder-based) - fallback for remote sources
 		data, err = mpdClient.AlbumArt(path)
 		if err == nil && len(data) > 0 {
 			log.Debug().Str("path", path).Msg("Serving artwork from MPD albumart")
@@ -255,7 +263,7 @@ func main() {
 			return
 		}
 
-		// 3. Try embedded picture (ReadPicture)
+		// 4. Try embedded picture (ReadPicture)
 		data, err = mpdClient.ReadPicture(path)
 		if err == nil && len(data) > 0 {
 			log.Debug().Str("path", path).Msg("Serving artwork from embedded picture")

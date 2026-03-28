@@ -107,11 +107,17 @@ func (s *Server) StartAudirvanaPoller(ctx context.Context) {
 	log.Info().Msg("Audirvana now-playing poller started (2s interval)")
 }
 
-// isServiceActive checks if a systemd service is currently active.
+// isServiceActive checks if a systemd service is currently active,
+// falling back to pgrep process detection when no systemd unit exists.
 func isServiceActive(serviceName string) bool {
+	// Try systemctl first (works when installed as a service)
 	out, err := exec.Command("systemctl", "is-active", serviceName).Output()
-	if err != nil {
-		return false
+	if err == nil && strings.TrimSpace(string(out)) == "active" {
+		return true
 	}
-	return strings.TrimSpace(string(out)) == "active"
+
+	// Fallback: check if the process is running by name via pgrep
+	// This handles Audirvana running as a bare process without a systemd unit.
+	pgrepOut, pgrepErr := exec.Command("pgrep", "-f", serviceName).Output()
+	return pgrepErr == nil && len(strings.TrimSpace(string(pgrepOut))) > 0
 }
