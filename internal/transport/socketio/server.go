@@ -7,6 +7,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -537,6 +538,37 @@ func (s *Server) setupHandlers() {
 		client.On("getSystemInfo", func(args ...any) {
 			log.Debug().Str("id", clientID).Msg("getSystemInfo")
 			client.Emit("pushSystemInfo", GetSystemInfo())
+		})
+
+		// System power events
+		client.On("shutdown", func(args ...any) {
+			log.Info().Str("id", clientID).Msg("shutdown requested")
+			s.io.Emit("pushShutdownNotice", map[string]interface{}{
+				"action":  "shutdown",
+				"message": "Shutting down in 3 seconds...",
+			})
+			go func() {
+				time.Sleep(3 * time.Second)
+				cmd := exec.Command("sudo", "shutdown", "-h", "now")
+				if err := cmd.Run(); err != nil {
+					log.Error().Err(err).Msg("shutdown failed")
+				}
+			}()
+		})
+
+		client.On("reboot", func(args ...any) {
+			log.Info().Str("id", clientID).Msg("reboot requested")
+			s.io.Emit("pushShutdownNotice", map[string]interface{}{
+				"action":  "reboot",
+				"message": "Rebooting in 3 seconds...",
+			})
+			go func() {
+				time.Sleep(3 * time.Second)
+				cmd := exec.Command("sudo", "reboot")
+				if err := cmd.Run(); err != nil {
+					log.Error().Err(err).Msg("reboot failed")
+				}
+			}()
 		})
 
 		// Rescan database event - triggers MPD to scan for new/changed music files
