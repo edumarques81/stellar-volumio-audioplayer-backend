@@ -245,9 +245,13 @@ func (s *Service) GetQueue() ([]map[string]interface{}, error) {
 		item["uri"] = song["file"]
 		item["title"] = song["Title"]
 		if item["title"] == "" {
-			// Use filename if no title
+			// Use filename if no title — strip path and extension
 			parts := strings.Split(song["file"], "/")
-			item["title"] = parts[len(parts)-1]
+			name := parts[len(parts)-1]
+			if idx := strings.LastIndex(name, "."); idx > 0 {
+				name = name[:idx]
+			}
+			item["title"] = name
 		}
 		item["artist"] = song["Artist"]
 		item["album"] = song["Album"]

@@ -24,6 +24,7 @@ type AlbumDetails struct {
 	TrackCount  int
 	FirstTrack  string
 	TotalTime   int
+	Format      string // Audio format from MPD, e.g. "44100:16:2"
 }
 
 // MPDClient interface for MPD operations needed by this service.
@@ -166,8 +167,14 @@ func (s *Service) getAlbumsFromBasePath(basePath string, sourceType SourceType, 
 			}
 		}
 
-		// Generate album ID
-		albumID := generateID(details.Album + "\x00" + details.AlbumArtist)
+		// Get URI from first track directory
+		uri := ""
+		if details.FirstTrack != "" {
+			uri = path.Dir(details.FirstTrack)
+		}
+
+		// Generate album ID including URI so different quality versions are separate
+		albumID := generateID(details.Album + "\x00" + details.AlbumArtist + "\x00" + uri)
 
 		// Get album art from first track
 		albumArt := ""
@@ -175,11 +182,22 @@ func (s *Service) getAlbumsFromBasePath(basePath string, sourceType SourceType, 
 			albumArt = "/albumart?path=" + details.FirstTrack
 		}
 
-		// Get URI from first track directory
-		uri := ""
-		if details.FirstTrack != "" {
-			uri = path.Dir(details.FirstTrack)
+		// Parse audio format and detect track type
+		var sampleRate, bitDepth int
+		if details.Format != "" {
+			parts := strings.Split(details.Format, ":")
+			if len(parts) >= 2 {
+				sampleRate, _ = strconv.Atoi(parts[0])
+				bitDepth, _ = strconv.Atoi(parts[1])
+			}
 		}
+		trackType := ""
+		if details.FirstTrack != "" {
+			if idx := strings.LastIndex(details.FirstTrack, "."); idx >= 0 {
+				trackType = strings.ToLower(details.FirstTrack[idx+1:])
+			}
+		}
+		quality := formatQualityLabel(sampleRate, bitDepth, trackType)
 
 		album := Album{
 			ID:         albumID,
@@ -189,6 +207,8 @@ func (s *Service) getAlbumsFromBasePath(basePath string, sourceType SourceType, 
 			AlbumArt:   albumArt,
 			TrackCount: details.TrackCount,
 			Source:     sourceType,
+			Quality:    quality,
+			TrackType:  trackType,
 		}
 
 		albums = append(albums, album)
@@ -202,10 +222,16 @@ func (s *Service) sortAlbums(albums []Album, sortOrder SortOrder) {
 	switch sortOrder {
 	case SortByArtist:
 		sort.Slice(albums, func(i, j int) bool {
-			if albums[i].Artist == albums[j].Artist {
-				return strings.ToLower(albums[i].Title) < strings.ToLower(albums[j].Title)
+			ai, aj := strings.ToLower(albums[i].Artist), strings.ToLower(albums[j].Artist)
+			if ai != aj {
+				return ai < aj
 			}
-			return strings.ToLower(albums[i].Artist) < strings.ToLower(albums[j].Artist)
+			ti, tj := strings.ToLower(albums[i].Title), strings.ToLower(albums[j].Title)
+			if ti != tj {
+				return ti < tj
+			}
+			// Same artist+title: sort by quality descending (higher quality first)
+			return albums[i].Quality > albums[j].Quality
 		})
 	case SortYear:
 		sort.Slice(albums, func(i, j int) bool {

@@ -1,11 +1,57 @@
 package library
 
 import (
+	"fmt"
 	"strings"
 
 	"github.com/edumarques81/stellar-volumio-audioplayer-backend/internal/infra/cache"
 	"github.com/rs/zerolog/log"
 )
+
+// formatQualityLabel creates a human-readable quality label from audio parameters.
+func formatQualityLabel(sampleRate, bitDepth int, trackType string) string {
+	if sampleRate == 0 && bitDepth == 0 && trackType == "" {
+		return ""
+	}
+
+	tt := strings.ToUpper(trackType)
+
+	// DSD formats
+	if trackType == "dsf" || trackType == "dff" {
+		switch {
+		case sampleRate >= 11289600:
+			return "DSD256"
+		case sampleRate >= 5644800:
+			return "DSD128"
+		case sampleRate >= 2822400:
+			return "DSD64"
+		default:
+			return "DSD"
+		}
+	}
+
+	// PCM formats
+	var parts []string
+	if sampleRate > 0 {
+		if sampleRate%1000 == 0 {
+			parts = append(parts, fmt.Sprintf("%dkHz", sampleRate/1000))
+		} else {
+			// e.g. 44100 → "44.1kHz"
+			parts = append(parts, fmt.Sprintf("%.1fkHz", float64(sampleRate)/1000))
+		}
+	}
+	if bitDepth > 0 {
+		parts = append(parts, fmt.Sprintf("%dbit", bitDepth))
+	}
+
+	label := strings.Join(parts, "/")
+	if tt != "" && label != "" {
+		label += " " + tt
+	} else if tt != "" {
+		label = tt
+	}
+	return label
+}
 
 // CachedService wraps the library Service with cache support.
 type CachedService struct {
@@ -99,15 +145,19 @@ func (s *CachedService) GetAlbums(req GetAlbumsRequest) AlbumsResponse {
 			albumArt = "/albumart?path=" + ca.FirstTrack
 		}
 
+		quality := formatQualityLabel(ca.SampleRate, ca.BitDepth, ca.TrackType)
+
 		albums = append(albums, Album{
 			ID:         ca.ID,
 			Title:      ca.Title,
-			Artist:     ca.AlbumArtist, // Use AlbumArtist from cache
+			Artist:     ca.AlbumArtist,
 			URI:        ca.URI,
 			TrackCount: ca.TrackCount,
 			Source:     SourceType(ca.Source),
 			Year:       ca.Year,
 			AlbumArt:   albumArt,
+			Quality:    quality,
+			TrackType:  ca.TrackType,
 		})
 	}
 
@@ -287,6 +337,7 @@ func (a *mpdDataProviderAdapter) GetAlbumDetails(basePath string) ([]cache.Album
 			TrackCount:  d.TrackCount,
 			FirstTrack:  d.FirstTrack,
 			TotalTime:   d.TotalTime,
+			Format:      d.Format,
 		})
 	}
 	return result, nil

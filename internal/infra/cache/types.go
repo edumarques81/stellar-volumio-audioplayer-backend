@@ -5,7 +5,7 @@ import "time"
 
 // CachedAlbum represents an album stored in the cache.
 type CachedAlbum struct {
-	ID            string    `json:"id"`             // MD5(albumArtist || album)
+	ID            string    `json:"id"`             // MD5(albumArtist || album || uri)
 	Title         string    `json:"title"`          // Album title
 	AlbumArtist   string    `json:"albumArtist"`    // Album artist
 	URI           string    `json:"uri"`            // Directory path for playback
@@ -14,6 +14,9 @@ type CachedAlbum struct {
 	TotalDuration int       `json:"totalDuration"`  // Total duration in seconds
 	Source        string    `json:"source"`         // 'local', 'usb', 'nas', 'streaming'
 	Year          int       `json:"year,omitempty"` // Release year
+	SampleRate    int       `json:"sampleRate,omitempty"`  // e.g. 44100, 96000, 192000
+	BitDepth      int       `json:"bitDepth,omitempty"`    // e.g. 16, 24, 32
+	TrackType     string    `json:"trackType,omitempty"`   // e.g. "flac", "dsf", "mp3"
 	AddedAt       time.Time `json:"addedAt"`        // When added to library
 	LastPlayed    time.Time `json:"lastPlayed"`     // Last played timestamp
 	ArtworkID     string    `json:"artworkId"`      // FK to artwork cache

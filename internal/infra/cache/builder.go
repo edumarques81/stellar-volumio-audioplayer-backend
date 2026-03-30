@@ -34,6 +34,7 @@ type AlbumDetailsData struct {
 	FirstTrack  string
 	TotalTime   int
 	Year        int
+	Format      string // Audio format from MPD, e.g. "44100:16:2"
 }
 
 // TrackData represents track data from MPD.
@@ -194,14 +195,32 @@ func (b *Builder) buildAlbums() error {
 				continue
 			}
 
-			// Generate album ID
-			albumID := generateAlbumID(album.AlbumArtist, album.Album)
-
 			// Get source type from first track path
 			source := b.classifier.GetSourceType(album.FirstTrack)
 
 			// Get directory URI for playback
 			uri := filepath.Dir(album.FirstTrack)
+
+			// Generate album ID including URI so different quality versions are separate
+			albumID := generateAlbumID(album.AlbumArtist, album.Album, uri)
+
+			// Parse audio format (e.g. "44100:16:2" → sampleRate, bitDepth)
+			var sampleRate, bitDepth int
+			if album.Format != "" {
+				parts := strings.Split(album.Format, ":")
+				if len(parts) >= 2 {
+					sampleRate, _ = strconv.Atoi(parts[0])
+					bitDepth, _ = strconv.Atoi(parts[1])
+				}
+			}
+
+			// Detect track type from first track's file extension
+			trackType := ""
+			if album.FirstTrack != "" {
+				if idx := strings.LastIndex(album.FirstTrack, "."); idx >= 0 {
+					trackType = strings.ToLower(album.FirstTrack[idx+1:])
+				}
+			}
 
 			cachedAlbum := &CachedAlbum{
 				ID:            albumID,
@@ -213,6 +232,9 @@ func (b *Builder) buildAlbums() error {
 				TotalDuration: album.TotalTime,
 				Source:        source,
 				Year:          album.Year,
+				SampleRate:    sampleRate,
+				BitDepth:      bitDepth,
+				TrackType:     trackType,
 				AddedAt:       time.Now(), // Would be better to get from file mtime
 			}
 
@@ -395,8 +417,8 @@ func (b *Builder) BuildAlbumTracks(albumID, album, albumArtist string) error {
 
 // Helper functions for generating IDs
 
-func generateAlbumID(albumArtist, album string) string {
-	data := albumArtist + "\x00" + album
+func generateAlbumID(albumArtist, album, uri string) string {
+	data := albumArtist + "\x00" + album + "\x00" + uri
 	return fmt.Sprintf("%x", md5.Sum([]byte(data)))
 }
 

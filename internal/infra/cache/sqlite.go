@@ -15,7 +15,7 @@ import (
 
 const (
 	// CurrentSchemaVersion is the current database schema version.
-	CurrentSchemaVersion = "1"
+	CurrentSchemaVersion = "2"
 
 	// DefaultDBPath is the default path for the cache database.
 	DefaultDBPath = "data/library.db"
@@ -111,7 +111,21 @@ func (d *DB) initSchema() error {
 			Str("current", currentVersion).
 			Str("target", CurrentSchemaVersion).
 			Msg("Migrating cache schema")
-		// Add migration logic here when schema changes
+
+		// Migration from version "1" to "2": add audio quality columns
+		if currentVersion == "1" {
+			migrations := []string{
+				"ALTER TABLE albums ADD COLUMN sample_rate INTEGER DEFAULT 0",
+				"ALTER TABLE albums ADD COLUMN bit_depth INTEGER DEFAULT 0",
+				"ALTER TABLE albums ADD COLUMN track_type TEXT DEFAULT ''",
+			}
+			for _, m := range migrations {
+				if _, err := d.db.Exec(m); err != nil {
+					log.Warn().Err(err).Str("sql", m).Msg("Migration statement failed (column may already exist)")
+				}
+			}
+		}
+
 		return d.setMeta("schema_version", CurrentSchemaVersion)
 	}
 
@@ -132,6 +146,9 @@ func (d *DB) createSchema() error {
 		total_duration INTEGER DEFAULT 0,
 		source TEXT NOT NULL,
 		year INTEGER,
+		sample_rate INTEGER DEFAULT 0,
+		bit_depth INTEGER DEFAULT 0,
+		track_type TEXT DEFAULT '',
 		added_at TEXT,
 		last_played TEXT,
 		artwork_id TEXT,

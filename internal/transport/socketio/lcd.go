@@ -129,6 +129,21 @@ func getLCDStatusWayland() (LCDStatus, bool) {
 func GetLCDStatus() LCDStatus {
 	status := LCDStatus{IsOn: true} // Default to on
 
+	// Try backlight sysfs first (official Pi touchscreen)
+	blPath := getBacklightPath()
+	if blPath != "" {
+		data, err := os.ReadFile(blPath)
+		if err == nil {
+			val := strings.TrimSpace(string(data))
+			// bl_power: 0 = on, 1 = off
+			if val == "1" {
+				status.IsOn = false
+			}
+			log.Debug().Str("bl_power", val).Bool("isOn", status.IsOn).Msg("LCD status from backlight sysfs")
+			return status
+		}
+	}
+
 	// Try Wayland (wlr-randr) first - this is the correct method for Cage/Wayland
 	if isWaylandSession() {
 		if wlStatus, ok := getLCDStatusWayland(); ok {
@@ -165,6 +180,52 @@ func GetLCDStatus() LCDStatus {
 	}
 
 	return status
+}
+
+// getBacklightPath finds the sysfs backlight path for the official Pi DSI touchscreen.
+// Returns empty string if not found.
+func getBacklightPath() string {
+	paths := []string{
+		"/sys/class/backlight/rpi_backlight/bl_power",
+		"/sys/class/backlight/10-0045/bl_power",
+		"/sys/class/backlight/4-0045/bl_power",
+	}
+	for _, p := range paths {
+		if _, err := os.Stat(p); err == nil {
+			return p
+		}
+	}
+	return ""
+}
+
+// setLCDPowerBacklight controls the display backlight via sysfs.
+// This only turns off the backlight — the touchscreen digitizer stays active,
+// which means touch-to-wake works perfectly.
+// bl_power: 0 = on, 1 = off (yes, it's inverted).
+func setLCDPowerBacklight(on bool) error {
+	blPath := getBacklightPath()
+	if blPath == "" {
+		return os.ErrNotExist
+	}
+
+	value := "1" // off
+	if on {
+		value = "0" // on
+	}
+
+	err := os.WriteFile(blPath, []byte(value), 0644)
+	if err != nil {
+		// Try with sudo if direct write fails
+		cmd := exec.Command("sudo", "sh", "-c", "echo "+value+" > "+blPath)
+		output, cmdErr := cmd.CombinedOutput()
+		if cmdErr != nil {
+			log.Error().Err(cmdErr).Str("output", string(output)).Bool("on", on).Msg("Backlight write failed")
+			return cmdErr
+		}
+	}
+
+	log.Info().Bool("on", on).Str("path", blPath).Msg("LCD power changed via backlight sysfs (touch stays active)")
+	return nil
 }
 
 // setLCDPowerDPMS sets LCD power using DRM DPMS sysfs interface.
@@ -222,9 +283,16 @@ func setLCDPowerWayland(on bool) error {
 
 // SetLCDPower turns the LCD display on or off.
 func SetLCDPower(on bool) error {
-	// Try DRM DPMS first - this is preferred because it keeps the display
-	// connected to the compositor, allowing the browser to stay running.
-	// This enables touch-to-wake functionality.
+	// Try backlight sysfs first — this is the best method because it only
+	// turns off the backlight while keeping the touch digitizer active.
+	// This enables touch-to-wake on the official Pi touchscreen.
+	if err := setLCDPowerBacklight(on); err == nil {
+		return nil
+	}
+	log.Debug().Msg("Backlight sysfs not available, trying DRM DPMS")
+
+	// Try DRM DPMS — keeps the display connected to the compositor,
+	// allowing the browser to stay running.
 	if err := setLCDPowerDPMS(on); err == nil {
 		return nil
 	}

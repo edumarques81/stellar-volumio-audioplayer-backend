@@ -4,6 +4,7 @@ package mpd
 import (
 	"fmt"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -545,6 +546,7 @@ type AlbumDetails struct {
 	TrackCount  int
 	FirstTrack  string // Path to first track (for album art)
 	TotalTime   int    // Total duration in seconds
+	Format      string // Audio format from MPD, e.g. "44100:16:2"
 }
 
 // GetAlbumDetails retrieves detailed information for albums within a base path.
@@ -563,7 +565,8 @@ func (c *Client) GetAlbumDetails(basePath string) ([]AlbumDetails, error) {
 		return nil, fmt.Errorf("failed to search base %s: %w", basePath, err)
 	}
 
-	// Group songs by album
+	// Group songs by album + artist + directory (so different quality versions
+	// of the same album in different folders become separate entries)
 	albumMap := make(map[string]*AlbumDetails)
 
 	for _, song := range songs {
@@ -578,13 +581,21 @@ func (c *Client) GetAlbumDetails(basePath string) ([]AlbumDetails, error) {
 			continue
 		}
 
-		key := album + "\x00" + artist
+		// Extract directory from file path for grouping
+		filePath := song["file"]
+		directory := filePath
+		if idx := strings.LastIndex(directory, "/"); idx > 0 {
+			directory = directory[:idx]
+		}
+
+		key := album + "\x00" + artist + "\x00" + directory
 
 		if _, exists := albumMap[key]; !exists {
 			albumMap[key] = &AlbumDetails{
 				Album:       album,
 				AlbumArtist: artist,
-				FirstTrack:  song["file"],
+				FirstTrack:  filePath,
+				Format:      song["Format"],
 			}
 		}
 
