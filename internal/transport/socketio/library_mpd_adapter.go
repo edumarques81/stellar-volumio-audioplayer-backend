@@ -110,6 +110,23 @@ func (a *LibraryMPDAdapter) FindAlbumTracks(album, albumArtist string) ([]map[st
 	return result, nil
 }
 
+// SearchByBase searches for all songs within a specific base path.
+func (a *LibraryMPDAdapter) SearchByBase(basePath string) ([]map[string]string, error) {
+	tracks, err := a.client.SearchByBase(basePath)
+	if err != nil {
+		return nil, err
+	}
+
+	result := make([]map[string]string, len(tracks))
+	for i, track := range tracks {
+		result[i] = make(map[string]string)
+		for k, v := range track {
+			result[i][k] = v
+		}
+	}
+	return result, nil
+}
+
 // ListPlaylists returns all saved playlists.
 func (a *LibraryMPDAdapter) ListPlaylists() ([]string, error) {
 	return a.client.ListPlaylists()

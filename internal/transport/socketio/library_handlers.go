@@ -190,6 +190,9 @@ func (h *LibraryHandlers) handleGetAlbumTracks(client *socket.Socket, args ...in
 			if albumArtist, ok := payload["albumArtist"].(string); ok {
 				req.AlbumArtist = albumArtist
 			}
+			if uri, ok := payload["uri"].(string); ok {
+				req.URI = uri
+			}
 		}
 	}
 

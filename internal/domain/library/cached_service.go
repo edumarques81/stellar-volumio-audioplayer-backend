@@ -16,16 +16,22 @@ func formatQualityLabel(sampleRate, bitDepth int, trackType string) string {
 
 	tt := strings.ToUpper(trackType)
 
-	// DSD formats
-	if trackType == "dsf" || trackType == "dff" {
+	// DSD formats — MPD reports PCM-equivalent rate for DSF/DFF (e.g. 44100:24:2),
+	// not the native DSD rate. We can infer DSD multiplier from the PCM rate:
+	// DSD64 = 2.8MHz → PCM equiv 44100, DSD128 = 5.6MHz → 88200, DSD256 = 11.2MHz → 176400
+	// Also check for native DSD rates and the "f" bit depth indicator (352800:f:2).
+	if trackType == "dsf" || trackType == "dff" || trackType == "dsd" {
+		// MPD 0.23 doesn't report Format for DSD files, so sampleRate may be 0.
+		// When available, infer DSD multiplier from native or PCM-equivalent rate.
 		switch {
-		case sampleRate >= 11289600:
+		case sampleRate >= 11289600 || sampleRate == 176400:
 			return "DSD256"
-		case sampleRate >= 5644800:
+		case sampleRate >= 5644800 || sampleRate == 88200:
 			return "DSD128"
 		case sampleRate >= 2822400:
 			return "DSD64"
 		default:
+			// No rate info from MPD — just label as DSD
 			return "DSD"
 		}
 	}

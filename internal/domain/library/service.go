@@ -40,6 +40,7 @@ type MPDClient interface {
 
 	// Track queries
 	FindAlbumTracks(album, albumArtist string) ([]map[string]string, error)
+	SearchByBase(basePath string) ([]map[string]string, error)
 
 	// Playlist/radio queries
 	ListPlaylists() ([]string, error)
@@ -411,9 +412,18 @@ func (s *Service) GetAlbumTracks(req GetAlbumTracksRequest) AlbumTracksResponse 
 		}
 	}
 
-	tracks, err := s.mpd.FindAlbumTracks(req.Album, req.AlbumArtist)
+	var tracks []map[string]string
+	var err error
+
+	if req.URI != "" {
+		// URI provided — search within specific folder (scopes to one quality version)
+		tracks, err = s.mpd.SearchByBase(req.URI)
+	} else {
+		// Fallback: search by album name + artist (may return tracks from multiple folders)
+		tracks, err = s.mpd.FindAlbumTracks(req.Album, req.AlbumArtist)
+	}
 	if err != nil {
-		log.Debug().Err(err).Str("album", req.Album).Msg("Failed to find album tracks")
+		log.Debug().Err(err).Str("album", req.Album).Str("uri", req.URI).Msg("Failed to find album tracks")
 		return AlbumTracksResponse{
 			Album:       req.Album,
 			AlbumArtist: req.AlbumArtist,
@@ -427,6 +437,12 @@ func (s *Service) GetAlbumTracks(req GetAlbumTracksRequest) AlbumTracksResponse 
 	for _, track := range tracks {
 		file := track["file"]
 		if file == "" {
+			continue
+		}
+
+		// Skip macOS resource fork files (._prefix)
+		base := path.Base(file)
+		if strings.HasPrefix(base, "._") {
 			continue
 		}
 

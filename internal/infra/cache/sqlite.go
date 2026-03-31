@@ -10,7 +10,7 @@ import (
 	"time"
 
 	"github.com/rs/zerolog/log"
-	_ "github.com/mattn/go-sqlite3" // SQLite driver
+	_ "modernc.org/sqlite" // Pure-Go SQLite driver (no CGO required)
 )
 
 const (
@@ -52,7 +52,7 @@ func (d *DB) Open() error {
 	}
 
 	// Open database
-	db, err := sql.Open("sqlite3", d.path+"?_journal=WAL&_busy_timeout=5000")
+	db, err := sql.Open("sqlite", d.path+"?_pragma=journal_mode%3DWAL&_pragma=busy_timeout%3D5000")
 	if err != nil {
 		return fmt.Errorf("failed to open cache database: %w", err)
 	}

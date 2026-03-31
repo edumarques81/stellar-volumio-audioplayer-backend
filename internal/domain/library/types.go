@@ -133,6 +133,7 @@ type ArtistAlbumsResponse struct {
 type GetAlbumTracksRequest struct {
 	Album       string `json:"album"`
 	AlbumArtist string `json:"albumArtist,omitempty"`
+	URI         string `json:"uri,omitempty"` // folder path — scopes to specific quality version
 }
 
 // AlbumTracksResponse is the response for listing tracks in an album.
