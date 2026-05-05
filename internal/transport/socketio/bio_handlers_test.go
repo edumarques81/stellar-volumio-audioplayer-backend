@@ -103,6 +103,26 @@ func TestBioHandlers_NilService_NoOp(t *testing.T) {
 	// Should not panic when constructed with nil service; calls are guarded.
 	_, err := h.handleGetBioInternal(map[string]interface{}{"artist": "X", "album": "Y"})
 	if err == nil {
-		t.Fatalf("expected error when service is nil")
+		t.Fatalf("expected error when service is nil on get")
+	}
+	_, err = h.handleRefreshBioInternal(map[string]interface{}{"artist": "X", "album": "Y"})
+	if err == nil {
+		t.Fatalf("expected error when service is nil on refresh")
+	}
+	if _, err := h.handleRefreshBioInternal(nil); err == nil {
+		t.Fatalf("expected error when refresh payload is nil")
+	}
+}
+
+func TestBioHandlers_handleRefresh_ServiceError_ReturnsEmpty(t *testing.T) {
+	t.Parallel()
+	svc := &fakeBioService{err: errors.New("upstream"), out: bios.Bio{}}
+	h := NewBioHandlers(svc)
+	resp, err := h.handleRefreshBioInternal(map[string]interface{}{"artist": "X", "album": "Y"})
+	if err != nil {
+		t.Fatalf("refresh should swallow service error: %v", err)
+	}
+	if resp["summary"] != "" {
+		t.Fatalf("expected empty summary on refresh service error, got %+v", resp)
 	}
 }
