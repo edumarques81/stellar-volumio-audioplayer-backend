@@ -74,8 +74,8 @@ func TestDBGetStats(t *testing.T) {
 	if stats.TrackCount != 0 {
 		t.Errorf("Expected 0 tracks, got %d", stats.TrackCount)
 	}
-	if stats.SchemaVersion != "1" {
-		t.Errorf("Expected schema version '1', got '%s'", stats.SchemaVersion)
+	if stats.SchemaVersion != cache.CurrentSchemaVersion {
+		t.Errorf("Expected schema version %q, got %q", cache.CurrentSchemaVersion, stats.SchemaVersion)
 	}
 }
 
