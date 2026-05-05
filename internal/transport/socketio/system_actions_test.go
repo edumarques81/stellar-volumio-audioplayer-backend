@@ -71,6 +71,15 @@ func TestSystemActions_RemoteCallerRefused(t *testing.T) {
 			if err == nil {
 				t.Fatalf("expected refusal for non-loopback %q", ip)
 			}
+			if !errors.Is(err, errNonLoopback) {
+				t.Fatalf("expected errNonLoopback for %q, got %v", ip, err)
+			}
+			if msg := clientErrorMessage(err); msg != "unauthorized" {
+				t.Fatalf("client-facing message for %q must be %q, got %q", ip, "unauthorized", msg)
+			}
+			// Internal-facing wrapped error must not leak the IP back to the
+			// client; the unwrapped error string is internal-only (used in
+			// the warn log). It MAY contain the IP — that's fine for ops.
 			if called {
 				t.Fatalf("non-loopback %q should not have triggered shutdown dep", ip)
 			}
@@ -79,10 +88,27 @@ func TestSystemActions_RemoteCallerRefused(t *testing.T) {
 			if err == nil {
 				t.Fatalf("expected refusal for non-loopback %q on reboot", ip)
 			}
+			if !errors.Is(err, errNonLoopback) {
+				t.Fatalf("expected errNonLoopback on reboot for %q, got %v", ip, err)
+			}
+			if msg := clientErrorMessage(err); msg != "unauthorized" {
+				t.Fatalf("reboot client-facing message for %q must be %q, got %q", ip, "unauthorized", msg)
+			}
 			if called {
 				t.Fatalf("non-loopback %q should not have triggered reboot dep", ip)
 			}
 		})
+	}
+}
+
+// TestClientErrorMessage_PropagatesDepErrors confirms that loopback dep
+// failures (e.g. /sbin/shutdown permission denied) still surface the real
+// error to the client — only auth refusals are sanitized.
+func TestClientErrorMessage_PropagatesDepErrors(t *testing.T) {
+	t.Parallel()
+	depErr := errors.New("permission denied")
+	if msg := clientErrorMessage(depErr); msg != "permission denied" {
+		t.Fatalf("dep error must propagate verbatim, got %q", msg)
 	}
 }
 

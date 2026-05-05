@@ -21,7 +21,9 @@ type SystemActionDeps struct {
 // SystemActionHandlers wires system:shutdown / system:reboot to root commands.
 //
 // Auth: only loopback callers (127.0.0.1 / ::1) are allowed. Non-loopback
-// callers are refused with a clear error event — they do NOT silently fail.
+// callers are refused with a generic "unauthorized" error event — they do
+// NOT silently fail, and they do NOT see the IP echoed back. The full
+// detail (including remote IP) is logged at warn level for ops.
 // This is a SECURITY guarantee documented in the Plan 3 spec: the redesigned
 // frontend (which lives on the same Pi) must hit the backend over loopback,
 // while remote Volumio Connect mobile apps cannot trigger power actions.
@@ -30,6 +32,11 @@ type SystemActionDeps struct {
 type SystemActionHandlers struct {
 	deps SystemActionDeps
 }
+
+// errNonLoopback is returned by handle*Internal when the caller is not
+// loopback. RegisterHandlers maps this to the sanitized "unauthorized"
+// payload — clients never see the underlying detail.
+var errNonLoopback = errors.New("non-loopback caller refused")
 
 // NewSystemActionHandlers constructs the bundle. Missing deps are filled
 // in with DefaultShutdown / DefaultReboot so production wiring works
@@ -52,7 +59,7 @@ func (h *SystemActionHandlers) RegisterHandlers(client *socket.Socket) {
 			log.Warn().Err(err).Str("remote_ip", ip).Msg("system:shutdown rejected")
 			_ = client.Emit("system:action:error", map[string]string{
 				"action": "shutdown",
-				"error":  err.Error(),
+				"error":  clientErrorMessage(err),
 			})
 			return
 		}
@@ -63,19 +70,32 @@ func (h *SystemActionHandlers) RegisterHandlers(client *socket.Socket) {
 			log.Warn().Err(err).Str("remote_ip", ip).Msg("system:reboot rejected")
 			_ = client.Emit("system:action:error", map[string]string{
 				"action": "reboot",
-				"error":  err.Error(),
+				"error":  clientErrorMessage(err),
 			})
 			return
 		}
 	})
 }
 
+// clientErrorMessage sanitizes the outgoing error payload. Non-loopback
+// refusals collapse to "unauthorized" (no IP echo). Dep failures from
+// authorized loopback callers (e.g. /sbin/shutdown returning permission
+// denied) propagate as-is — those are operational signals, not auth leaks.
+func clientErrorMessage(err error) string {
+	if errors.Is(err, errNonLoopback) {
+		return "unauthorized"
+	}
+	return err.Error()
+}
+
 // handleShutdownInternal: loopback check FIRST, then dispatch.
 // Tests target this directly so the security gate is verifiable
-// without a real socket.
+// without a real socket. Non-loopback callers wrap errNonLoopback so
+// the surface error message can be sanitized in RegisterHandlers while
+// the warn log still captures the IP.
 func (h *SystemActionHandlers) handleShutdownInternal(remoteIP string) error {
 	if !isLoopback(remoteIP) {
-		return fmt.Errorf("system:shutdown refused: non-loopback caller %q", remoteIP)
+		return fmt.Errorf("system:shutdown from %q: %w", remoteIP, errNonLoopback)
 	}
 	log.Info().Str("remote_ip", remoteIP).Msg("system:shutdown authorized; executing")
 	return h.deps.Shutdown()
@@ -83,7 +103,7 @@ func (h *SystemActionHandlers) handleShutdownInternal(remoteIP string) error {
 
 func (h *SystemActionHandlers) handleRebootInternal(remoteIP string) error {
 	if !isLoopback(remoteIP) {
-		return fmt.Errorf("system:reboot refused: non-loopback caller %q", remoteIP)
+		return fmt.Errorf("system:reboot from %q: %w", remoteIP, errNonLoopback)
 	}
 	log.Info().Str("remote_ip", remoteIP).Msg("system:reboot authorized; executing")
 	return h.deps.Reboot()
