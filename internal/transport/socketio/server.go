@@ -46,6 +46,7 @@ type Server struct {
 	libraryHandlers     *LibraryHandlers
 	cacheHandlers       *CacheHandlers
 	enrichmentHandlers  *EnrichmentHandlers
+	bioHandlers         *BioHandlers
 	cacheDB             *cache.DB
 	cacheDAO            *cache.DAO
 	audirvanaService    *audirvana.Service
@@ -159,6 +160,22 @@ func NewServer(playerService *player.Service, mpdClient *mpdclient.Client, sourc
 	return s, nil
 }
 
+// SetBioHandlers registers a bio-handler bundle. Pass nil to disable bio
+// events (e.g. when the cache DB is unavailable). Safe to call after
+// NewServer; new client connections see the updated handler immediately.
+func (s *Server) SetBioHandlers(h *BioHandlers) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.bioHandlers = h
+}
+
+// CacheDB returns the cache database opened during NewServer (or nil if it
+// could not be opened). Used by main.go to build the bio service over the
+// same *cache.DB instance — re-opening would race the writer connection.
+func (s *Server) CacheDB() *cache.DB {
+	return s.cacheDB
+}
+
 // setupHandlers registers all Socket.io event handlers.
 func (s *Server) setupHandlers() {
 	s.io.On("connection", func(clients ...any) {
@@ -243,6 +260,11 @@ func (s *Server) setupHandlers() {
 		// Register enrichment handlers
 		if s.enrichmentHandlers != nil {
 			s.enrichmentHandlers.RegisterHandlers(client)
+		}
+
+		// Register bio handlers (Wikipedia → LLM → SQLite cache)
+		if s.bioHandlers != nil {
+			s.bioHandlers.RegisterHandlers(client)
 		}
 
 		// Register Volumio Connect compatibility handlers
