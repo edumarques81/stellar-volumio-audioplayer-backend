@@ -95,6 +95,38 @@ go build -o stellar ./cmd/stellar
 └── configs/               # Configuration templates
 ```
 
+## Bio summarization (album/artist info)
+
+The Library screen displays 2-3 sentence album/artist bios sourced from
+Wikipedia and summarized via an LLM. Configure with environment variables:
+
+| Var | Required | Default | Notes |
+|---|---|---|---|
+| `ANTHROPIC_API_KEY` | No | (unset) | When unset, bios are returned empty (noop LLM). |
+| `ANTHROPIC_MODEL`   | No | `claude-haiku-4-5-20251001` | Override to test other Claude models. |
+
+Cache TTL is 90 days (defined in `internal/domain/bios/service.go`). The
+backend never errors on bio lookups — Wikipedia 404s, LLM rate limits,
+and missing API keys all degrade to an empty bio so the UI strip simply
+collapses.
+
+Socket.IO event contract:
+
+- `library:bio:get` `{artist, album}` → `pushLibraryBio` `{artist, album, summary, source_url, kind}`
+- `library:bio:rebuild` (same shape) — explicitly invalidates the cached row before refetch
+
+## Power actions
+
+`system:shutdown` and `system:reboot` Socket.IO events are gated to
+**loopback callers only** (127.0.0.1 / ::1). Remote clients (e.g. mobile
+controllers on a different host) cannot trigger power actions over the
+network — that's by design. Failures emit `system:action:error` with
+`{action, error}` so the UI Power modal can show a toast and stay open.
+
+The legacy unauthenticated `shutdown` / `reboot` events from earlier
+Volumio-compatible API still exist for backward compatibility; new
+frontend code should use the namespaced `system:*` events.
+
 ## Documentation
 
 - [Architecture](docs/ARCHITECTURE.md) - System design, MPD-as-source-of-truth pattern
