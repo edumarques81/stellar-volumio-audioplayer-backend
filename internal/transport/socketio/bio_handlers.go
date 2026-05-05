@@ -4,12 +4,18 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/rs/zerolog/log"
 	"github.com/zishang520/socket.io/servers/socket/v3"
 
 	"github.com/edumarques81/stellar-volumio-audioplayer-backend/internal/domain/bios"
 )
+
+// bioHandlerTimeout bounds each bio service call so a stuck Wikipedia or
+// Anthropic upstream cannot leak goroutines until its 30s HTTP timeout fires.
+// Declared as var (not const) so tests can shrink it to bound their wall time.
+var bioHandlerTimeout = 10 * time.Second
 
 // BioService is the subset of *bios.Service that handlers need (interface for tests).
 type BioService interface {
@@ -71,7 +77,9 @@ func (h *BioHandlers) handleGetBioInternal(payload map[string]interface{}) (map[
 		return nil, errors.New("bio service unavailable")
 	}
 
-	bio, err := h.svc.GetAlbumBio(context.Background(), artist, album)
+	ctx, cancel := context.WithTimeout(context.Background(), bioHandlerTimeout)
+	defer cancel()
+	bio, err := h.svc.GetAlbumBio(ctx, artist, album)
 	if err != nil {
 		// Graceful degradation: return empty bio rather than failing the socket call.
 		log.Debug().Err(err).Str("artist", artist).Str("album", album).Msg("GetAlbumBio error; returning empty")
@@ -89,7 +97,9 @@ func (h *BioHandlers) handleRefreshBioInternal(payload map[string]interface{}) (
 		return nil, errors.New("bio service unavailable")
 	}
 
-	bio, err := h.svc.RefreshAlbumBio(context.Background(), artist, album)
+	ctx, cancel := context.WithTimeout(context.Background(), bioHandlerTimeout)
+	defer cancel()
+	bio, err := h.svc.RefreshAlbumBio(ctx, artist, album)
 	if err != nil {
 		log.Debug().Err(err).Str("artist", artist).Str("album", album).Msg("RefreshAlbumBio error; returning empty")
 		return emptyBioPayload(artist, album), nil

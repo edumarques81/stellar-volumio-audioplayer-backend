@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/edumarques81/stellar-volumio-audioplayer-backend/internal/domain/bios"
 )
@@ -124,5 +125,108 @@ func TestBioHandlers_handleRefresh_ServiceError_ReturnsEmpty(t *testing.T) {
 	}
 	if resp["summary"] != "" {
 		t.Fatalf("expected empty summary on refresh service error, got %+v", resp)
+	}
+}
+
+// blockingBioService blocks GetAlbumBio / RefreshAlbumBio until ctx fires
+// or its done channel is closed, whichever comes first. Used to verify the
+// handler bounds upstream calls with a context timeout.
+type blockingBioService struct {
+	ctxErr chan error
+}
+
+func (b *blockingBioService) GetAlbumBio(ctx context.Context, _, _ string) (bios.Bio, error) {
+	<-ctx.Done()
+	if b.ctxErr != nil {
+		b.ctxErr <- ctx.Err()
+	}
+	return bios.Bio{}, ctx.Err()
+}
+
+func (b *blockingBioService) RefreshAlbumBio(ctx context.Context, _, _ string) (bios.Bio, error) {
+	<-ctx.Done()
+	if b.ctxErr != nil {
+		b.ctxErr <- ctx.Err()
+	}
+	return bios.Bio{}, ctx.Err()
+}
+
+// TestBioHandlers_GetBio_BoundedByTimeout verifies that a stuck upstream
+// (Wikipedia, Anthropic) cannot wedge the handler indefinitely — the
+// per-call context.WithTimeout fires and the handler returns within the
+// configured bound. Test shrinks bioHandlerTimeout to keep wall time small.
+func TestBioHandlers_GetBio_BoundedByTimeout(t *testing.T) {
+	prev := bioHandlerTimeout
+	bioHandlerTimeout = 50 * time.Millisecond
+	t.Cleanup(func() { bioHandlerTimeout = prev })
+
+	svc := &blockingBioService{ctxErr: make(chan error, 1)}
+	h := NewBioHandlers(svc)
+
+	done := make(chan struct{})
+	go func() {
+		// Service swallows ctx errors into empty-bio payload, so err is nil.
+		resp, err := h.handleGetBioInternal(map[string]interface{}{"artist": "X", "album": "Y"})
+		if err != nil {
+			t.Errorf("expected nil err (graceful empty), got %v", err)
+		}
+		if resp["summary"] != "" {
+			t.Errorf("expected empty summary on timeout, got %+v", resp)
+		}
+		close(done)
+	}()
+
+	select {
+	case <-done:
+		// good
+	case <-time.After(2 * time.Second):
+		t.Fatal("handleGetBioInternal did not return within 2s of a 50ms timeout — context not propagated")
+	}
+
+	select {
+	case err := <-svc.ctxErr:
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("expected DeadlineExceeded inside service, got %v", err)
+		}
+	default:
+		t.Fatal("service never observed ctx.Done — handler not propagating bounded ctx")
+	}
+}
+
+// TestBioHandlers_RefreshBio_BoundedByTimeout mirrors the get-path test
+// for the rebuild path.
+func TestBioHandlers_RefreshBio_BoundedByTimeout(t *testing.T) {
+	prev := bioHandlerTimeout
+	bioHandlerTimeout = 50 * time.Millisecond
+	t.Cleanup(func() { bioHandlerTimeout = prev })
+
+	svc := &blockingBioService{ctxErr: make(chan error, 1)}
+	h := NewBioHandlers(svc)
+
+	done := make(chan struct{})
+	go func() {
+		resp, err := h.handleRefreshBioInternal(map[string]interface{}{"artist": "X", "album": "Y"})
+		if err != nil {
+			t.Errorf("expected nil err (graceful empty), got %v", err)
+		}
+		if resp["summary"] != "" {
+			t.Errorf("expected empty summary on timeout, got %+v", resp)
+		}
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("handleRefreshBioInternal did not return within 2s of a 50ms timeout — context not propagated")
+	}
+
+	select {
+	case err := <-svc.ctxErr:
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("expected DeadlineExceeded inside service, got %v", err)
+		}
+	default:
+		t.Fatal("service never observed ctx.Done — handler not propagating bounded ctx")
 	}
 }
