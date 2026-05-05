@@ -370,6 +370,34 @@ func TestDBClear(t *testing.T) {
 	}
 }
 
+func TestSchema_BioTablesExist(t *testing.T) {
+	t.Parallel()
+	tmpDir := t.TempDir()
+	db := cache.NewDB(filepath.Join(tmpDir, "library.db"))
+	if err := db.Open(); err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+
+	for _, table := range []string{"album_bios", "artist_bios"} {
+		var name string
+		err := db.DB().QueryRow(
+			`SELECT name FROM sqlite_master WHERE type='table' AND name=?`, table,
+		).Scan(&name)
+		if err != nil {
+			t.Fatalf("table %q missing after Open: %v", table, err)
+		}
+	}
+
+	stats, err := db.GetStats()
+	if err != nil {
+		t.Fatalf("GetStats: %v", err)
+	}
+	if stats.SchemaVersion != "3" {
+		t.Fatalf("schema_version = %q, want %q", stats.SchemaVersion, "3")
+	}
+}
+
 func TestPagination(t *testing.T) {
 	pag := cache.NewPagination(1, 50)
 	if pag.Page != 1 {

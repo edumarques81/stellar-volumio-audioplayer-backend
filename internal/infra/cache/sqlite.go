@@ -15,7 +15,7 @@ import (
 
 const (
 	// CurrentSchemaVersion is the current database schema version.
-	CurrentSchemaVersion = "2"
+	CurrentSchemaVersion = "3"
 
 	// DefaultDBPath is the default path for the cache database.
 	DefaultDBPath = "data/library.db"
@@ -124,6 +124,12 @@ func (d *DB) initSchema() error {
 					log.Warn().Err(err).Str("sql", m).Msg("Migration statement failed (column may already exist)")
 				}
 			}
+		}
+
+		// Migration to version "3" is purely additive (album_bios + artist_bios).
+		// Re-running createSchema() is safe — every CREATE uses IF NOT EXISTS.
+		if err := d.createSchema(); err != nil {
+			return fmt.Errorf("apply additive migration: %w", err)
 		}
 
 		return d.setMeta("schema_version", CurrentSchemaVersion)
@@ -236,6 +242,29 @@ func (d *DB) createSchema() error {
 	CREATE INDEX IF NOT EXISTS idx_artwork_album ON artwork(album_id);
 	CREATE INDEX IF NOT EXISTS idx_artwork_artist ON artwork(artist_id);
 	CREATE INDEX IF NOT EXISTS idx_artwork_expires ON artwork(expires_at);
+
+	-- Album bios cache (Wikipedia → LLM summary). Schema v3 (additive).
+	CREATE TABLE IF NOT EXISTS album_bios (
+		key TEXT PRIMARY KEY,             -- normalized "artist|album"
+		artist TEXT NOT NULL,
+		album TEXT NOT NULL,
+		summary TEXT NOT NULL,
+		source_url TEXT,
+		fetched_at INTEGER NOT NULL,      -- unix seconds
+		expires_at INTEGER NOT NULL       -- unix seconds
+	);
+	CREATE INDEX IF NOT EXISTS idx_album_bios_expires ON album_bios(expires_at);
+
+	-- Artist bios cache (fallback when album page misses).
+	CREATE TABLE IF NOT EXISTS artist_bios (
+		key TEXT PRIMARY KEY,             -- normalized artist
+		artist TEXT NOT NULL,
+		summary TEXT NOT NULL,
+		source_url TEXT,
+		fetched_at INTEGER NOT NULL,
+		expires_at INTEGER NOT NULL
+	);
+	CREATE INDEX IF NOT EXISTS idx_artist_bios_expires ON artist_bios(expires_at);
 	`
 
 	_, err := d.db.Exec(schema)
