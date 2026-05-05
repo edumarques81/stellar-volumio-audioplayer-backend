@@ -162,19 +162,25 @@ func NewServer(playerService *player.Service, mpdClient *mpdclient.Client, sourc
 }
 
 // SetBioHandlers registers a bio-handler bundle. Pass nil to disable bio
-// events (e.g. when the cache DB is unavailable). Safe to call after
-// NewServer; new client connections see the updated handler immediately.
+// events (e.g. when the cache DB is unavailable).
+//
+// Wiring contract: must be called BEFORE the HTTP server starts accepting
+// connections (i.e. before mux is wired and ListenAndServe runs). The
+// connection callback in setupHandlers reads s.bioHandlers without locking,
+// which is safe only under this happens-before relationship.
+// Not safe to call once the server is accepting connections.
 func (s *Server) SetBioHandlers(h *BioHandlers) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
 	s.bioHandlers = h
 }
 
 // SetSystemActionHandlers registers system shutdown/reboot handlers.
 // See SystemActionHandlers for the loopback-only auth contract.
+//
+// Wiring contract: must be called BEFORE the HTTP server starts accepting
+// connections (same constraint as SetBioHandlers). The connection callback
+// reads s.systemActionHandlers without locking; the read is safe only when
+// all writes happen-before the first accepted connection.
 func (s *Server) SetSystemActionHandlers(h *SystemActionHandlers) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
 	s.systemActionHandlers = h
 }
 
