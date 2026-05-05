@@ -24,6 +24,8 @@ type MockMPDClient struct {
 	// Track queries
 	FindAlbumTracksResp     map[string][]map[string]string
 	FindAlbumTracksError    error
+	SearchByBaseResp        map[string][]map[string]string
+	SearchByBaseError       error
 
 	// Playlist/radio queries
 	ListPlaylistsResponse   []string
@@ -82,6 +84,16 @@ func (m *MockMPDClient) FindAlbumTracks(album, albumArtist string) ([]map[string
 	}
 	key := album + "\x00" + albumArtist
 	if resp, ok := m.FindAlbumTracksResp[key]; ok {
+		return resp, nil
+	}
+	return []map[string]string{}, nil
+}
+
+func (m *MockMPDClient) SearchByBase(basePath string) ([]map[string]string, error) {
+	if m.SearchByBaseError != nil {
+		return nil, m.SearchByBaseError
+	}
+	if resp, ok := m.SearchByBaseResp[basePath]; ok {
 		return resp, nil
 	}
 	return []map[string]string{}, nil
