@@ -21,12 +21,15 @@ import (
 	"github.com/rs/zerolog/log"
 
 	"github.com/edumarques81/stellar-volumio-audioplayer-backend/internal/domain/artwork"
+	"github.com/edumarques81/stellar-volumio-audioplayer-backend/internal/domain/bios"
 	"github.com/edumarques81/stellar-volumio-audioplayer-backend/internal/domain/localmusic"
 	"github.com/edumarques81/stellar-volumio-audioplayer-backend/internal/domain/player"
 	"github.com/edumarques81/stellar-volumio-audioplayer-backend/internal/domain/sources"
 	"github.com/edumarques81/stellar-volumio-audioplayer-backend/internal/domain/upnp"
+	"github.com/edumarques81/stellar-volumio-audioplayer-backend/internal/infra/llm"
 	"github.com/edumarques81/stellar-volumio-audioplayer-backend/internal/infra/mpd"
 	"github.com/edumarques81/stellar-volumio-audioplayer-backend/internal/infra/spectrum"
+	"github.com/edumarques81/stellar-volumio-audioplayer-backend/internal/infra/wikipedia"
 	"github.com/edumarques81/stellar-volumio-audioplayer-backend/internal/transport/socketio"
 	"github.com/edumarques81/stellar-volumio-audioplayer-backend/internal/version"
 )
@@ -167,6 +170,29 @@ func main() {
 
 	// Initialize library cache (triggers background build if empty)
 	socketServer.InitializeCache()
+
+	// Bio pipeline: Wikipedia client → LLM client → bio service → handlers.
+	// Skipped silently if the cache DB failed to open in NewServer.
+	if cacheDB := socketServer.CacheDB(); cacheDB != nil {
+		wikiClient := wikipedia.NewClient(wikipedia.Config{}) // defaults are fine
+		var llmClient llm.Client
+		if apiKey := os.Getenv("ANTHROPIC_API_KEY"); apiKey != "" {
+			model := os.Getenv("ANTHROPIC_MODEL")
+			if model == "" {
+				model = "claude-haiku-4-5-20251001"
+			}
+			llmClient = llm.NewAnthropic(apiKey, model)
+			log.Info().Str("model", model).Msg("Bio LLM provider: Anthropic")
+		} else {
+			llmClient = llm.NewNoop()
+			log.Warn().Msg("ANTHROPIC_API_KEY not set; bios will be empty (using noop LLM)")
+		}
+		biosSvc := bios.NewService(cacheDB.BiosDAO(), wikiClient, llmClient, bios.Config{}) // 90-day TTL default
+		socketServer.SetBioHandlers(socketio.NewBioHandlers(biosSvc))
+		log.Info().Msg("Bio service registered (library:bio:get / library:bio:rebuild)")
+	} else {
+		log.Warn().Msg("Cache DB unavailable; bio service disabled")
+	}
 
 	// Start MPD watcher
 	ctx, cancel := context.WithCancel(context.Background())
