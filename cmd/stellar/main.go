@@ -194,6 +194,11 @@ func main() {
 		log.Warn().Msg("Cache DB unavailable; bio service disabled")
 	}
 
+	// Register system shutdown/reboot handlers with loopback-only auth.
+	// Defaults to /sbin/shutdown -h now / -r now in production.
+	socketServer.SetSystemActionHandlers(socketio.NewSystemActionHandlers(socketio.SystemActionDeps{}))
+	log.Info().Msg("System action handlers registered (system:shutdown / system:reboot, loopback-gated)")
+
 	// Start MPD watcher
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()

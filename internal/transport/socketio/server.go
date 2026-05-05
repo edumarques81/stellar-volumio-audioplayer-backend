@@ -43,10 +43,11 @@ type Server struct {
 	localMusicService   *localmusic.Service
 	libraryService      *library.Service
 	cachedService       *library.CachedService
-	libraryHandlers     *LibraryHandlers
-	cacheHandlers       *CacheHandlers
-	enrichmentHandlers  *EnrichmentHandlers
-	bioHandlers         *BioHandlers
+	libraryHandlers      *LibraryHandlers
+	cacheHandlers        *CacheHandlers
+	enrichmentHandlers   *EnrichmentHandlers
+	bioHandlers          *BioHandlers
+	systemActionHandlers *SystemActionHandlers
 	cacheDB             *cache.DB
 	cacheDAO            *cache.DAO
 	audirvanaService    *audirvana.Service
@@ -169,6 +170,14 @@ func (s *Server) SetBioHandlers(h *BioHandlers) {
 	s.bioHandlers = h
 }
 
+// SetSystemActionHandlers registers system shutdown/reboot handlers.
+// See SystemActionHandlers for the loopback-only auth contract.
+func (s *Server) SetSystemActionHandlers(h *SystemActionHandlers) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.systemActionHandlers = h
+}
+
 // CacheDB returns the cache database opened during NewServer (or nil if it
 // could not be opened). Used by main.go to build the bio service over the
 // same *cache.DB instance — re-opening would race the writer connection.
@@ -265,6 +274,11 @@ func (s *Server) setupHandlers() {
 		// Register bio handlers (Wikipedia → LLM → SQLite cache)
 		if s.bioHandlers != nil {
 			s.bioHandlers.RegisterHandlers(client)
+		}
+
+		// Register system shutdown/reboot handlers (loopback-only auth)
+		if s.systemActionHandlers != nil {
+			s.systemActionHandlers.RegisterHandlers(client)
 		}
 
 		// Register Volumio Connect compatibility handlers
