@@ -1,6 +1,6 @@
 module github.com/edumarques81/stellar-volumio-audioplayer-backend
 
-go 1.25.0
+go 1.25.5
 
 require (
 	github.com/fhs/gompd/v2 v2.3.0
@@ -20,6 +20,7 @@ require (
 	github.com/gookit/color v1.6.0 // indirect
 	github.com/gorilla/websocket v1.5.3 // indirect
 	github.com/klauspost/compress v1.18.2 // indirect
+	github.com/madelynnblue/go-dsp v1.0.0 // indirect
 	github.com/mattn/go-colorable v0.1.13 // indirect
 	github.com/mattn/go-isatty v0.0.20 // indirect
 	github.com/ncruces/go-strftime v1.0.0 // indirect

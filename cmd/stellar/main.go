@@ -26,6 +26,7 @@ import (
 	"github.com/edumarques81/stellar-volumio-audioplayer-backend/internal/domain/sources"
 	"github.com/edumarques81/stellar-volumio-audioplayer-backend/internal/domain/upnp"
 	"github.com/edumarques81/stellar-volumio-audioplayer-backend/internal/infra/mpd"
+	"github.com/edumarques81/stellar-volumio-audioplayer-backend/internal/infra/spectrum"
 	"github.com/edumarques81/stellar-volumio-audioplayer-backend/internal/transport/socketio"
 	"github.com/edumarques81/stellar-volumio-audioplayer-backend/internal/version"
 )
@@ -183,6 +184,18 @@ func main() {
 
 	// Start Audirvana now-playing poller
 	socketServer.StartAudirvanaPoller(ctx)
+
+	// Start spectrum analyzer (reads MPD FIFO, emits pushSpectrum via Socket.IO)
+	spectrumStreamer := spectrum.New(spectrum.Config{
+		FIFOPath:   "/tmp/mpd_spectrum.fifo",
+		SampleRate: 44100,
+		FFTSize:    2048,
+		NumBins:    64,
+		FPS:        30,
+	})
+	spectrumStreamer.Start(ctx, &socketIOEmitter{server: socketServer})
+	defer spectrumStreamer.Stop()
+	log.Info().Msg("Spectrum analyzer started (FIFO: /tmp/mpd_spectrum.fifo)")
 
 	// Start UPnP AV Renderer for Audirvana discovery
 	upnpService := upnp.NewService(

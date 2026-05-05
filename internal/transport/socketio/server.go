@@ -2133,3 +2133,9 @@ func (s *Server) Close() error {
 	return nil
 }
 
+// Emit broadcasts an event with data to all connected Socket.IO clients.
+// Used by the spectrum analyzer to push real-time FFT data.
+func (s *Server) Emit(event string, data interface{}) {
+	s.io.Emit(event, data)
+}
+
