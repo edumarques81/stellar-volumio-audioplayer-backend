@@ -22,6 +22,7 @@ import (
 	"github.com/edumarques81/stellar-volumio-audioplayer-backend/internal/domain/artwork"
 	"github.com/edumarques81/stellar-volumio-audioplayer-backend/internal/domain/audirvana"
 	"github.com/edumarques81/stellar-volumio-audioplayer-backend/internal/domain/device"
+	"github.com/edumarques81/stellar-volumio-audioplayer-backend/internal/domain/lastplayed"
 	"github.com/edumarques81/stellar-volumio-audioplayer-backend/internal/domain/library"
 	"github.com/edumarques81/stellar-volumio-audioplayer-backend/internal/domain/localmusic"
 	"github.com/edumarques81/stellar-volumio-audioplayer-backend/internal/domain/player"
@@ -47,6 +48,10 @@ type Server struct {
 	cacheHandlers        *CacheHandlers
 	enrichmentHandlers   *EnrichmentHandlers
 	bioHandlers          *BioHandlers
+	lastPlayedHandlers   *LastPlayedHandlers
+	lastPlayedSvc        *lastplayed.Service
+	lastSeenAlbumKey     string
+	lastPlayedMu         sync.Mutex
 	systemActionHandlers *SystemActionHandlers
 	cacheDB             *cache.DB
 	cacheDAO            *cache.DAO
@@ -173,6 +178,23 @@ func (s *Server) SetBioHandlers(h *BioHandlers) {
 	s.bioHandlers = h
 }
 
+// SetLastPlayed registers the last-played album service. The same service
+// powers the library:lastPlayed:get handler, the connect-time
+// pushLastPlayedAlbum broadcast, and the MPD watcher's album-boundary
+// recorder. Pass nil to disable the feature (e.g. when the cache DB is
+// unavailable).
+//
+// Wiring contract: must be called BEFORE the HTTP server starts accepting
+// connections (same constraint as SetBioHandlers).
+func (s *Server) SetLastPlayed(svc *lastplayed.Service) {
+	s.lastPlayedSvc = svc
+	if svc == nil {
+		s.lastPlayedHandlers = nil
+		return
+	}
+	s.lastPlayedHandlers = NewLastPlayedHandlers(svc)
+}
+
 // SetSystemActionHandlers registers system shutdown/reboot handlers.
 // See SystemActionHandlers for the loopback-only auth contract.
 //
@@ -244,6 +266,11 @@ func (s *Server) setupHandlers() {
 			client.Emit("pushAudioStatus", s.audioController.GetStatus())
 			// Broadcast actual audio engine state (MPD vs Audirvana)
 			s.pushAudioEngineState(client)
+			// Hydrate the Player view's idle resume state — frontend uses
+			// this when MPD has nothing playing on first connect.
+			if s.lastPlayedHandlers != nil {
+				s.lastPlayedHandlers.PushTo(client)
+			}
 		}()
 
 		// Handle disconnect
@@ -280,6 +307,11 @@ func (s *Server) setupHandlers() {
 		// Register bio handlers (Wikipedia → LLM → SQLite cache)
 		if s.bioHandlers != nil {
 			s.bioHandlers.RegisterHandlers(client)
+		}
+
+		// Register last-played album handler (idle-state resume on boot)
+		if s.lastPlayedHandlers != nil {
+			s.lastPlayedHandlers.RegisterHandlers(client)
 		}
 
 		// Register system shutdown/reboot handlers (loopback-only auth)
@@ -1809,6 +1841,59 @@ func (s *Server) broadcastBrowseSources() {
 	s.io.Emit("pushBrowseSources", sources)
 }
 
+// maybeRecordLastPlayed persists an album-boundary record when the player
+// state reports a new album in play status. Track changes within the same
+// album are deduped via lastSeenAlbumKey. The persisted row is then
+// broadcast as pushLastPlayedAlbum to all clients so any disconnected
+// frontend reconnecting later picks up the resume state.
+func (s *Server) maybeRecordLastPlayed(state map[string]interface{}) {
+	if s.lastPlayedSvc == nil {
+		return
+	}
+	status, _ := state["status"].(string)
+	if status != "play" {
+		return
+	}
+	artist, _ := state["artist"].(string)
+	album, _ := state["album"].(string)
+	if strings.TrimSpace(artist) == "" || strings.TrimSpace(album) == "" {
+		return
+	}
+	key := strings.ToLower(strings.TrimSpace(artist)) + "|" + strings.ToLower(strings.TrimSpace(album))
+
+	s.lastPlayedMu.Lock()
+	if s.lastSeenAlbumKey == key {
+		s.lastPlayedMu.Unlock()
+		return
+	}
+	s.lastSeenAlbumKey = key
+	s.lastPlayedMu.Unlock()
+
+	albumArt, _ := state["albumart"].(string)
+	uri, _ := state["uri"].(string)
+	trackType, _ := state["trackType"].(string)
+	sampleRate, _ := state["samplerate"].(string)
+	bitDepth, _ := state["bitdepth"].(string)
+
+	if err := s.lastPlayedSvc.Record(lastplayed.Album{
+		Artist:     artist,
+		Album:      album,
+		AlbumArt:   albumArt,
+		TrackURI:   uri,
+		TrackType:  trackType,
+		SampleRate: sampleRate,
+		BitDepth:   bitDepth,
+	}); err != nil {
+		log.Warn().Err(err).Str("artist", artist).Str("album", album).Msg("Record last-played failed")
+		return
+	}
+	log.Debug().Str("artist", artist).Str("album", album).Msg("Recorded last-played album")
+
+	if s.lastPlayedHandlers != nil {
+		s.lastPlayedHandlers.BroadcastTo(s.io)
+	}
+}
+
 // pushState sends current state to a client.
 func (s *Server) pushState(client *socket.Socket) {
 	state, err := s.playerService.GetState()
@@ -1843,6 +1928,13 @@ func (s *Server) BroadcastState() {
 		return
 	}
 	s.saveLastState(state)
+
+	// Album-boundary detection: persist the album as last-played whenever
+	// MPD reports a new album in play state. Only "play" — skipping
+	// past stop/pause prevents recording the moment a user clears the
+	// queue. Same-album track-to-track transitions are deduped via
+	// lastSeenAlbumKey.
+	s.maybeRecordLastPlayed(state)
 
 	s.io.Emit("pushState", state)
 

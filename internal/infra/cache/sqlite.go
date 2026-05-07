@@ -15,7 +15,7 @@ import (
 
 const (
 	// CurrentSchemaVersion is the current database schema version.
-	CurrentSchemaVersion = "3"
+	CurrentSchemaVersion = "4"
 
 	// DefaultDBPath is the default path for the cache database.
 	DefaultDBPath = "data/library.db"
@@ -127,6 +127,7 @@ func (d *DB) initSchema() error {
 		}
 
 		// Migration to version "3" is purely additive (album_bios + artist_bios).
+		// Migration to version "4" is purely additive (last_played_album).
 		// Re-running createSchema() is safe — every CREATE uses IF NOT EXISTS.
 		if err := d.createSchema(); err != nil {
 			return fmt.Errorf("apply additive migration: %w", err)
@@ -265,6 +266,24 @@ func (d *DB) createSchema() error {
 		expires_at INTEGER NOT NULL
 	);
 	CREATE INDEX IF NOT EXISTS idx_artist_bios_expires ON artist_bios(expires_at);
+
+	-- Last-played album row, used to hydrate the PlayerView idle state on
+	-- frontend boot when MPD has nothing playing. Schema v4 (additive).
+	-- Single logical row per album (PK on the normalized "artist|album" key);
+	-- read with ORDER BY last_played_at DESC LIMIT 1 for "the most recent".
+	CREATE TABLE IF NOT EXISTS last_played_album (
+		key TEXT PRIMARY KEY,             -- normalized "artist|album"
+		artist TEXT NOT NULL,
+		album TEXT NOT NULL,
+		album_art TEXT,                   -- path or URL ('/albumart?path=...' shape)
+		track_uri TEXT,                   -- URI of the track that triggered the record
+		track_type TEXT,
+		sample_rate TEXT,
+		bit_depth TEXT,
+		last_played_at INTEGER NOT NULL,  -- unix seconds
+		updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+	);
+	CREATE INDEX IF NOT EXISTS idx_last_played_at ON last_played_album(last_played_at DESC);
 	`
 
 	_, err := d.db.Exec(schema)

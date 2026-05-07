@@ -393,8 +393,8 @@ func TestSchema_BioTablesExist(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetStats: %v", err)
 	}
-	if stats.SchemaVersion != "3" {
-		t.Fatalf("schema_version = %q, want %q", stats.SchemaVersion, "3")
+	if stats.SchemaVersion != cache.CurrentSchemaVersion {
+		t.Fatalf("schema_version = %q, want %q", stats.SchemaVersion, cache.CurrentSchemaVersion)
 	}
 }
 

@@ -22,6 +22,7 @@ import (
 
 	"github.com/edumarques81/stellar-volumio-audioplayer-backend/internal/domain/artwork"
 	"github.com/edumarques81/stellar-volumio-audioplayer-backend/internal/domain/bios"
+	"github.com/edumarques81/stellar-volumio-audioplayer-backend/internal/domain/lastplayed"
 	"github.com/edumarques81/stellar-volumio-audioplayer-backend/internal/domain/localmusic"
 	"github.com/edumarques81/stellar-volumio-audioplayer-backend/internal/domain/player"
 	"github.com/edumarques81/stellar-volumio-audioplayer-backend/internal/domain/sources"
@@ -190,8 +191,14 @@ func main() {
 		biosSvc := bios.NewService(cacheDB.BiosDAO(), wikiClient, llmClient, bios.Config{}) // 90-day TTL default
 		socketServer.SetBioHandlers(socketio.NewBioHandlers(biosSvc))
 		log.Info().Msg("Bio service registered (library:bio:get / library:bio:rebuild)")
+
+		// Last-played album service shares the cache DB so resume state
+		// survives backend restarts.
+		lastPlayedSvc := lastplayed.NewService(cacheDB.LastPlayedDAO())
+		socketServer.SetLastPlayed(lastPlayedSvc)
+		log.Info().Msg("Last-played service registered (library:lastPlayed:get)")
 	} else {
-		log.Warn().Msg("Cache DB unavailable; bio service disabled")
+		log.Warn().Msg("Cache DB unavailable; bio + last-played services disabled")
 	}
 
 	// Register system shutdown/reboot handlers with loopback-only auth.
