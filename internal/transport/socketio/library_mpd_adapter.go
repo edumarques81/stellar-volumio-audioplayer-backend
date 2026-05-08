@@ -65,6 +65,7 @@ func (a *LibraryMPDAdapter) GetAlbumDetails(basePath string) ([]library.AlbumDet
 			FirstTrack:  d.FirstTrack,
 			TotalTime:   d.TotalTime,
 			Format:      d.Format,
+			Genre:       d.Genre,
 		}
 	}
 	return result, nil

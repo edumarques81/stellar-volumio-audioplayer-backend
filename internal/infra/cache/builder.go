@@ -35,6 +35,7 @@ type AlbumDetailsData struct {
 	TotalTime   int
 	Year        int
 	Format      string // Audio format from MPD, e.g. "44100:16:2"
+	Genre       string // Album-level genre (first track's Genre tag, normalized)
 }
 
 // TrackData represents track data from MPD.
@@ -235,6 +236,7 @@ func (b *Builder) buildAlbums() error {
 				SampleRate:    sampleRate,
 				BitDepth:      bitDepth,
 				TrackType:     trackType,
+				Genre:         album.Genre,
 				AddedAt:       time.Now(), // Would be better to get from file mtime
 			}
 

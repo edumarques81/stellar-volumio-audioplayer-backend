@@ -345,6 +345,7 @@ func (a *mpdDataProviderAdapter) GetAlbumDetails(basePath string) ([]cache.Album
 			FirstTrack:  d.FirstTrack,
 			TotalTime:   d.TotalTime,
 			Format:      d.Format,
+			Genre:       d.Genre,
 		})
 	}
 	return result, nil
