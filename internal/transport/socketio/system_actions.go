@@ -6,6 +6,7 @@ import (
 	"net"
 	"os/exec"
 	"runtime"
+	"strings"
 
 	"github.com/rs/zerolog/log"
 	"github.com/zishang520/socket.io/servers/socket/v3"
@@ -30,7 +31,8 @@ type SystemActionDeps struct {
 //
 // The check happens BEFORE any system call.
 type SystemActionHandlers struct {
-	deps SystemActionDeps
+	deps        SystemActionDeps
+	trustedNets []*net.IPNet
 }
 
 // errNonLoopback is returned by handle*Internal when the caller is not
@@ -38,17 +40,59 @@ type SystemActionHandlers struct {
 // payload — clients never see the underlying detail.
 var errNonLoopback = errors.New("non-loopback caller refused")
 
-// NewSystemActionHandlers constructs the bundle. Missing deps are filled
-// in with DefaultShutdown / DefaultReboot so production wiring works
-// without explicit deps.
+// NewSystemActionHandlers constructs the bundle with loopback-only auth.
+// Missing deps are filled in with DefaultShutdown / DefaultReboot so
+// production wiring works without explicit deps.
+//
+// For deployments that need to authorize a non-loopback caller (e.g. a
+// dev-mode frontend running on a separate host), use
+// NewSystemActionHandlersWithTrusted instead.
 func NewSystemActionHandlers(deps SystemActionDeps) *SystemActionHandlers {
+	h, _ := NewSystemActionHandlersWithTrusted(deps, nil)
+	return h
+}
+
+// NewSystemActionHandlersWithTrusted is the loopback+allowlist constructor.
+// trustedSpecs is a list of IP or CIDR strings; bare IPs become single-host
+// networks (/32 IPv4 or /128 IPv6). Empty/whitespace specs are skipped.
+// Returns an error if any spec is malformed so misconfiguration is loud,
+// not silently permissive.
+func NewSystemActionHandlersWithTrusted(deps SystemActionDeps, trustedSpecs []string) (*SystemActionHandlers, error) {
 	if deps.Shutdown == nil {
 		deps.Shutdown = DefaultShutdown
 	}
 	if deps.Reboot == nil {
 		deps.Reboot = DefaultReboot
 	}
-	return &SystemActionHandlers{deps: deps}
+	nets, err := parseTrustedSpecs(trustedSpecs)
+	if err != nil {
+		return nil, err
+	}
+	return &SystemActionHandlers{deps: deps, trustedNets: nets}, nil
+}
+
+func parseTrustedSpecs(specs []string) ([]*net.IPNet, error) {
+	var nets []*net.IPNet
+	for _, raw := range specs {
+		spec := strings.TrimSpace(raw)
+		if spec == "" {
+			continue
+		}
+		if _, n, err := net.ParseCIDR(spec); err == nil {
+			nets = append(nets, n)
+			continue
+		}
+		ip := net.ParseIP(spec)
+		if ip == nil {
+			return nil, fmt.Errorf("invalid trusted remote spec %q", raw)
+		}
+		bits := 32
+		if ip.To4() == nil {
+			bits = 128
+		}
+		nets = append(nets, &net.IPNet{IP: ip, Mask: net.CIDRMask(bits, bits)})
+	}
+	return nets, nil
 }
 
 // RegisterHandlers attaches the socket events.
@@ -88,13 +132,13 @@ func clientErrorMessage(err error) string {
 	return err.Error()
 }
 
-// handleShutdownInternal: loopback check FIRST, then dispatch.
+// handleShutdownInternal: auth check FIRST, then dispatch.
 // Tests target this directly so the security gate is verifiable
-// without a real socket. Non-loopback callers wrap errNonLoopback so
+// without a real socket. Unauthorized callers wrap errNonLoopback so
 // the surface error message can be sanitized in RegisterHandlers while
 // the warn log still captures the IP.
 func (h *SystemActionHandlers) handleShutdownInternal(remoteIP string) error {
-	if !isLoopback(remoteIP) {
+	if !h.isAuthorized(remoteIP) {
 		return fmt.Errorf("system:shutdown from %q: %w", remoteIP, errNonLoopback)
 	}
 	log.Info().Str("remote_ip", remoteIP).Msg("system:shutdown authorized; executing")
@@ -102,11 +146,33 @@ func (h *SystemActionHandlers) handleShutdownInternal(remoteIP string) error {
 }
 
 func (h *SystemActionHandlers) handleRebootInternal(remoteIP string) error {
-	if !isLoopback(remoteIP) {
+	if !h.isAuthorized(remoteIP) {
 		return fmt.Errorf("system:reboot from %q: %w", remoteIP, errNonLoopback)
 	}
 	log.Info().Str("remote_ip", remoteIP).Msg("system:reboot authorized; executing")
 	return h.deps.Reboot()
+}
+
+// isAuthorized returns true for loopback callers and for any IP that
+// matches one of the configured trustedNets. Empty/unparseable inputs
+// are NOT authorized — fail closed.
+func (h *SystemActionHandlers) isAuthorized(remoteIP string) bool {
+	if isLoopback(remoteIP) {
+		return true
+	}
+	if remoteIP == "" {
+		return false
+	}
+	parsed := net.ParseIP(remoteIP)
+	if parsed == nil {
+		return false
+	}
+	for _, n := range h.trustedNets {
+		if n.Contains(parsed) {
+			return true
+		}
+	}
+	return false
 }
 
 // isLoopback returns true only for 127.0.0.0/8 IPv4 or ::1 IPv6.

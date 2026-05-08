@@ -201,10 +201,17 @@ func main() {
 		log.Warn().Msg("Cache DB unavailable; bio + last-played services disabled")
 	}
 
-	// Register system shutdown/reboot handlers with loopback-only auth.
-	// Defaults to /sbin/shutdown -h now / -r now in production.
-	socketServer.SetSystemActionHandlers(socketio.NewSystemActionHandlers(socketio.SystemActionDeps{}))
-	log.Info().Msg("System action handlers registered (system:shutdown / system:reboot, loopback-gated)")
+	// Register system shutdown/reboot handlers. Loopback callers are always
+	// authorized. STELLAR_POWER_TRUSTED_REMOTES (comma-separated IP/CIDR
+	// list) extends the gate to LAN clients — used for dev mode where the
+	// frontend runs on a separate machine. Empty/unset == loopback-only.
+	trustedRemotes := strings.Split(os.Getenv("STELLAR_POWER_TRUSTED_REMOTES"), ",")
+	systemActionHandlers, err := socketio.NewSystemActionHandlersWithTrusted(socketio.SystemActionDeps{}, trustedRemotes)
+	if err != nil {
+		log.Fatal().Err(err).Msg("Invalid STELLAR_POWER_TRUSTED_REMOTES")
+	}
+	socketServer.SetSystemActionHandlers(systemActionHandlers)
+	log.Info().Strs("trusted_remotes", trustedRemotes).Msg("System action handlers registered (system:shutdown / system:reboot)")
 
 	// Start MPD watcher
 	ctx, cancel := context.WithCancel(context.Background())
