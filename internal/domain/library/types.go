@@ -47,6 +47,7 @@ type Album struct {
 	AddedAt    time.Time  `json:"addedAt,omitempty"`
 	Quality    string     `json:"quality,omitempty"`   // e.g. "192kHz/24bit FLAC"
 	TrackType  string     `json:"trackType,omitempty"` // e.g. "flac", "dsf"
+	Genre      string     `json:"genre,omitempty"`     // e.g. "Ambient / Post-Rock"
 }
 
 // Artist represents an artist in the library.

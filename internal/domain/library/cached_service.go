@@ -164,6 +164,7 @@ func (s *CachedService) GetAlbums(req GetAlbumsRequest) AlbumsResponse {
 			AlbumArt:   albumArt,
 			Quality:    quality,
 			TrackType:  ca.TrackType,
+			Genre:      ca.Genre,
 		})
 	}
 
