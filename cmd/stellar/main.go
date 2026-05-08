@@ -220,8 +220,8 @@ func main() {
 	// Start mount watcher for periodic NAS share re-mount
 	socketServer.StartMountWatcher(ctx)
 
-	// Start Audirvana now-playing poller
-	socketServer.StartAudirvanaPoller(ctx)
+	// Audirvana now-playing poller disabled — see plan the-pi-will-never-resilient-hartmanis
+	// socketServer.StartAudirvanaPoller(ctx)
 
 	// Start spectrum analyzer (reads MPD FIFO, emits pushSpectrum via Socket.IO)
 	spectrumStreamer := spectrum.New(spectrum.Config{
