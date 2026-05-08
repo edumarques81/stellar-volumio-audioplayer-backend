@@ -17,6 +17,7 @@ type CachedAlbum struct {
 	SampleRate    int       `json:"sampleRate,omitempty"`  // e.g. 44100, 96000, 192000
 	BitDepth      int       `json:"bitDepth,omitempty"`    // e.g. 16, 24, 32
 	TrackType     string    `json:"trackType,omitempty"`   // e.g. "flac", "dsf", "mp3"
+	Genre         string    `json:"genre,omitempty"`       // Album-level genre (first track's Genre tag, normalized)
 	AddedAt       time.Time `json:"addedAt"`        // When added to library
 	LastPlayed    time.Time `json:"lastPlayed"`     // Last played timestamp
 	ArtworkID     string    `json:"artworkId"`      // FK to artwork cache

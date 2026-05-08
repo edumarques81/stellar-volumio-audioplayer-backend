@@ -400,6 +400,62 @@ func TestSchema_BioTablesExist(t *testing.T) {
 	}
 }
 
+// TestDAOAlbumGenreRoundTrip verifies that an album inserted with a
+// non-empty Genre comes back from QueryAlbums with the same value, and
+// that a default-empty Genre stays empty after the round trip.
+func TestDAOAlbumGenreRoundTrip(t *testing.T) {
+	t.Parallel()
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, "library.db")
+
+	db := cache.NewDB(dbPath)
+	if err := db.Open(); err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+
+	dao := cache.NewDAO(db)
+
+	withGenre := &cache.CachedAlbum{
+		ID:          "with-genre",
+		Title:       "Midnight Shores",
+		AlbumArtist: "Hollow Tides",
+		URI:         "NAS/Hollow Tides/Midnight Shores",
+		Source:      "nas",
+		Genre:       "Ambient / Post-Rock",
+	}
+	noGenre := &cache.CachedAlbum{
+		ID:          "no-genre",
+		Title:       "Untitled",
+		AlbumArtist: "Anonymous",
+		URI:         "NAS/Anonymous/Untitled",
+		Source:      "nas",
+	}
+
+	if err := dao.InsertAlbum(withGenre); err != nil {
+		t.Fatalf("insert with genre: %v", err)
+	}
+	if err := dao.InsertAlbum(noGenre); err != nil {
+		t.Fatalf("insert no genre: %v", err)
+	}
+
+	albums, _, err := dao.QueryAlbums(cache.AlbumFilter{}, cache.SortAlphabetical, cache.NewPagination(1, 50))
+	if err != nil {
+		t.Fatalf("query: %v", err)
+	}
+
+	got := map[string]string{}
+	for _, a := range albums {
+		got[a.ID] = a.Genre
+	}
+	if got["with-genre"] != "Ambient / Post-Rock" {
+		t.Errorf("with-genre.Genre = %q, want %q", got["with-genre"], "Ambient / Post-Rock")
+	}
+	if got["no-genre"] != "" {
+		t.Errorf("no-genre.Genre = %q, want empty string", got["no-genre"])
+	}
+}
+
 // TestMigration_V4ToV5_AddsGenreColumn verifies that opening a database that
 // was previously initialised at schema v4 (no genre column on albums)
 // transparently migrates to v5 by adding a `genre TEXT DEFAULT ''` column

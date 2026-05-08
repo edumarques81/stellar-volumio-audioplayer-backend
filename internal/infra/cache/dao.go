@@ -41,20 +41,20 @@ func (dao *DAO) InsertAlbum(album *CachedAlbum) error {
 
 	_, err := db.Exec(`
 		INSERT INTO albums (id, title, album_artist, uri, first_track, track_count, total_duration,
-			source, year, sample_rate, bit_depth, track_type, added_at, last_played, artwork_id, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			source, year, sample_rate, bit_depth, track_type, genre, added_at, last_played, artwork_id, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(id) DO UPDATE SET
 			title = ?, album_artist = ?, uri = ?, first_track = COALESCE(?, albums.first_track),
 			track_count = ?, total_duration = ?,
-			source = ?, year = ?, sample_rate = ?, bit_depth = ?, track_type = ?,
+			source = ?, year = ?, sample_rate = ?, bit_depth = ?, track_type = ?, genre = ?,
 			added_at = COALESCE(albums.added_at, ?),
 			last_played = COALESCE(?, albums.last_played), artwork_id = COALESCE(?, albums.artwork_id),
 			updated_at = ?
 	`,
 		album.ID, album.Title, album.AlbumArtist, album.URI, album.FirstTrack, album.TrackCount, album.TotalDuration,
-		album.Source, album.Year, album.SampleRate, album.BitDepth, album.TrackType, addedAt, lastPlayed, album.ArtworkID, now, now,
+		album.Source, album.Year, album.SampleRate, album.BitDepth, album.TrackType, album.Genre, addedAt, lastPlayed, album.ArtworkID, now, now,
 		album.Title, album.AlbumArtist, album.URI, album.FirstTrack, album.TrackCount, album.TotalDuration,
-		album.Source, album.Year, album.SampleRate, album.BitDepth, album.TrackType, addedAt, lastPlayed, album.ArtworkID, now,
+		album.Source, album.Year, album.SampleRate, album.BitDepth, album.TrackType, album.Genre, addedAt, lastPlayed, album.ArtworkID, now,
 	)
 	return err
 }
@@ -69,19 +69,19 @@ func (dao *DAO) InsertAlbumTx(tx *sql.Tx, album *CachedAlbum) error {
 
 	_, err := tx.Exec(`
 		INSERT INTO albums (id, title, album_artist, uri, first_track, track_count, total_duration,
-			source, year, sample_rate, bit_depth, track_type, added_at, artwork_id, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			source, year, sample_rate, bit_depth, track_type, genre, added_at, artwork_id, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(id) DO UPDATE SET
 			title = ?, album_artist = ?, uri = ?, first_track = COALESCE(?, albums.first_track),
 			track_count = ?, total_duration = ?,
-			source = ?, year = ?, sample_rate = ?, bit_depth = ?, track_type = ?,
+			source = ?, year = ?, sample_rate = ?, bit_depth = ?, track_type = ?, genre = ?,
 			added_at = COALESCE(albums.added_at, ?),
 			artwork_id = COALESCE(?, albums.artwork_id), updated_at = ?
 	`,
 		album.ID, album.Title, album.AlbumArtist, album.URI, album.FirstTrack, album.TrackCount, album.TotalDuration,
-		album.Source, album.Year, album.SampleRate, album.BitDepth, album.TrackType, addedAt, album.ArtworkID, now, now,
+		album.Source, album.Year, album.SampleRate, album.BitDepth, album.TrackType, album.Genre, addedAt, album.ArtworkID, now, now,
 		album.Title, album.AlbumArtist, album.URI, album.FirstTrack, album.TrackCount, album.TotalDuration,
-		album.Source, album.Year, album.SampleRate, album.BitDepth, album.TrackType, addedAt, album.ArtworkID, now,
+		album.Source, album.Year, album.SampleRate, album.BitDepth, album.TrackType, album.Genre, addedAt, album.ArtworkID, now,
 	)
 	return err
 }
@@ -128,15 +128,15 @@ func (dao *DAO) GetAlbum(id string) (*CachedAlbum, error) {
 	var year sql.NullInt64
 	var artworkID, firstTrack sql.NullString
 	var sampleRate, bitDepth sql.NullInt64
-	var trackType sql.NullString
+	var trackType, genre sql.NullString
 
 	err := db.QueryRow(`
 		SELECT id, title, album_artist, uri, first_track, track_count, total_duration, source,
-			year, sample_rate, bit_depth, track_type, added_at, last_played, artwork_id, created_at, updated_at
+			year, sample_rate, bit_depth, track_type, genre, added_at, last_played, artwork_id, created_at, updated_at
 		FROM albums WHERE id = ?
 	`, id).Scan(
 		&album.ID, &album.Title, &album.AlbumArtist, &album.URI, &firstTrack, &album.TrackCount,
-		&album.TotalDuration, &album.Source, &year, &sampleRate, &bitDepth, &trackType,
+		&album.TotalDuration, &album.Source, &year, &sampleRate, &bitDepth, &trackType, &genre,
 		&addedAt, &lastPlayed, &artworkID, &createdAt, &updatedAt,
 	)
 	if err == sql.ErrNoRows {
@@ -157,6 +157,9 @@ func (dao *DAO) GetAlbum(id string) (*CachedAlbum, error) {
 	}
 	if trackType.Valid {
 		album.TrackType = trackType.String
+	}
+	if genre.Valid {
+		album.Genre = genre.String
 	}
 	if firstTrack.Valid {
 		album.FirstTrack = firstTrack.String
@@ -241,7 +244,7 @@ func (dao *DAO) QueryAlbums(filter AlbumFilter, sort SortOrder, pag Pagination) 
 	// Get paginated results
 	query := fmt.Sprintf(`
 		SELECT id, title, album_artist, uri, first_track, track_count, total_duration, source,
-			year, sample_rate, bit_depth, track_type, added_at, last_played, artwork_id, created_at, updated_at
+			year, sample_rate, bit_depth, track_type, genre, added_at, last_played, artwork_id, created_at, updated_at
 		FROM albums %s %s LIMIT ? OFFSET ?
 	`, whereClause, orderClause)
 
@@ -259,11 +262,11 @@ func (dao *DAO) QueryAlbums(filter AlbumFilter, sort SortOrder, pag Pagination) 
 		var year sql.NullInt64
 		var artworkID, firstTrack sql.NullString
 		var sampleRate, bitDepth sql.NullInt64
-		var trackType sql.NullString
+		var trackType, genre sql.NullString
 
 		err := rows.Scan(
 			&album.ID, &album.Title, &album.AlbumArtist, &album.URI, &firstTrack, &album.TrackCount,
-			&album.TotalDuration, &album.Source, &year, &sampleRate, &bitDepth, &trackType,
+			&album.TotalDuration, &album.Source, &year, &sampleRate, &bitDepth, &trackType, &genre,
 			&addedAt, &lastPlayed, &artworkID, &createdAt, &updatedAt,
 		)
 		if err != nil {
@@ -281,6 +284,9 @@ func (dao *DAO) QueryAlbums(filter AlbumFilter, sort SortOrder, pag Pagination) 
 		}
 		if trackType.Valid {
 			album.TrackType = trackType.String
+		}
+		if genre.Valid {
+			album.Genre = genre.String
 		}
 		if firstTrack.Valid {
 			album.FirstTrack = firstTrack.String
