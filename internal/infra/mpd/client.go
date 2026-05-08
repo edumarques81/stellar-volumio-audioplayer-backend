@@ -547,6 +547,29 @@ type AlbumDetails struct {
 	FirstTrack  string // Path to first track (for album art)
 	TotalTime   int    // Total duration in seconds
 	Format      string // Audio format from MPD, e.g. "44100:16:2"
+	Genre       string // Album-level genre (first track's Genre tag, normalized)
+}
+
+// NormalizeGenre converts MPD's Genre tag value into the form the Library UI
+// expects. MPD may return a `;`-separated string for multi-genre tracks
+// (e.g. "Ambient; Post-Rock"); the frontend renders the genre as a single
+// segment in the album meta strip and wants `/`-separated values without
+// stray whitespace.
+func NormalizeGenre(raw string) string {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return ""
+	}
+	// Replace "; " before bare ";" so the longer match wins; then split and
+	// re-join to clean up whitespace around values.
+	parts := strings.Split(trimmed, ";")
+	cleaned := make([]string, 0, len(parts))
+	for _, p := range parts {
+		if v := strings.TrimSpace(p); v != "" {
+			cleaned = append(cleaned, v)
+		}
+	}
+	return strings.Join(cleaned, " / ")
 }
 
 // GetAlbumDetails retrieves detailed information for albums within a base path.
@@ -596,6 +619,10 @@ func (c *Client) GetAlbumDetails(basePath string) ([]AlbumDetails, error) {
 				AlbumArtist: artist,
 				FirstTrack:  filePath,
 				Format:      song["Format"],
+				// First-track-wins: matches the existing precedent for
+				// Format/quality. Multi-value genres get normalized to
+				// "Ambient / Post-Rock" by NormalizeGenre.
+				Genre: NormalizeGenre(song["Genre"]),
 			}
 		}
 

@@ -257,3 +257,35 @@ func TestClientGetQueueLengthWithoutConnect(t *testing.T) {
 		t.Error("GetQueueLength should fail when not connected")
 	}
 }
+
+// TestNormalizeGenre exercises the multi-value genre handling required by
+// the Library album-meta strip: MPD may return a `;`-separated string for
+// multi-genre tracks, and the frontend wants `Ambient / Post-Rock` style.
+func TestNormalizeGenre(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{name: "empty", in: "", want: ""},
+		{name: "single genre", in: "Ambient", want: "Ambient"},
+		{name: "trims surrounding whitespace", in: "  Ambient  ", want: "Ambient"},
+		{name: "semicolon-space split", in: "Ambient; Post-Rock", want: "Ambient / Post-Rock"},
+		{name: "bare semicolon split", in: "Ambient;Post-Rock", want: "Ambient / Post-Rock"},
+		{name: "three values", in: "Ambient; Post-Rock; Drone", want: "Ambient / Post-Rock / Drone"},
+		{name: "trims values around separators", in: " Ambient ;  Post-Rock ", want: "Ambient / Post-Rock"},
+	}
+
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := mpd.NormalizeGenre(tc.in)
+			if got != tc.want {
+				t.Errorf("NormalizeGenre(%q) = %q, want %q", tc.in, got, tc.want)
+			}
+		})
+	}
+}
