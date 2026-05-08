@@ -15,7 +15,7 @@ import (
 
 const (
 	// CurrentSchemaVersion is the current database schema version.
-	CurrentSchemaVersion = "4"
+	CurrentSchemaVersion = "5"
 
 	// DefaultDBPath is the default path for the cache database.
 	DefaultDBPath = "data/library.db"
@@ -133,6 +133,17 @@ func (d *DB) initSchema() error {
 			return fmt.Errorf("apply additive migration: %w", err)
 		}
 
+		// Migration to version "5": add genre column to existing albums table.
+		// SQLite has no "ADD COLUMN IF NOT EXISTS" so we tolerate the
+		// "duplicate column name" error to keep this migration idempotent —
+		// matches the pattern used for the v1→v2 audio-quality migration above.
+		if currentVersion == "1" || currentVersion == "2" || currentVersion == "3" || currentVersion == "4" {
+			alter := "ALTER TABLE albums ADD COLUMN genre TEXT DEFAULT ''"
+			if _, err := d.db.Exec(alter); err != nil {
+				log.Warn().Err(err).Str("sql", alter).Msg("Migration statement failed (column may already exist)")
+			}
+		}
+
 		return d.setMeta("schema_version", CurrentSchemaVersion)
 	}
 
@@ -156,6 +167,7 @@ func (d *DB) createSchema() error {
 		sample_rate INTEGER DEFAULT 0,
 		bit_depth INTEGER DEFAULT 0,
 		track_type TEXT DEFAULT '',
+		genre TEXT DEFAULT '',
 		added_at TEXT,
 		last_played TEXT,
 		artwork_id TEXT,

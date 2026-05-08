@@ -1,12 +1,14 @@
 package cache_test
 
 import (
+	"database/sql"
 	"os"
 	"path/filepath"
 	"testing"
 	"time"
 
 	"github.com/edumarques81/stellar-volumio-audioplayer-backend/internal/infra/cache"
+	_ "modernc.org/sqlite"
 )
 
 func TestNewDB(t *testing.T) {
@@ -396,6 +398,266 @@ func TestSchema_BioTablesExist(t *testing.T) {
 	if stats.SchemaVersion != cache.CurrentSchemaVersion {
 		t.Fatalf("schema_version = %q, want %q", stats.SchemaVersion, cache.CurrentSchemaVersion)
 	}
+}
+
+// TestMigration_V4ToV5_AddsGenreColumn verifies that opening a database that
+// was previously initialised at schema v4 (no genre column on albums)
+// transparently migrates to v5 by adding a `genre TEXT DEFAULT ''` column
+// while preserving any existing rows.
+func TestMigration_V4ToV5_AddsGenreColumn(t *testing.T) {
+	t.Parallel()
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, "library.db")
+
+	// Build a v4 database by hand (schema below mirrors the v4 createSchema
+	// minus the genre column we are introducing in v5).
+	seedV4Database(t, dbPath)
+
+	// Insert a pre-migration album so we can prove existing rows survive.
+	rawDB, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("open raw db: %v", err)
+	}
+	if _, err := rawDB.Exec(`
+		INSERT INTO albums (id, title, album_artist, uri, source)
+		VALUES ('legacy-1', 'Legacy Album', 'Legacy Artist', 'NAS/legacy', 'nas')
+	`); err != nil {
+		t.Fatalf("seed legacy album: %v", err)
+	}
+	if err := rawDB.Close(); err != nil {
+		t.Fatalf("close raw db: %v", err)
+	}
+
+	// Open through the production code path — this should run the v4→v5
+	// migration as a side-effect.
+	db := cache.NewDB(dbPath)
+	if err := db.Open(); err != nil {
+		t.Fatalf("open via cache.NewDB: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+
+	// 1. schema_version was bumped to current.
+	stats, err := db.GetStats()
+	if err != nil {
+		t.Fatalf("GetStats: %v", err)
+	}
+	if stats.SchemaVersion != cache.CurrentSchemaVersion {
+		t.Fatalf("schema_version = %q, want %q", stats.SchemaVersion, cache.CurrentSchemaVersion)
+	}
+	if cache.CurrentSchemaVersion != "5" {
+		t.Fatalf("CurrentSchemaVersion = %q, want %q", cache.CurrentSchemaVersion, "5")
+	}
+
+	// 2. genre column is present on the albums table.
+	if !columnExists(t, db.DB(), "albums", "genre") {
+		t.Fatalf("genre column missing from albums after migration")
+	}
+
+	// 3. Pre-migration row still exists and has genre defaulted to "".
+	var legacyGenre sql.NullString
+	if err := db.DB().QueryRow(
+		`SELECT genre FROM albums WHERE id = ?`, "legacy-1",
+	).Scan(&legacyGenre); err != nil {
+		t.Fatalf("read legacy genre: %v", err)
+	}
+	if legacyGenre.Valid && legacyGenre.String != "" {
+		t.Fatalf("legacy genre = %q, want empty string", legacyGenre.String)
+	}
+}
+
+// TestMigration_V4ToV5_Idempotent verifies the v4→v5 migration is safe to
+// re-run — closing and re-opening an already-migrated database must not
+// error out (e.g. ALTER TABLE on an existing column would fail loudly).
+func TestMigration_V4ToV5_Idempotent(t *testing.T) {
+	t.Parallel()
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, "library.db")
+
+	seedV4Database(t, dbPath)
+
+	// First open: runs migration.
+	db1 := cache.NewDB(dbPath)
+	if err := db1.Open(); err != nil {
+		t.Fatalf("first open: %v", err)
+	}
+	if err := db1.Close(); err != nil {
+		t.Fatalf("first close: %v", err)
+	}
+
+	// Second open: schema is already at v5 — must be a no-op.
+	db2 := cache.NewDB(dbPath)
+	if err := db2.Open(); err != nil {
+		t.Fatalf("second open after migration: %v", err)
+	}
+	t.Cleanup(func() { _ = db2.Close() })
+
+	if !columnExists(t, db2.DB(), "albums", "genre") {
+		t.Fatalf("genre column lost after second open")
+	}
+}
+
+// seedV4Database writes a minimal v4 schema directly to dbPath so tests can
+// exercise the v4→v5 migration. Mirrors the relevant subset of createSchema
+// at v4 — albums table without the genre column.
+func seedV4Database(t *testing.T, dbPath string) {
+	t.Helper()
+
+	rawDB, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("open seed db: %v", err)
+	}
+	defer rawDB.Close()
+
+	// Snapshot of the v4 schema — every table the production code expected
+	// to exist when CurrentSchemaVersion was "4". Mirrors createSchema() at
+	// that point in time except for the genre column we are adding in v5.
+	schemaV4 := `
+		CREATE TABLE IF NOT EXISTS albums (
+			id TEXT PRIMARY KEY,
+			title TEXT NOT NULL,
+			album_artist TEXT NOT NULL,
+			uri TEXT NOT NULL,
+			first_track TEXT,
+			track_count INTEGER DEFAULT 0,
+			total_duration INTEGER DEFAULT 0,
+			source TEXT NOT NULL,
+			year INTEGER,
+			sample_rate INTEGER DEFAULT 0,
+			bit_depth INTEGER DEFAULT 0,
+			track_type TEXT DEFAULT '',
+			added_at TEXT,
+			last_played TEXT,
+			artwork_id TEXT,
+			created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+			updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+		);
+
+		CREATE TABLE IF NOT EXISTS artists (
+			id TEXT PRIMARY KEY,
+			name TEXT NOT NULL UNIQUE,
+			album_count INTEGER DEFAULT 0,
+			track_count INTEGER DEFAULT 0,
+			artwork_id TEXT,
+			created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+			updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+		);
+
+		CREATE TABLE IF NOT EXISTS tracks (
+			id TEXT PRIMARY KEY,
+			album_id TEXT NOT NULL,
+			title TEXT NOT NULL,
+			artist TEXT NOT NULL,
+			uri TEXT NOT NULL UNIQUE,
+			track_number INTEGER,
+			disc_number INTEGER DEFAULT 1,
+			duration INTEGER DEFAULT 0,
+			source TEXT NOT NULL,
+			created_at TEXT DEFAULT CURRENT_TIMESTAMP
+		);
+
+		CREATE TABLE IF NOT EXISTS artwork (
+			id TEXT PRIMARY KEY,
+			album_id TEXT,
+			artist_id TEXT,
+			type TEXT NOT NULL,
+			file_path TEXT,
+			source TEXT NOT NULL,
+			mime_type TEXT,
+			width INTEGER,
+			height INTEGER,
+			file_size INTEGER,
+			checksum TEXT,
+			fetched_at TEXT,
+			expires_at TEXT,
+			created_at TEXT DEFAULT CURRENT_TIMESTAMP
+		);
+
+		CREATE TABLE IF NOT EXISTS radio_stations (
+			id TEXT PRIMARY KEY,
+			name TEXT NOT NULL,
+			uri TEXT NOT NULL,
+			icon TEXT,
+			genre TEXT,
+			created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+			updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+		);
+
+		CREATE TABLE IF NOT EXISTS cache_meta (
+			key TEXT PRIMARY KEY,
+			value TEXT,
+			updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+		);
+
+		CREATE TABLE IF NOT EXISTS album_bios (
+			key TEXT PRIMARY KEY,
+			artist TEXT NOT NULL,
+			album TEXT NOT NULL,
+			summary TEXT NOT NULL,
+			source_url TEXT,
+			fetched_at INTEGER NOT NULL,
+			expires_at INTEGER NOT NULL
+		);
+
+		CREATE TABLE IF NOT EXISTS artist_bios (
+			key TEXT PRIMARY KEY,
+			artist TEXT NOT NULL,
+			summary TEXT NOT NULL,
+			source_url TEXT,
+			fetched_at INTEGER NOT NULL,
+			expires_at INTEGER NOT NULL
+		);
+
+		CREATE TABLE IF NOT EXISTS last_played_album (
+			key TEXT PRIMARY KEY,
+			artist TEXT NOT NULL,
+			album TEXT NOT NULL,
+			album_art TEXT,
+			track_uri TEXT,
+			track_type TEXT,
+			sample_rate TEXT,
+			bit_depth TEXT,
+			last_played_at INTEGER NOT NULL,
+			updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+		);
+	`
+	if _, err := rawDB.Exec(schemaV4); err != nil {
+		t.Fatalf("seed v4 schema: %v", err)
+	}
+	if _, err := rawDB.Exec(
+		`INSERT INTO cache_meta (key, value) VALUES ('schema_version', '4')`,
+	); err != nil {
+		t.Fatalf("seed schema_version=4: %v", err)
+	}
+}
+
+// columnExists returns true iff `column` exists on `table` in the given DB.
+func columnExists(t *testing.T, db *sql.DB, table, column string) bool {
+	t.Helper()
+	rows, err := db.Query(`PRAGMA table_info(` + table + `)`)
+	if err != nil {
+		t.Fatalf("PRAGMA table_info(%s): %v", table, err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var (
+			cid       int
+			name      string
+			ctype     string
+			notNull   int
+			dfltValue sql.NullString
+			pk        int
+		)
+		if err := rows.Scan(&cid, &name, &ctype, &notNull, &dfltValue, &pk); err != nil {
+			t.Fatalf("scan table_info row: %v", err)
+		}
+		if name == column {
+			return true
+		}
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("table_info iter: %v", err)
+	}
+	return false
 }
 
 func TestPagination(t *testing.T) {
