@@ -20,6 +20,12 @@ type Client struct {
 	host     string
 	port     int
 	password string
+
+	// stopWatch is closed by Close() to signal the watch goroutine to
+	// exit cleanly. It is created lazily by Watch() and reset to nil
+	// after the goroutine drains. The goroutine owns calling
+	// watcher.Close() on the live watcher; Close() must not double-close.
+	stopWatch chan struct{}
 }
 
 // NewClient creates a new MPD client wrapper.
@@ -84,12 +90,25 @@ func (c *Client) ensureConnected() error {
 }
 
 // Close closes the MPD connection.
+//
+// If a watch goroutine is running, this signals it to exit; the goroutine
+// owns closing its own *mpd.Watcher to avoid double-close races against
+// the reconnect path.
 func (c *Client) Close() error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	if c.watcher != nil {
-		c.watcher.Close()
+	if c.stopWatch != nil {
+		// Idempotent: close() on an already-closed channel panics, so
+		// nil it out after the first close.
+		close(c.stopWatch)
+		c.stopWatch = nil
+		// Drop our reference; the goroutine will close the watcher.
+		c.watcher = nil
+	} else if c.watcher != nil {
+		// No active watch goroutine (shouldn't happen given Watch()
+		// always starts one, but kept for safety): close directly.
+		_ = c.watcher.Close()
 		c.watcher = nil
 	}
 
@@ -313,38 +332,152 @@ func (c *Client) Add(uri string) error {
 
 // Watch starts watching for MPD subsystem changes.
 // Returns a channel that receives subsystem names when they change.
+//
+// If the underlying MPD connection dies (e.g. broken-pipe), the goroutine
+// closes the dead *mpd.Watcher and creates a fresh one with exponential
+// backoff (500ms → 1s → 2s → 4s → 8s → 10s, capped). gompd's *Watcher does
+// NOT auto-reconnect on its own, so this loop is the only thing keeping
+// track-end auto-advance alive after a transient socket failure.
 func (c *Client) Watch(subsystems ...string) (<-chan string, error) {
 	addr := fmt.Sprintf("%s:%d", c.host, c.port)
 
+	// Create the initial watcher up front so we can return a hard error
+	// to the caller if MPD is unreachable at startup. Subsequent
+	// reconnects happen inside the goroutine.
 	watcher, err := mpd.NewWatcher("tcp", addr, c.password, subsystems...)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create watcher: %w", err)
 	}
 
+	stop := make(chan struct{})
+
 	c.mu.Lock()
 	c.watcher = watcher
+	c.stopWatch = stop
 	c.mu.Unlock()
 
 	ch := make(chan string, 10)
 
-	go func() {
-		defer close(ch)
-		for {
-			select {
-			case subsystem, ok := <-watcher.Event:
-				if !ok {
-					return
-				}
-				ch <- subsystem
-			case err := <-watcher.Error:
-				log.Error().Err(err).Msg("MPD watcher error")
-				// Reconnect after 5s to avoid CPU waste on repeated failures
-				time.Sleep(5 * time.Second)
-			}
+	go c.watchLoop(addr, subsystems, watcher, stop, ch)
+
+	return ch, nil
+}
+
+// watchLoop drains events from the active watcher and reconnects with
+// exponential backoff whenever the underlying connection dies. The initial
+// watcher is passed in so the first iteration consumes it without a
+// reconnect log.
+//
+// The goroutine owns the live *mpd.Watcher: it is the only caller of
+// watcher.Close() on the active instance. Client.Close() signals teardown
+// via the stop channel and lets this goroutine drain and close cleanly.
+func (c *Client) watchLoop(addr string, subsystems []string, initial *mpd.Watcher, stop <-chan struct{}, ch chan<- string) {
+	defer close(ch)
+
+	const (
+		initialBackoff = 500 * time.Millisecond
+		maxBackoff     = 10 * time.Second
+	)
+
+	watcher := initial
+	backoff := initialBackoff
+	attempt := 0
+
+	defer func() {
+		// Final teardown: close whichever watcher we currently hold.
+		if watcher != nil {
+			_ = watcher.Close()
 		}
 	}()
 
-	return ch, nil
+	for {
+		// Drain events from the current watcher until it errors or until
+		// stop is signalled. Any successful event resets the backoff so a
+		// long-stable connection followed by a transient failure starts
+		// at 500ms again.
+		eventDelivered := false
+		errored := false
+		for !errored {
+			select {
+			case <-stop:
+				return
+			case subsystem, ok := <-watcher.Event:
+				if !ok {
+					// Channel closed unexpectedly (not via our stop
+					// signal). Treat as terminal — gompd has torn down
+					// this watcher and we have no live instance to
+					// reconnect with. The deferred Close() above is a
+					// no-op because the channels are already closed,
+					// but we nil out the watcher so it doesn't try.
+					watcher = nil
+					return
+				}
+				ch <- subsystem
+				eventDelivered = true
+			case err, ok := <-watcher.Error:
+				if !ok {
+					watcher = nil
+					return
+				}
+				log.Error().Err(err).Msg("MPD watcher error")
+				errored = true
+			}
+		}
+
+		if eventDelivered {
+			backoff = initialBackoff
+		}
+
+		// Tear down the dead watcher. Close() is safe to call on a
+		// watcher whose connection is already broken — gompd's noidle
+		// write may fail but the goroutine will still exit.
+		_ = watcher.Close()
+		watcher = nil
+
+		// Sleep with backoff, but bail early if we're being torn down.
+		select {
+		case <-stop:
+			return
+		case <-time.After(backoff):
+		}
+
+		newWatcher, err := mpd.NewWatcher("tcp", addr, c.password, subsystems...)
+		if err != nil {
+			log.Error().Err(err).Dur("delay", backoff).Msg("MPD watcher reconnect failed")
+			// Bump backoff up to the cap and retry. We DO NOT swap
+			// c.watcher here because the old (dead) one was already
+			// closed and there is no replacement yet.
+			backoff = nextBackoff(backoff, maxBackoff)
+			continue
+		}
+
+		attempt++
+		log.Info().Int("attempt", attempt).Dur("delay", backoff).Msg("MPD watcher reconnected")
+
+		c.mu.Lock()
+		// If Close() was called between our select-stop check and now,
+		// it set c.watcher to nil and closed stop. Detect that and
+		// tear down the watcher we just created instead of leaking it.
+		if c.stopWatch == nil {
+			c.mu.Unlock()
+			_ = newWatcher.Close()
+			return
+		}
+		c.watcher = newWatcher
+		c.mu.Unlock()
+
+		watcher = newWatcher
+		backoff = nextBackoff(backoff, maxBackoff)
+	}
+}
+
+// nextBackoff doubles the current delay, capped at max.
+func nextBackoff(current, max time.Duration) time.Duration {
+	next := current * 2
+	if next > max {
+		return max
+	}
+	return next
 }
 
 // ListAllInfo lists all songs in the database.

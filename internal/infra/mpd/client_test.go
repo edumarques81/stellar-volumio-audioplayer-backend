@@ -1,7 +1,13 @@
 package mpd_test
 
 import (
+	"bufio"
+	"net"
+	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/edumarques81/stellar-volumio-audioplayer-backend/internal/infra/mpd"
 )
@@ -287,5 +293,234 @@ func TestNormalizeGenre(t *testing.T) {
 				t.Errorf("NormalizeGenre(%q) = %q, want %q", tc.in, got, tc.want)
 			}
 		})
+	}
+}
+
+// fakeMPDServer is a minimal MPD-protocol stub used to test the watcher
+// reconnect path. It accepts TCP connections, sends the MPD greeting, and
+// then runs a per-connection scripted handler.
+//
+// Each handler is invoked with the accept count (1-based) and the connection.
+// Handlers may close the connection abruptly (broken-pipe simulation) or
+// respond to "idle" and other commands. When all scripted handlers have been
+// consumed, additional connections are closed immediately.
+type fakeMPDServer struct {
+	t        *testing.T
+	listener net.Listener
+	handlers []func(connNum int, conn net.Conn)
+	accepts  atomic.Int32
+	wg       sync.WaitGroup
+}
+
+// startFakeMPD starts a fake MPD server on a random localhost port.
+// The handlers are applied in order (handler[0] for the first accept,
+// handler[1] for the second, etc.). Any extra connections are closed.
+func startFakeMPD(t *testing.T, handlers ...func(connNum int, conn net.Conn)) *fakeMPDServer {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	s := &fakeMPDServer{t: t, listener: ln, handlers: handlers}
+	s.wg.Add(1)
+	go s.serve()
+	return s
+}
+
+func (s *fakeMPDServer) serve() {
+	defer s.wg.Done()
+	for {
+		conn, err := s.listener.Accept()
+		if err != nil {
+			return
+		}
+		n := int(s.accepts.Add(1))
+		s.wg.Add(1)
+		go func(connNum int, c net.Conn) {
+			defer s.wg.Done()
+			defer c.Close()
+			// Send greeting.
+			if _, err := c.Write([]byte("OK MPD 0.21.0\n")); err != nil {
+				return
+			}
+			if connNum-1 < len(s.handlers) {
+				s.handlers[connNum-1](connNum, c)
+			}
+		}(n, conn)
+	}
+}
+
+func (s *fakeMPDServer) hostPort() (string, int) {
+	tcpAddr, ok := s.listener.Addr().(*net.TCPAddr)
+	if !ok {
+		s.t.Fatalf("listener addr is not TCP: %v", s.listener.Addr())
+	}
+	return tcpAddr.IP.String(), tcpAddr.Port
+}
+
+func (s *fakeMPDServer) close() {
+	_ = s.listener.Close()
+	s.wg.Wait()
+}
+
+// readCommand reads a single \n-terminated command from the connection.
+func readCommand(t *testing.T, r *bufio.Reader) (string, error) {
+	t.Helper()
+	line, err := r.ReadString('\n')
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimRight(line, "\r\n"), nil
+}
+
+// TestWatchReconnectsOnBrokenPipe verifies that when the underlying MPD
+// watcher connection dies (simulated by closing the server side of the
+// socket), the Watch() goroutine creates a NEW watcher within ~600ms and
+// resumes event delivery on the returned channel.
+//
+// This is a regression test for the bug where the goroutine read from a
+// closed-over *Watcher and never recreated it after a broken-pipe error,
+// causing track-end auto-advance to permanently stick.
+func TestWatchReconnectsOnBrokenPipe(t *testing.T) {
+	// First connection: read the idle command, then close abruptly to
+	// simulate the broken-pipe failure mode observed on the Pi.
+	first := func(_ int, conn net.Conn) {
+		r := bufio.NewReader(conn)
+		// Drain whatever the watcher sends (typically "idle <subsystems>"),
+		// then slam the socket shut.
+		_, _ = readCommand(t, r)
+		_ = conn.Close()
+	}
+
+	// Second connection: respond to idle by reporting a "player" change.
+	// This is the post-reconnect connection that should deliver the event.
+	deliveredEvent := make(chan struct{}, 1)
+	second := func(_ int, conn net.Conn) {
+		r := bufio.NewReader(conn)
+		for {
+			cmd, err := readCommand(t, r)
+			if err != nil {
+				return
+			}
+			switch {
+			case strings.HasPrefix(cmd, "idle"):
+				if _, err := conn.Write([]byte("changed: player\nOK\n")); err != nil {
+					return
+				}
+				select {
+				case deliveredEvent <- struct{}{}:
+				default:
+				}
+			case strings.HasPrefix(cmd, "noidle"):
+				_, _ = conn.Write([]byte("OK\n"))
+			case cmd == "close":
+				return
+			default:
+				_, _ = conn.Write([]byte("OK\n"))
+			}
+		}
+	}
+
+	server := startFakeMPD(t, first, second)
+	defer server.close()
+
+	host, port := server.hostPort()
+	client := mpd.NewClient(host, port, "")
+	defer client.Close()
+
+	ch, err := client.Watch("player")
+	if err != nil {
+		t.Fatalf("Watch returned error: %v", err)
+	}
+
+	// Wait for the post-reconnect event. With the fix in place, the
+	// watcher should be re-created within the first backoff step
+	// (~500ms) and the "player" event should arrive shortly after.
+	select {
+	case sub, ok := <-ch:
+		if !ok {
+			t.Fatal("watch channel closed before event")
+		}
+		if sub != "player" {
+			t.Errorf("got subsystem %q, want %q", sub, "player")
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatalf("did not receive event after broken-pipe reconnect; accepts=%d", server.accepts.Load())
+	}
+
+	// Verify the server actually saw a second accept (the reconnect).
+	if got := server.accepts.Load(); got < 2 {
+		t.Errorf("expected at least 2 connections (initial + reconnect), got %d", got)
+	}
+
+	// Sanity: confirm the second connection delivered through.
+	select {
+	case <-deliveredEvent:
+	case <-time.After(time.Second):
+		t.Error("second-connection idle response was not sent")
+	}
+}
+
+// TestWatchCloseDuringReconnectBackoff verifies that Client.Close() unblocks
+// the watch goroutine cleanly while it is sleeping in a reconnect backoff.
+// This guards against the double-close race that the lifecycle refactor
+// introduced: only the goroutine may call watcher.Close() on the live
+// instance, and Close() must signal it to exit rather than racing on the
+// pointer.
+func TestWatchCloseDuringReconnectBackoff(t *testing.T) {
+	// First connection: kill the socket immediately to drive the loop
+	// into its backoff-then-reconnect path.
+	first := func(_ int, conn net.Conn) {
+		_ = conn.Close()
+	}
+	// Block any subsequent connection forever so the watch loop is
+	// definitely in the middle of reconnecting when Close() fires.
+	hold := func(_ int, conn net.Conn) {
+		// Just hang on the read until the test closes us.
+		buf := make([]byte, 1024)
+		for {
+			if _, err := conn.Read(buf); err != nil {
+				return
+			}
+		}
+	}
+
+	server := startFakeMPD(t, first, hold, hold, hold)
+	defer server.close()
+
+	host, port := server.hostPort()
+	client := mpd.NewClient(host, port, "")
+
+	ch, err := client.Watch("player")
+	if err != nil {
+		t.Fatalf("Watch returned error: %v", err)
+	}
+
+	// Give the loop a moment to hit the broken-pipe backoff.
+	time.Sleep(200 * time.Millisecond)
+
+	// Close should not panic, hang, or double-close the watcher.
+	done := make(chan error, 1)
+	go func() { done <- client.Close() }()
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Errorf("Close returned error: %v", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("Client.Close did not return within 3s")
+	}
+
+	// The watch channel must close shortly after.
+	select {
+	case _, ok := <-ch:
+		if ok {
+			// Drain any in-flight events; loop until close.
+			for range ch {
+			}
+		}
+	case <-time.After(2 * time.Second):
+		t.Error("watch channel did not close after Client.Close")
 	}
 }
