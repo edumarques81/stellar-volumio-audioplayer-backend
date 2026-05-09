@@ -12,6 +12,7 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/rs/zerolog/log"
@@ -64,6 +65,14 @@ type Server struct {
 	lastNetwork         NetworkStatus
 	lastBroadcastMu     sync.Mutex
 	lastBroadcastState  map[string]interface{} // Last state sent via BroadcastState for diffing
+	// tickerRecoveredBroadcasts counts state broadcasts emitted by the
+	// 1.5s defense-in-depth ticker (in StartMPDWatcher) where the diff
+	// said "state changed" but no MPD subsystem event arrived in the
+	// preceding tick window. A non-zero value in production means the
+	// gompd subsystem watcher is missing events — the ticker is the
+	// fallback that recovered the state. Surfaced via the
+	// "pushDiagnostics" Socket.IO event each time it increments.
+	tickerRecoveredBroadcasts atomic.Int64
 }
 
 // NewServer creates a new Socket.io server.
@@ -1916,16 +1925,28 @@ func (s *Server) pushQueue(client *socket.Socket) {
 
 // BroadcastState sends state to all connected clients, skipping if unchanged.
 func (s *Server) BroadcastState() {
+	s.broadcastStateOnce()
+}
+
+// broadcastStateOnce is the underlying state-broadcast implementation. It
+// returns true if a broadcast was actually emitted (i.e. state differed from
+// the last broadcast and GetState succeeded). Used by the watcher's ticker to
+// distinguish "ticker fired but state unchanged" (steady state, no-op) from
+// "ticker fired and recovered a missed update".
+func (s *Server) broadcastStateOnce() bool {
+	if s.playerService == nil {
+		return false
+	}
 	state, err := s.playerService.GetState()
 	if err != nil {
 		log.Error().Err(err).Msg("Failed to get state for broadcast")
-		return
+		return false
 	}
 
 	// State diffing: skip broadcast if key fields haven't changed
 	if s.isStateSame(state) {
 		log.Debug().Msg("State unchanged, skipping broadcast")
-		return
+		return false
 	}
 	s.saveLastState(state)
 
@@ -1962,6 +1983,7 @@ func (s *Server) BroadcastState() {
 		s.mu.RUnlock()
 		log.Debug().RawJSON("state", data).Int("clients", clientCount).Msg("Broadcast state")
 	}
+	return true
 }
 
 // stateCompareKeys are the fields checked for state diffing.
@@ -2021,8 +2043,103 @@ func (s *Server) BroadcastQueue() {
 	s.io.Emit("pushQueue", queue)
 }
 
+// watcherTickerInterval is the period at which the MPD watcher re-broadcasts
+// state as a defense-in-depth fallback for missed gompd subsystem events.
+// 1.5s is short enough that a missed "play→pause" event is recovered before a
+// human notices, and the existing isStateSame() diff means steady-state cost
+// is one MPD `status` query every tick + zero socket emits.
+const watcherTickerInterval = 1500 * time.Millisecond
+
+// watcherLoopHooks is the set of side-effects the watcher loop performs.
+// Extracted as a struct so the loop can be exercised in tests with stubs in
+// place of the real debouncer / database-update / state-broadcast paths.
+type watcherLoopHooks struct {
+	onSubsystem func(subsystem string) // run for non-database MPD subsystem events
+	onDatabase  func()                  // run for the "database" subsystem (cache rebuild)
+	onTick      func(subsystemSeen bool) // run on each ticker tick; subsystemSeen reports whether any non-database event arrived since the previous tick
+}
+
+// runWatcherLoop is the testable core of StartMPDWatcher. It selects on three
+// channels:
+//
+//   - ctx.Done() — clean shutdown
+//   - events     — MPD subsystem events from gompd (closed when the watcher dies)
+//   - tickerC    — periodic ticks driving the defense-in-depth state re-broadcast
+//
+// `subsystemSeen` is true when at least one non-database event arrived since
+// the last tick. It is reset to false after each tick is delivered to
+// hooks.onTick, so the next tick reflects only the new window.
+func runWatcherLoop(ctx context.Context, events <-chan string, tickerC <-chan time.Time, hooks watcherLoopHooks) {
+	subsystemSeen := false
+	for {
+		select {
+		case <-ctx.Done():
+			log.Info().Msg("MPD watcher stopped")
+			return
+		case subsystem, ok := <-events:
+			if !ok {
+				log.Warn().Msg("MPD watcher channel closed")
+				return
+			}
+			log.Debug().Str("subsystem", subsystem).Msg("MPD subsystem changed")
+			if subsystem == "database" {
+				if hooks.onDatabase != nil {
+					hooks.onDatabase()
+				}
+				continue
+			}
+			if hooks.onSubsystem != nil {
+				hooks.onSubsystem(subsystem)
+			}
+			subsystemSeen = true
+		case <-tickerC:
+			if hooks.onTick != nil {
+				hooks.onTick(subsystemSeen)
+			}
+			subsystemSeen = false
+		}
+	}
+}
+
+// handleTickerTick runs on every watcher-ticker tick. If a state broadcast
+// actually fires AND no MPD subsystem event arrived since the last tick, the
+// ticker just recovered a missed event — increment the counter and surface it
+// via pushDiagnostics so a non-zero value is visible in production.
+func (s *Server) handleTickerTick(subsystemSeen bool) {
+	emitted := s.broadcastStateOnce()
+	if !emitted {
+		return
+	}
+	if subsystemSeen {
+		// State changed AND a subsystem event explained it — normal path.
+		return
+	}
+	// State changed but no subsystem event in this tick window: the ticker
+	// recovered a missed update.
+	count := s.tickerRecoveredBroadcasts.Add(1)
+	log.Warn().
+		Int64("count", count).
+		Msg("ticker recovered a missed MPD state update")
+	if s.io != nil {
+		s.io.Emit("pushDiagnostics", map[string]interface{}{
+			"event":                     "tickerRecoveredBroadcast",
+			"tickerRecoveredBroadcasts": count,
+		})
+	}
+}
+
+// TickerRecoveredBroadcasts returns the running count of state broadcasts
+// that the 1.5s watcher ticker emitted in tick windows where no MPD subsystem
+// event arrived. A non-zero value means the gompd watcher is missing events.
+func (s *Server) TickerRecoveredBroadcasts() int64 {
+	return s.tickerRecoveredBroadcasts.Load()
+}
+
 // StartMPDWatcher starts watching MPD for changes and broadcasts updates.
-// Uses a debouncer to collapse rapid events (e.g., volume knob) into single broadcasts.
+// Uses a debouncer to collapse rapid events (e.g., volume knob) into single
+// broadcasts, plus a periodic state-broadcast ticker as a defense-in-depth
+// fallback for any subsystem events the gompd watcher might drop without
+// erroring (see C1.0 reconnect-on-error and C1.1 ticker fallback).
 func (s *Server) StartMPDWatcher(ctx context.Context) error {
 	subsystems := []string{"player", "mixer", "playlist", "options", "database"}
 	events, err := s.mpdClient.Watch(subsystems...)
@@ -2031,31 +2148,22 @@ func (s *Server) StartMPDWatcher(ctx context.Context) error {
 	}
 
 	debouncer := NewBroadcastDebouncer(100*time.Millisecond, s.BroadcastState, s.BroadcastQueue)
+	ticker := time.NewTicker(watcherTickerInterval)
+
+	hooks := watcherLoopHooks{
+		onSubsystem: debouncer.Trigger,
+		onDatabase:  s.handleDatabaseUpdate,
+		onTick:      s.handleTickerTick,
+	}
 
 	go func() {
 		defer debouncer.Stop()
-		log.Info().Strs("subsystems", subsystems).Msg("MPD watcher started")
-		for {
-			select {
-			case <-ctx.Done():
-				log.Info().Msg("MPD watcher stopped")
-				return
-			case subsystem, ok := <-events:
-				if !ok {
-					log.Warn().Msg("MPD watcher channel closed")
-					return
-				}
-
-				log.Debug().Str("subsystem", subsystem).Msg("MPD subsystem changed")
-
-				if subsystem == "database" {
-					// Database events bypass debouncer (immediate cache rebuild)
-					s.handleDatabaseUpdate()
-				} else {
-					debouncer.Trigger(subsystem)
-				}
-			}
-		}
+		defer ticker.Stop()
+		log.Info().
+			Strs("subsystems", subsystems).
+			Dur("ticker_interval", watcherTickerInterval).
+			Msg("MPD watcher started")
+		runWatcherLoop(ctx, events, ticker.C, hooks)
 	}()
 
 	return nil
