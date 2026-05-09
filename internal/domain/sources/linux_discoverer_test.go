@@ -54,8 +54,8 @@ func TestLinuxDiscoverer_DiscoverDevices_Timeout(t *testing.T) {
 	if err == nil {
 		t.Fatalf("expected timeout error, got nil (devices=%v)", devices)
 	}
-	if !errors.Is(err, errDiscoverTimeout) && !strings.Contains(strings.ToLower(err.Error()), "timed out") {
-		t.Errorf("expected error to indicate timeout, got %v", err)
+	if !errors.Is(err, errDiscoverTimeout) {
+		t.Fatalf("expected errDiscoverTimeout, got %v", err)
 	}
 	if len(devices) != 0 {
 		t.Errorf("expected zero devices on timeout, got %d", len(devices))

@@ -264,6 +264,15 @@ on('pushToastMessage', Toast)        // Notifications
 on('pushTrackInfo', TrackInfo)       // Extended track info
 ```
 
+### Timeout budgets
+
+NAS discovery and browse use a layered timeout chain so the deepest layer is always the first to give up. Each layer is set slightly tighter than its parent — if you change one, keep the chain monotonically decreasing or you'll see timeouts surface at the wrong level (typically: a generic socket error instead of a clear "discovery timed out").
+
+- **Frontend per-action timeout:** 8s (set in the frontend store; see Volumio2-UI).
+- **Socket.IO handler caps:** 8s for `discoverNasDevices`, 15s for `browseNasShares`.
+- **Per-tool exec timeout for discovery** (`nmblookup`, `avahi-browse`): 6s via `context.WithTimeout` in `internal/domain/sources/linux_discoverer.go`.
+- **`smbclient` (browse):** 5s via its own `--timeout=5` flag — no extra context wrapper, since smbclient enforces it natively.
+
 ---
 
 ## Bit-Perfect Audio Configuration

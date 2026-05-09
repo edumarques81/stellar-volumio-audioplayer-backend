@@ -96,7 +96,7 @@ func (d *LinuxDiscoverer) discoverViaNmblookup(ctx context.Context) ([]NasDevice
 	if err != nil {
 		// Distinguish timeout from "tool missing": if our derived context's
 		// deadline fired, treat as timeout.
-		if cmdCtx.Err() == context.DeadlineExceeded {
+		if errors.Is(cmdCtx.Err(), context.DeadlineExceeded) {
 			log.Warn().Msg("nmblookup timed out")
 			return devices, errDiscoverTimeout
 		}
@@ -151,7 +151,7 @@ func (d *LinuxDiscoverer) discoverViaAvahi(ctx context.Context) ([]NasDevice, er
 	cmd := execCommand(cmdCtx, "avahi-browse", "-rtp", "_smb._tcp")
 	output, err := cmd.Output()
 	if err != nil {
-		if cmdCtx.Err() == context.DeadlineExceeded {
+		if errors.Is(cmdCtx.Err(), context.DeadlineExceeded) {
 			log.Warn().Msg("avahi-browse timed out")
 			return devices, errDiscoverTimeout
 		}
