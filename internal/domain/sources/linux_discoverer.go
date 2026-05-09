@@ -2,12 +2,31 @@ package sources
 
 import (
 	"bufio"
+	"context"
+	"errors"
 	"net"
 	"os/exec"
 	"strings"
+	"time"
 
 	"github.com/rs/zerolog/log"
 )
+
+// discoverTimeout is the per-tool budget applied to nmblookup / avahi-browse.
+// Kept slightly under the frontend's 8s discovery budget so the backend is the
+// first to give up and the channel is freed. It is a var (not const) so tests
+// can shrink it without spawning real long-running processes.
+var discoverTimeout = 6 * time.Second
+
+// execCommand is a package-level indirection over exec.CommandContext so tests
+// can substitute a stub that simulates a hanging tool without spawning real
+// binaries. Not exported.
+var execCommand = exec.CommandContext
+
+// errDiscoverTimeout is returned by helpers when their underlying command
+// exceeded discoverTimeout. It is distinct from "tool missing" so callers can
+// tell users discovery genuinely timed out vs. silently degraded.
+var errDiscoverTimeout = errors.New("discovery timed out")
 
 // LinuxDiscoverer implements Discoverer using Linux tools.
 type LinuxDiscoverer struct{}
@@ -18,13 +37,19 @@ func NewLinuxDiscoverer() *LinuxDiscoverer {
 }
 
 // DiscoverDevices finds NAS devices on the local network using nmblookup.
-func (d *LinuxDiscoverer) DiscoverDevices() ([]NasDevice, error) {
+// A timeout (errDiscoverTimeout) from any underlying tool bubbles up so the
+// service layer can populate DiscoverResult.Error with a clear message.
+func (d *LinuxDiscoverer) DiscoverDevices(ctx context.Context) ([]NasDevice, error) {
 	log.Info().Msg("Starting NAS discovery...")
 	devices := make([]NasDevice, 0)
 	seen := make(map[string]bool)
+	var firstTimeoutErr error
 
 	// Method 1: Use nmblookup to find SMB servers
-	nmbDevices := d.discoverViaNmblookup()
+	nmbDevices, err := d.discoverViaNmblookup(ctx)
+	if err != nil && firstTimeoutErr == nil {
+		firstTimeoutErr = err
+	}
 	for _, device := range nmbDevices {
 		if !seen[device.IP] {
 			devices = append(devices, device)
@@ -33,7 +58,10 @@ func (d *LinuxDiscoverer) DiscoverDevices() ([]NasDevice, error) {
 	}
 
 	// Method 2: Use avahi-browse for mDNS/Bonjour SMB services
-	avahiDevices := d.discoverViaAvahi()
+	avahiDevices, err := d.discoverViaAvahi(ctx)
+	if err != nil && firstTimeoutErr == nil {
+		firstTimeoutErr = err
+	}
 	for _, device := range avahiDevices {
 		if !seen[device.IP] {
 			devices = append(devices, device)
@@ -42,20 +70,38 @@ func (d *LinuxDiscoverer) DiscoverDevices() ([]NasDevice, error) {
 	}
 
 	log.Info().Int("count", len(devices)).Msg("NAS discovery complete")
+	// If both methods surfaced a timeout AND we found nothing, propagate the
+	// timeout so the frontend can show a helpful error. If we got results
+	// despite a timeout from one method, prefer returning what we have.
+	if firstTimeoutErr != nil && len(devices) == 0 {
+		return devices, firstTimeoutErr
+	}
 	return devices, nil
 }
 
-// discoverViaNmblookup uses nmblookup to find SMB servers.
-func (d *LinuxDiscoverer) discoverViaNmblookup() []NasDevice {
+// discoverViaNmblookup uses nmblookup to find SMB servers. Returns
+// errDiscoverTimeout if the command exceeded discoverTimeout. A "tool not
+// installed" failure is logged at Debug and returns a nil error so missing
+// optional tools don't surface as user-visible errors.
+func (d *LinuxDiscoverer) discoverViaNmblookup(ctx context.Context) ([]NasDevice, error) {
 	devices := make([]NasDevice, 0)
+
+	cmdCtx, cancel := context.WithTimeout(ctx, discoverTimeout)
+	defer cancel()
 
 	// Run: nmblookup -S '*'
 	// This broadcasts to find all NetBIOS names on the network
-	cmd := exec.Command("nmblookup", "-S", "*")
+	cmd := execCommand(cmdCtx, "nmblookup", "-S", "*")
 	output, err := cmd.Output()
 	if err != nil {
+		// Distinguish timeout from "tool missing": if our derived context's
+		// deadline fired, treat as timeout.
+		if cmdCtx.Err() == context.DeadlineExceeded {
+			log.Warn().Msg("nmblookup timed out")
+			return devices, errDiscoverTimeout
+		}
 		log.Debug().Err(err).Msg("nmblookup failed (may not be installed)")
-		return devices
+		return devices, nil
 	}
 
 	// Parse output like:
@@ -88,20 +134,29 @@ func (d *LinuxDiscoverer) discoverViaNmblookup() []NasDevice {
 		}
 	}
 
-	return devices
+	return devices, nil
 }
 
-// discoverViaAvahi uses avahi-browse to find SMB services.
-func (d *LinuxDiscoverer) discoverViaAvahi() []NasDevice {
+// discoverViaAvahi uses avahi-browse to find SMB services. Returns
+// errDiscoverTimeout if the command exceeded discoverTimeout. A missing tool
+// is treated as benign.
+func (d *LinuxDiscoverer) discoverViaAvahi(ctx context.Context) ([]NasDevice, error) {
 	devices := make([]NasDevice, 0)
+
+	cmdCtx, cancel := context.WithTimeout(ctx, discoverTimeout)
+	defer cancel()
 
 	// Run: avahi-browse -rt _smb._tcp
 	// -r = resolve addresses, -t = terminate after scanning
-	cmd := exec.Command("avahi-browse", "-rtp", "_smb._tcp")
+	cmd := execCommand(cmdCtx, "avahi-browse", "-rtp", "_smb._tcp")
 	output, err := cmd.Output()
 	if err != nil {
+		if cmdCtx.Err() == context.DeadlineExceeded {
+			log.Warn().Msg("avahi-browse timed out")
+			return devices, errDiscoverTimeout
+		}
 		log.Debug().Err(err).Msg("avahi-browse failed (may not be installed)")
-		return devices
+		return devices, nil
 	}
 
 	// Parse output - avahi-browse -p outputs parseable format:
@@ -131,11 +186,11 @@ func (d *LinuxDiscoverer) discoverViaAvahi() []NasDevice {
 		}
 	}
 
-	return devices
+	return devices, nil
 }
 
 // BrowseShares lists available shares on a NAS host using smbclient.
-func (d *LinuxDiscoverer) BrowseShares(host, username, password string) ([]ShareInfo, error) {
+func (d *LinuxDiscoverer) BrowseShares(ctx context.Context, host, username, password string) ([]ShareInfo, error) {
 	log.Info().Str("host", host).Msg("Browsing NAS shares...")
 	shares := make([]ShareInfo, 0)
 
@@ -151,10 +206,11 @@ func (d *LinuxDiscoverer) BrowseShares(host, username, password string) ([]Share
 		args = append(args, "-N") // No password (anonymous/guest)
 	}
 
-	// Add timeout
+	// Add timeout (smbclient's own --timeout is in seconds; we keep it for
+	// belt-and-suspenders alongside the context deadline below).
 	args = append(args, "--timeout=5")
 
-	cmd := exec.Command("smbclient", args...)
+	cmd := execCommand(ctx, "smbclient", args...)
 	output, err := cmd.CombinedOutput()
 
 	if err != nil {

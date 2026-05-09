@@ -349,7 +349,7 @@ func TestService_DiscoverNasDevices(t *testing.T) {
 	}
 	s.SetDiscoverer(mockDiscoverer)
 
-	result, err := s.DiscoverNasDevices()
+	result, err := s.DiscoverNasDevices(context.Background())
 	if err != nil {
 		t.Fatalf("DiscoverNasDevices failed: %v", err)
 	}
@@ -377,7 +377,7 @@ func TestService_DiscoverNasDevices_Empty(t *testing.T) {
 	}
 	s.SetDiscoverer(mockDiscoverer)
 
-	result, err := s.DiscoverNasDevices()
+	result, err := s.DiscoverNasDevices(context.Background())
 	if err != nil {
 		t.Fatalf("DiscoverNasDevices failed: %v", err)
 	}
@@ -397,7 +397,7 @@ func TestService_DiscoverNasDevices_NoDiscoverer(t *testing.T) {
 	}
 	// No discoverer set
 
-	result, err := s.DiscoverNasDevices()
+	result, err := s.DiscoverNasDevices(context.Background())
 	if err != nil {
 		t.Fatalf("DiscoverNasDevices failed: %v", err)
 	}
@@ -426,7 +426,7 @@ func TestService_BrowseNasShares(t *testing.T) {
 	}
 	s.SetDiscoverer(mockDiscoverer)
 
-	result, err := s.BrowseNasShares("192.168.1.10", "", "")
+	result, err := s.BrowseNasShares(context.Background(), "192.168.1.10", "", "")
 	if err != nil {
 		t.Fatalf("BrowseNasShares failed: %v", err)
 	}
@@ -460,7 +460,7 @@ func TestService_BrowseNasShares_WithCredentials(t *testing.T) {
 	s.SetDiscoverer(mockDiscoverer)
 
 	// Without credentials - should fail
-	result, err := s.BrowseNasShares("192.168.1.10", "", "")
+	result, err := s.BrowseNasShares(context.Background(), "192.168.1.10", "", "")
 	if err != nil {
 		t.Fatalf("BrowseNasShares failed: %v", err)
 	}
@@ -469,7 +469,7 @@ func TestService_BrowseNasShares_WithCredentials(t *testing.T) {
 	}
 
 	// With credentials - should succeed
-	result, err = s.BrowseNasShares("192.168.1.10", "user", "pass")
+	result, err = s.BrowseNasShares(context.Background(), "192.168.1.10", "user", "pass")
 	if err != nil {
 		t.Fatalf("BrowseNasShares with auth failed: %v", err)
 	}
@@ -495,7 +495,7 @@ func TestService_BrowseNasShares_NotFound(t *testing.T) {
 	}
 	s.SetDiscoverer(mockDiscoverer)
 
-	result, err := s.BrowseNasShares("192.168.1.99", "", "")
+	result, err := s.BrowseNasShares(context.Background(), "192.168.1.99", "", "")
 	if err != nil {
 		t.Fatalf("BrowseNasShares failed: %v", err)
 	}
@@ -927,14 +927,14 @@ type MockDiscoverer struct {
 	Error       error
 }
 
-func (m *MockDiscoverer) DiscoverDevices() ([]NasDevice, error) {
+func (m *MockDiscoverer) DiscoverDevices(_ context.Context) ([]NasDevice, error) {
 	if m.Error != nil {
 		return nil, m.Error
 	}
 	return m.Devices, nil
 }
 
-func (m *MockDiscoverer) BrowseShares(host, username, password string) ([]ShareInfo, error) {
+func (m *MockDiscoverer) BrowseShares(_ context.Context, host, username, password string) ([]ShareInfo, error) {
 	if m.Error != nil {
 		return nil, m.Error
 	}

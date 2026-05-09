@@ -980,7 +980,12 @@ func (s *Server) setupHandlers() {
 				return
 			}
 
-			result, err := s.sourcesService.DiscoverNasDevices()
+			// Cap the discovery request at 8s; the discoverer applies a tighter
+			// 6s per-tool deadline derived from this so the channel is freed
+			// even if both nmblookup and avahi-browse hang.
+			discoverCtx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+			result, err := s.sourcesService.DiscoverNasDevices(discoverCtx)
+			cancel()
 			if err != nil {
 				log.Error().Err(err).Msg("Failed to discover NAS devices")
 				client.Emit("pushNasDevices", sources.DiscoverResult{
@@ -1037,7 +1042,9 @@ func (s *Server) setupHandlers() {
 				return
 			}
 
-			result, err := s.sourcesService.BrowseNasShares(host, username, password)
+			browseCtx, browseCancel := context.WithTimeout(context.Background(), 15*time.Second)
+			result, err := s.sourcesService.BrowseNasShares(browseCtx, host, username, password)
+			browseCancel()
 			if err != nil {
 				log.Error().Err(err).Str("host", host).Msg("Failed to browse NAS shares")
 				client.Emit("pushBrowseNasShares", sources.BrowseSharesResult{

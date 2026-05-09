@@ -443,7 +443,10 @@ func (s *Service) SetDiscoverer(d Discoverer) {
 }
 
 // DiscoverNasDevices finds NAS devices on the local network.
-func (s *Service) DiscoverNasDevices() (*DiscoverResult, error) {
+// The context controls the overall budget for discovery; the underlying
+// discoverer applies a tighter per-tool deadline derived from it so the
+// backend never holds the request channel longer than the caller allows.
+func (s *Service) DiscoverNasDevices(ctx context.Context) (*DiscoverResult, error) {
 	s.mu.RLock()
 	discoverer := s.discoverer
 	s.mu.RUnlock()
@@ -455,7 +458,7 @@ func (s *Service) DiscoverNasDevices() (*DiscoverResult, error) {
 		}, nil
 	}
 
-	devices, err := discoverer.DiscoverDevices()
+	devices, err := discoverer.DiscoverDevices(ctx)
 	if err != nil {
 		return &DiscoverResult{
 			Devices: []NasDevice{},
@@ -605,7 +608,7 @@ func (s *Service) MountAllSharesWithRetry(ctx context.Context, maxAttempts int, 
 }
 
 // BrowseNasShares lists available shares on a NAS host.
-func (s *Service) BrowseNasShares(host, username, password string) (*BrowseSharesResult, error) {
+func (s *Service) BrowseNasShares(ctx context.Context, host, username, password string) (*BrowseSharesResult, error) {
 	s.mu.RLock()
 	discoverer := s.discoverer
 	s.mu.RUnlock()
@@ -617,7 +620,7 @@ func (s *Service) BrowseNasShares(host, username, password string) (*BrowseShare
 		}, nil
 	}
 
-	shares, err := discoverer.BrowseShares(host, username, password)
+	shares, err := discoverer.BrowseShares(ctx, host, username, password)
 	if err != nil {
 		return &BrowseSharesResult{
 			Shares: []ShareInfo{},
