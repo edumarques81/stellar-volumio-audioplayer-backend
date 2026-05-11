@@ -90,8 +90,9 @@ func (s *Service) saveConfig() error {
 	return nil
 }
 
-// AddNasShare adds and mounts a new NAS share.
-func (s *Service) AddNasShare(req AddNasShareRequest) (*SourceResult, error) {
+// AddNasShare adds and mounts a new NAS share. The ctx bounds the mount
+// syscall so a dead NAS doesn't hang the handler goroutine.
+func (s *Service) AddNasShare(ctx context.Context, req AddNasShareRequest) (*SourceResult, error) {
 	// Validate request
 	if err := validateAddNasShareRequest(req); err != nil {
 		return &SourceResult{
@@ -146,7 +147,7 @@ func (s *Service) AddNasShare(req AddNasShareRequest) (*SourceResult, error) {
 			}, nil
 		}
 
-		if err := s.mounter.Mount(share); err != nil {
+		if err := s.mounter.Mount(ctx, share); err != nil {
 			// Clean up mount point on failure
 			s.mounter.RemoveMountPoint(mountPoint)
 			return &SourceResult{
@@ -159,6 +160,7 @@ func (s *Service) AddNasShare(req AddNasShareRequest) (*SourceResult, error) {
 		symlinkPath := filepath.Join(MpdMusicDir, "NAS", sanitizeName(req.Name))
 		if err := s.mounter.CreateSymlink(mountPoint, symlinkPath); err != nil {
 			// Log but don't fail - symlink is not critical
+			_ = err
 		}
 	}
 
@@ -237,8 +239,9 @@ func (s *Service) GetNasShareInfo(id string) (*NasShare, error) {
 	}, nil
 }
 
-// DeleteNasShare unmounts and removes a NAS share.
-func (s *Service) DeleteNasShare(id string) (*SourceResult, error) {
+// DeleteNasShare unmounts and removes a NAS share. The ctx bounds the
+// underlying umount syscall.
+func (s *Service) DeleteNasShare(ctx context.Context, id string) (*SourceResult, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -254,7 +257,7 @@ func (s *Service) DeleteNasShare(id string) (*SourceResult, error) {
 
 	// Unmount if mounted
 	if s.mounter != nil && s.mounter.IsMounted(mountPoint) {
-		if err := s.mounter.Unmount(mountPoint); err != nil {
+		if err := s.mounter.Unmount(ctx, mountPoint); err != nil {
 			return &SourceResult{
 				Success: false,
 				Error:   fmt.Sprintf("failed to unmount: %v", err),
@@ -289,8 +292,9 @@ func (s *Service) DeleteNasShare(id string) (*SourceResult, error) {
 	}, nil
 }
 
-// MountNasShare mounts an existing NAS share.
-func (s *Service) MountNasShare(id string) (*SourceResult, error) {
+// MountNasShare mounts an existing NAS share. The ctx bounds the underlying
+// mount syscall.
+func (s *Service) MountNasShare(ctx context.Context, id string) (*SourceResult, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -341,7 +345,7 @@ func (s *Service) MountNasShare(id string) (*SourceResult, error) {
 	}
 
 	// Mount
-	if err := s.mounter.Mount(share); err != nil {
+	if err := s.mounter.Mount(ctx, share); err != nil {
 		return &SourceResult{
 			Success: false,
 			Error:   fmt.Sprintf("failed to mount: %v", err),
@@ -354,8 +358,9 @@ func (s *Service) MountNasShare(id string) (*SourceResult, error) {
 	}, nil
 }
 
-// UnmountNasShare unmounts a NAS share.
-func (s *Service) UnmountNasShare(id string) (*SourceResult, error) {
+// UnmountNasShare unmounts a NAS share. The ctx bounds the underlying umount
+// syscall.
+func (s *Service) UnmountNasShare(ctx context.Context, id string) (*SourceResult, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -383,7 +388,7 @@ func (s *Service) UnmountNasShare(id string) (*SourceResult, error) {
 		}, nil
 	}
 
-	if err := s.mounter.Unmount(mountPoint); err != nil {
+	if err := s.mounter.Unmount(ctx, mountPoint); err != nil {
 		return &SourceResult{
 			Success: false,
 			Error:   fmt.Sprintf("failed to unmount: %v", err),
@@ -471,9 +476,17 @@ func (s *Service) DiscoverNasDevices(ctx context.Context) (*DiscoverResult, erro
 	}, nil
 }
 
+// backgroundMountTimeout bounds each per-share mount attempt initiated by
+// background workers (startup auto-mount, watcher retry). It is wider than
+// the 6s used for user-facing handlers because there is no UI to block; the
+// goal here is "don't block forever on a dead share", not "respond fast".
+const backgroundMountTimeout = 30 * time.Second
+
 // MountAllShares attempts to mount all configured NAS shares.
-// Returns a summary of mount results for each share.
-func (s *Service) MountAllShares() []MountResult {
+// Returns a summary of mount results for each share. The ctx bounds the
+// overall operation; each per-share mount call gets its own derived timeout
+// from backgroundMountTimeout so one dead host cannot stall the loop.
+func (s *Service) MountAllShares(ctx context.Context) []MountResult {
 	s.mu.RLock()
 	shares := make([]*NasShareConfig, 0, len(s.config.NasShares))
 	for _, cfg := range s.config.NasShares {
@@ -500,8 +513,11 @@ func (s *Service) MountAllShares() []MountResult {
 			continue
 		}
 
-		// Try to mount
-		mountResult, err := s.MountNasShare(cfg.ID)
+		// Try to mount with a per-share deadline so one dead host can't
+		// stall the whole startup loop.
+		mountCtx, cancel := context.WithTimeout(ctx, backgroundMountTimeout)
+		mountResult, err := s.MountNasShare(mountCtx, cfg.ID)
+		cancel()
 		if err != nil {
 			result.Success = false
 			result.Error = err.Error()
@@ -533,13 +549,17 @@ func (s *Service) GetUnmountedShares() []string {
 	return unmounted
 }
 
-// RemountUnmountedShares attempts to mount all configured shares that are currently unmounted.
-// Returns the number of shares successfully mounted.
-func (s *Service) RemountUnmountedShares() int {
+// RemountUnmountedShares attempts to mount all configured shares that are
+// currently unmounted. Returns the number of shares successfully mounted.
+// Each per-share mount gets a derived deadline from backgroundMountTimeout
+// so a dead host can't stall the watcher loop.
+func (s *Service) RemountUnmountedShares(ctx context.Context) int {
 	unmounted := s.GetUnmountedShares()
 	mounted := 0
 	for _, id := range unmounted {
-		result, err := s.MountNasShare(id)
+		mountCtx, cancel := context.WithTimeout(ctx, backgroundMountTimeout)
+		result, err := s.MountNasShare(mountCtx, id)
+		cancel()
 		if err != nil {
 			log.Warn().Err(err).Str("id", id).Msg("Failed to remount share")
 			continue
@@ -554,9 +574,10 @@ func (s *Service) RemountUnmountedShares() int {
 
 // MountAllSharesWithRetry attempts to mount all configured shares, retrying unmounted
 // shares with exponential backoff. It returns once all shares are mounted or maxAttempts
-// is exhausted. The ctx parameter allows cancellation (e.g., during shutdown).
+// is exhausted. The ctx parameter allows cancellation (e.g., during shutdown) and is
+// passed to each per-share mount call (with its own derived deadline).
 func (s *Service) MountAllSharesWithRetry(ctx context.Context, maxAttempts int, initialDelay time.Duration) []MountResult {
-	results := s.MountAllShares()
+	results := s.MountAllShares(ctx)
 
 	// Count unmounted shares
 	unmountedCount := 0
@@ -588,7 +609,7 @@ func (s *Service) MountAllSharesWithRetry(ctx context.Context, maxAttempts int, 
 		}
 
 		// Only retry unmounted shares
-		mounted := s.RemountUnmountedShares()
+		mounted := s.RemountUnmountedShares(ctx)
 		unmountedCount -= mounted
 
 		if unmountedCount <= 0 {
@@ -604,7 +625,7 @@ func (s *Service) MountAllSharesWithRetry(ctx context.Context, maxAttempts int, 
 	}
 
 	// Return final state
-	return s.MountAllShares()
+	return s.MountAllShares(ctx)
 }
 
 // BrowseNasShares lists available shares on a NAS host.

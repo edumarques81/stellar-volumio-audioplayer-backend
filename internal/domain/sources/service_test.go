@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 )
@@ -45,7 +46,7 @@ func TestService_AddNasShare(t *testing.T) {
 		Password: "pass",
 	}
 
-	result, err := s.AddNasShare(req)
+	result, err := s.AddNasShare(context.Background(), req)
 	if err != nil {
 		t.Fatalf("AddNasShare failed: %v", err)
 	}
@@ -112,7 +113,7 @@ func TestService_DeleteNasShare(t *testing.T) {
 		FSType: "cifs",
 	}
 
-	result, err := s.AddNasShare(req)
+	result, err := s.AddNasShare(context.Background(), req)
 	if err != nil {
 		t.Fatalf("AddNasShare failed: %v", err)
 	}
@@ -128,7 +129,7 @@ func TestService_DeleteNasShare(t *testing.T) {
 	shareID := shares[0].ID
 
 	// Delete the share
-	result, err = s.DeleteNasShare(shareID)
+	result, err = s.DeleteNasShare(context.Background(), shareID)
 	if err != nil {
 		t.Fatalf("DeleteNasShare failed: %v", err)
 	}
@@ -153,7 +154,7 @@ func TestService_DeleteNasShare_NotFound(t *testing.T) {
 		t.Fatalf("NewService failed: %v", err)
 	}
 
-	result, err := s.DeleteNasShare("nonexistent-id")
+	result, err := s.DeleteNasShare(context.Background(), "nonexistent-id")
 	if err != nil {
 		t.Fatalf("DeleteNasShare failed: %v", err)
 	}
@@ -180,7 +181,7 @@ func TestService_ConfigPersistence(t *testing.T) {
 		FSType: "cifs",
 	}
 
-	_, err = s1.AddNasShare(req)
+	_, err = s1.AddNasShare(context.Background(), req)
 	if err != nil {
 		t.Fatalf("AddNasShare failed: %v", err)
 	}
@@ -253,7 +254,7 @@ func TestService_AddNasShare_Validation(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result, err := s.AddNasShare(tt.req)
+			result, err := s.AddNasShare(context.Background(), tt.req)
 			if err != nil {
 				t.Fatalf("AddNasShare returned error: %v", err)
 			}
@@ -268,14 +269,24 @@ func TestService_AddNasShare_Validation(t *testing.T) {
 	}
 }
 
-// MockMounter implements Mounter interface for testing
+// MockMounter implements Mounter interface for testing. Its fields are
+// accessed from both the test goroutine and the worker(s) the test
+// kicks off (e.g., MountAllSharesWithRetry); a mutex keeps -race clean
+// when a test mutates a flag like MountError to simulate a transient
+// failure.
 type MockMounter struct {
+	mu            sync.Mutex
 	MountCalled   bool
 	UnmountCalled bool
 	MountError    error
 	UnmountError  error
 	IsMountedVal  bool
 	MountedPaths  map[string]bool
+	// MountDelay simulates a slow / hung mount so tests can verify the
+	// context-deadline-honouring behaviour at the service layer. If ctx
+	// fires before MountDelay elapses, Mount returns ctx.Err.
+	MountDelay   time.Duration
+	UnmountDelay time.Duration
 }
 
 func NewMockMounter() *MockMounter {
@@ -284,8 +295,30 @@ func NewMockMounter() *MockMounter {
 	}
 }
 
-func (m *MockMounter) Mount(share *NasShare) error {
+// SetMountError safely mutates MountError from a goroutine; using the
+// exported field directly across goroutines triggers the race detector.
+func (m *MockMounter) SetMountError(err error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.MountError = err
+}
+
+func (m *MockMounter) Mount(ctx context.Context, share *NasShare) error {
+	m.mu.Lock()
 	m.MountCalled = true
+	delay := m.MountDelay
+	m.mu.Unlock()
+
+	if delay > 0 {
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("mount timed out: %w", ctx.Err())
+		case <-time.After(delay):
+		}
+	}
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	if m.MountError != nil {
 		return m.MountError
 	}
@@ -294,8 +327,22 @@ func (m *MockMounter) Mount(share *NasShare) error {
 	return nil
 }
 
-func (m *MockMounter) Unmount(mountPoint string) error {
+func (m *MockMounter) Unmount(ctx context.Context, mountPoint string) error {
+	m.mu.Lock()
 	m.UnmountCalled = true
+	delay := m.UnmountDelay
+	m.mu.Unlock()
+
+	if delay > 0 {
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("unmount timed out: %w", ctx.Err())
+		case <-time.After(delay):
+		}
+	}
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	if m.UnmountError != nil {
 		return m.UnmountError
 	}
@@ -304,6 +351,8 @@ func (m *MockMounter) Unmount(mountPoint string) error {
 }
 
 func (m *MockMounter) IsMounted(mountPoint string) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	if m.IsMountedVal {
 		return true
 	}
@@ -518,7 +567,7 @@ func TestService_MountAllShares_Empty(t *testing.T) {
 		t.Fatalf("NewService failed: %v", err)
 	}
 
-	results := s.MountAllShares()
+	results := s.MountAllShares(context.Background())
 	if len(results) != 0 {
 		t.Errorf("MountAllShares returned %d results, want 0", len(results))
 	}
@@ -543,7 +592,7 @@ func TestService_MountAllShares_SingleShare(t *testing.T) {
 		Username: "user",
 		Password: "pass",
 	}
-	_, err = s.AddNasShare(req)
+	_, err = s.AddNasShare(context.Background(), req)
 	if err != nil {
 		t.Fatalf("AddNasShare failed: %v", err)
 	}
@@ -551,7 +600,7 @@ func TestService_MountAllShares_SingleShare(t *testing.T) {
 	// Reset mounter state to simulate unmounted
 	mounter.MountedPaths = make(map[string]bool)
 
-	results := s.MountAllShares()
+	results := s.MountAllShares(context.Background())
 	if len(results) != 1 {
 		t.Fatalf("MountAllShares returned %d results, want 1", len(results))
 	}
@@ -584,13 +633,13 @@ func TestService_MountAllShares_AlreadyMounted(t *testing.T) {
 		Path:   "Music",
 		FSType: "cifs",
 	}
-	_, err = s.AddNasShare(req)
+	_, err = s.AddNasShare(context.Background(), req)
 	if err != nil {
 		t.Fatalf("AddNasShare failed: %v", err)
 	}
 
 	// MountAllShares should detect it's already mounted
-	results := s.MountAllShares()
+	results := s.MountAllShares(context.Background())
 	if len(results) != 1 {
 		t.Fatalf("MountAllShares returned %d results, want 1", len(results))
 	}
@@ -621,7 +670,7 @@ func TestService_MountAllShares_MultipleShares(t *testing.T) {
 	}
 
 	for _, req := range shares {
-		_, err = s.AddNasShare(req)
+		_, err = s.AddNasShare(context.Background(), req)
 		if err != nil {
 			t.Fatalf("AddNasShare failed: %v", err)
 		}
@@ -630,7 +679,7 @@ func TestService_MountAllShares_MultipleShares(t *testing.T) {
 	// Reset mounter to simulate all unmounted
 	mounter.MountedPaths = make(map[string]bool)
 
-	results := s.MountAllShares()
+	results := s.MountAllShares(context.Background())
 	if len(results) != 3 {
 		t.Fatalf("MountAllShares returned %d results, want 3", len(results))
 	}
@@ -664,7 +713,7 @@ func TestService_MountAllShares_MountFailure(t *testing.T) {
 		Path:   "Music",
 		FSType: "cifs",
 	}
-	_, err = s.AddNasShare(req)
+	_, err = s.AddNasShare(context.Background(), req)
 	if err != nil {
 		t.Fatalf("AddNasShare failed: %v", err)
 	}
@@ -673,7 +722,7 @@ func TestService_MountAllShares_MountFailure(t *testing.T) {
 	mounter.MountedPaths = make(map[string]bool)
 	mounter.MountError = fmt.Errorf("mount failed: connection refused")
 
-	results := s.MountAllShares()
+	results := s.MountAllShares(context.Background())
 	if len(results) != 1 {
 		t.Fatalf("MountAllShares returned %d results, want 1", len(results))
 	}
@@ -704,7 +753,7 @@ func TestService_GetUnmountedShares_AllMounted(t *testing.T) {
 	}
 
 	// Add a share (it gets mounted by AddNasShare)
-	_, err = s.AddNasShare(AddNasShareRequest{
+	_, err = s.AddNasShare(context.Background(), AddNasShareRequest{
 		Name: "Share1", IP: "192.168.1.100", Path: "Music", FSType: "cifs",
 	})
 	if err != nil {
@@ -728,10 +777,10 @@ func TestService_GetUnmountedShares_SomeUnmounted(t *testing.T) {
 	}
 
 	// Add two shares
-	_, _ = s.AddNasShare(AddNasShareRequest{
+	_, _ = s.AddNasShare(context.Background(), AddNasShareRequest{
 		Name: "Share1", IP: "192.168.1.100", Path: "Music1", FSType: "cifs",
 	})
-	_, _ = s.AddNasShare(AddNasShareRequest{
+	_, _ = s.AddNasShare(context.Background(), AddNasShareRequest{
 		Name: "Share2", IP: "192.168.1.101", Path: "Music2", FSType: "cifs",
 	})
 
@@ -765,14 +814,14 @@ func TestService_RemountUnmountedShares_Success(t *testing.T) {
 		t.Fatalf("NewService failed: %v", err)
 	}
 
-	_, _ = s.AddNasShare(AddNasShareRequest{
+	_, _ = s.AddNasShare(context.Background(), AddNasShareRequest{
 		Name: "Share1", IP: "192.168.1.100", Path: "Music", FSType: "cifs",
 	})
 
 	// Simulate unmounted
 	mounter.MountedPaths = make(map[string]bool)
 
-	mounted := s.RemountUnmountedShares()
+	mounted := s.RemountUnmountedShares(context.Background())
 	if mounted != 1 {
 		t.Errorf("RemountUnmountedShares returned %d, want 1", mounted)
 	}
@@ -788,7 +837,7 @@ func TestService_RemountUnmountedShares_Failure(t *testing.T) {
 		t.Fatalf("NewService failed: %v", err)
 	}
 
-	_, _ = s.AddNasShare(AddNasShareRequest{
+	_, _ = s.AddNasShare(context.Background(), AddNasShareRequest{
 		Name: "Share1", IP: "192.168.1.100", Path: "Music", FSType: "cifs",
 	})
 
@@ -796,7 +845,7 @@ func TestService_RemountUnmountedShares_Failure(t *testing.T) {
 	mounter.MountedPaths = make(map[string]bool)
 	mounter.MountError = fmt.Errorf("connection refused")
 
-	mounted := s.RemountUnmountedShares()
+	mounted := s.RemountUnmountedShares(context.Background())
 	if mounted != 0 {
 		t.Errorf("RemountUnmountedShares returned %d, want 0", mounted)
 	}
@@ -816,7 +865,7 @@ func TestService_MountAllSharesWithRetry_AllMountedFirstTry(t *testing.T) {
 		t.Fatalf("NewService failed: %v", err)
 	}
 
-	_, _ = s.AddNasShare(AddNasShareRequest{
+	_, _ = s.AddNasShare(context.Background(), AddNasShareRequest{
 		Name: "Share1", IP: "192.168.1.100", Path: "Music", FSType: "cifs",
 	})
 
@@ -842,18 +891,19 @@ func TestService_MountAllSharesWithRetry_SucceedsOnRetry(t *testing.T) {
 		t.Fatalf("NewService failed: %v", err)
 	}
 
-	_, _ = s.AddNasShare(AddNasShareRequest{
+	_, _ = s.AddNasShare(context.Background(), AddNasShareRequest{
 		Name: "Share1", IP: "192.168.1.100", Path: "Music", FSType: "cifs",
 	})
 
 	// Simulate unmounted + mount fails initially
 	mounter.MountedPaths = make(map[string]bool)
-	mounter.MountError = fmt.Errorf("connection refused")
+	mounter.SetMountError(fmt.Errorf("connection refused"))
 
-	// Clear error after a short delay (simulate NAS becoming available)
+	// Clear error after a short delay (simulate NAS becoming available).
+	// Use the locked setter so -race stays clean.
 	go func() {
 		time.Sleep(15 * time.Millisecond)
-		mounter.MountError = nil
+		mounter.SetMountError(nil)
 	}()
 
 	ctx := context.Background()
@@ -881,7 +931,7 @@ func TestService_MountAllSharesWithRetry_CancelledByContext(t *testing.T) {
 		t.Fatalf("NewService failed: %v", err)
 	}
 
-	_, _ = s.AddNasShare(AddNasShareRequest{
+	_, _ = s.AddNasShare(context.Background(), AddNasShareRequest{
 		Name: "Share1", IP: "192.168.1.100", Path: "Music", FSType: "cifs",
 	})
 

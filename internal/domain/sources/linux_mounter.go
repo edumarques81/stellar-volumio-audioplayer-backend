@@ -2,6 +2,8 @@ package sources
 
 import (
 	"bufio"
+	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -11,6 +13,15 @@ import (
 	"github.com/rs/zerolog/log"
 )
 
+// mountCommand is a package-level indirection over exec.CommandContext so
+// tests can substitute a stub that simulates a hanging mount/umount without
+// invoking sudo or spawning real binaries. Not exported.
+//
+// Production behaviour: when the supplied ctx fires, the wrapped *exec.Cmd is
+// killed via SIGKILL by the os/exec package, freeing the handler goroutine
+// (the live failure mode when `mount -t nfs` is pointed at a non-NFS host).
+var mountCommand = exec.CommandContext
+
 // LinuxMounter implements the Mounter interface using Linux mount commands.
 type LinuxMounter struct{}
 
@@ -19,20 +30,21 @@ func NewLinuxMounter() *LinuxMounter {
 	return &LinuxMounter{}
 }
 
-// Mount mounts a NAS share using the appropriate protocol.
-func (m *LinuxMounter) Mount(share *NasShare) error {
+// Mount mounts a NAS share using the appropriate protocol. The ctx bounds the
+// underlying mount syscall — when it fires, the mount process is killed.
+func (m *LinuxMounter) Mount(ctx context.Context, share *NasShare) error {
 	switch share.FSType {
 	case "cifs":
-		return m.mountCifs(share)
+		return m.mountCifs(ctx, share)
 	case "nfs":
-		return m.mountNfs(share)
+		return m.mountNfs(ctx, share)
 	default:
 		return fmt.Errorf("unsupported filesystem type: %s", share.FSType)
 	}
 }
 
 // mountCifs mounts a CIFS/SMB share.
-func (m *LinuxMounter) mountCifs(share *NasShare) error {
+func (m *LinuxMounter) mountCifs(ctx context.Context, share *NasShare) error {
 	// Build the source path: //IP/SharePath
 	source := fmt.Sprintf("//%s/%s", share.IP, share.Path)
 
@@ -63,10 +75,18 @@ func (m *LinuxMounter) mountCifs(share *NasShare) error {
 
 	optStr := strings.Join(opts, ",")
 
-	// Execute mount command with sudo
-	cmd := exec.Command("sudo", "mount", "-t", "cifs", "-o", optStr, source, share.MountPoint)
+	// Execute mount command with sudo, bounded by ctx so a hung kernel-level
+	// mount syscall can be killed off when the caller's deadline fires.
+	cmd := mountCommand(ctx, "sudo", "mount", "-t", "cifs", "-o", optStr, source, share.MountPoint)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
+		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			log.Warn().
+				Str("source", source).
+				Str("mountPoint", share.MountPoint).
+				Msg("CIFS mount timed out")
+			return fmt.Errorf("mount timed out: %w", ctx.Err())
+		}
 		log.Error().
 			Err(err).
 			Str("source", source).
@@ -86,7 +106,7 @@ func (m *LinuxMounter) mountCifs(share *NasShare) error {
 }
 
 // mountNfs mounts an NFS share.
-func (m *LinuxMounter) mountNfs(share *NasShare) error {
+func (m *LinuxMounter) mountNfs(ctx context.Context, share *NasShare) error {
 	// Build the source path: IP:/path
 	source := fmt.Sprintf("%s:%s", share.IP, share.Path)
 
@@ -104,10 +124,18 @@ func (m *LinuxMounter) mountNfs(share *NasShare) error {
 
 	optStr := strings.Join(opts, ",")
 
-	// Execute mount command with sudo
-	cmd := exec.Command("sudo", "mount", "-t", "nfs", "-o", optStr, source, share.MountPoint)
+	// Execute mount command with sudo, bounded by ctx. NFS against a dead /
+	// non-NFS host is the original reason this context plumbing exists.
+	cmd := mountCommand(ctx, "sudo", "mount", "-t", "nfs", "-o", optStr, source, share.MountPoint)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
+		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			log.Warn().
+				Str("source", source).
+				Str("mountPoint", share.MountPoint).
+				Msg("NFS mount timed out")
+			return fmt.Errorf("mount timed out: %w", ctx.Err())
+		}
 		log.Error().
 			Err(err).
 			Str("source", source).
@@ -126,11 +154,17 @@ func (m *LinuxMounter) mountNfs(share *NasShare) error {
 	return nil
 }
 
-// Unmount unmounts a filesystem.
-func (m *LinuxMounter) Unmount(mountPoint string) error {
-	cmd := exec.Command("sudo", "umount", mountPoint)
+// Unmount unmounts a filesystem. The ctx bounds the underlying umount call.
+func (m *LinuxMounter) Unmount(ctx context.Context, mountPoint string) error {
+	cmd := mountCommand(ctx, "sudo", "umount", mountPoint)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
+		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			log.Warn().
+				Str("mountPoint", mountPoint).
+				Msg("Unmount timed out")
+			return fmt.Errorf("unmount timed out: %w", ctx.Err())
+		}
 		log.Error().
 			Err(err).
 			Str("mountPoint", mountPoint).

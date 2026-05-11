@@ -840,7 +840,13 @@ func (s *Server) setupHandlers() {
 				Options:  getString(data, "options"),
 			}
 
-			result, err := s.sourcesService.AddNasShare(req)
+			// Bound the mount syscall at 6s. The live failure mode is
+			// `mount -t nfs` against a non-NFS host hanging the handler
+			// goroutine indefinitely; this guarantees the user-visible
+			// pushNasShareResult always fires.
+			mountCtx, cancel := context.WithTimeout(context.Background(), 6*time.Second)
+			result, err := s.sourcesService.AddNasShare(mountCtx, req)
+			cancel()
 			if err != nil {
 				log.Error().Err(err).Msg("Failed to add NAS share")
 				client.Emit("pushNasShareResult", sources.SourceResult{
@@ -898,7 +904,9 @@ func (s *Server) setupHandlers() {
 				return
 			}
 
-			result, err := s.sourcesService.DeleteNasShare(shareID)
+			deleteCtx, cancel := context.WithTimeout(context.Background(), 6*time.Second)
+			result, err := s.sourcesService.DeleteNasShare(deleteCtx, shareID)
+			cancel()
 			if err != nil {
 				log.Error().Err(err).Msg("Failed to delete NAS share")
 				client.Emit("pushNasShareResult", sources.SourceResult{
@@ -946,7 +954,9 @@ func (s *Server) setupHandlers() {
 				return
 			}
 
-			result, err := s.sourcesService.MountNasShare(shareID)
+			mountCtx, cancel := context.WithTimeout(context.Background(), 6*time.Second)
+			result, err := s.sourcesService.MountNasShare(mountCtx, shareID)
+			cancel()
 			if err != nil {
 				log.Error().Err(err).Msg("Failed to mount NAS share")
 				client.Emit("pushNasShareResult", sources.SourceResult{
@@ -1086,7 +1096,9 @@ func (s *Server) setupHandlers() {
 				return
 			}
 
-			result, err := s.sourcesService.UnmountNasShare(shareID)
+			unmountCtx, cancel := context.WithTimeout(context.Background(), 6*time.Second)
+			result, err := s.sourcesService.UnmountNasShare(unmountCtx, shareID)
+			cancel()
 			if err != nil {
 				log.Error().Err(err).Msg("Failed to unmount NAS share")
 				client.Emit("pushNasShareResult", sources.SourceResult{

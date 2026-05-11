@@ -104,8 +104,13 @@ func main() {
 		sourcesService.SetDiscoverer(sources.NewLinuxDiscoverer())
 		log.Info().Str("config", sourcesConfigPath).Msg("Sources service initialized with NAS discovery")
 
-		// Auto-mount all configured NAS shares on startup
-		mountResults := sourcesService.MountAllShares()
+		// Auto-mount all configured NAS shares on startup. The 2-minute
+		// budget bounds the entire pass; per-share mount syscalls get a
+		// 30s derived deadline internally so one dead host cannot stall
+		// the loop.
+		startupMountCtx, startupMountCancel := context.WithTimeout(context.Background(), 2*time.Minute)
+		mountResults := sourcesService.MountAllShares(startupMountCtx)
+		startupMountCancel()
 		mountedCount := 0
 		unmountedCount := 0
 		for _, result := range mountResults {

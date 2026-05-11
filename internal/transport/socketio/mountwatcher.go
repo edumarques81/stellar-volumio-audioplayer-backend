@@ -32,7 +32,11 @@ func (s *Server) StartMountWatcher(ctx context.Context) {
 				}
 
 				log.Info().Int("unmounted", len(unmounted)).Msg("Mount watcher detected unmounted shares")
-				mounted := s.sourcesService.RemountUnmountedShares()
+				// Pass the watcher's lifecycle ctx down. The service-layer
+				// gives each per-share mount its own derived deadline
+				// (backgroundMountTimeout = 30s) so one dead share cannot
+				// stall the watcher loop.
+				mounted := s.sourcesService.RemountUnmountedShares(ctx)
 
 				if mounted > 0 {
 					log.Info().Int("remounted", mounted).Msg("Mount watcher remounted shares")
