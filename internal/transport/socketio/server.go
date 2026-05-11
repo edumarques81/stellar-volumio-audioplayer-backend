@@ -1134,10 +1134,15 @@ func (s *Server) setupHandlers() {
 			log.Info().Bool("success", result.Success).Msg("pushNasShareResult")
 			client.Emit("pushNasShareResult", result)
 
-			// Push updated list
+			// Push updated list AND trigger MPD database update so newly
+			// missing media doesn't linger in the browse tree. Mirrors
+			// add/mount handlers' MPD-update parity.
 			if result.Success {
 				shares, _ := s.sourcesService.ListNasShares()
 				s.io.Emit("pushListNasShares", shares)
+				if _, err := s.mpdClient.Update(""); err != nil {
+					log.Warn().Err(err).Msg("Failed to trigger MPD update after unmounting NAS share")
+				}
 			}
 		})
 
