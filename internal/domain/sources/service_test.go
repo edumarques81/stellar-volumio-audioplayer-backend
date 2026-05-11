@@ -1000,3 +1000,257 @@ func (m *MockDiscoverer) BrowseShares(_ context.Context, host, username, passwor
 
 	return shares, nil
 }
+
+// ============================================================
+// UserUnmounted intent tests
+// ============================================================
+
+// readConfigUserUnmounted loads the persisted config and returns the
+// UserUnmounted flag for the named share. Tests use this to assert that
+// the flag is not just held in memory but actually written through to
+// disk so the intent survives a backend restart.
+func readConfigUserUnmounted(t *testing.T, configPath, shareName string) bool {
+	t.Helper()
+	s, err := NewService(configPath, NewMockMounter())
+	if err != nil {
+		t.Fatalf("readConfigUserUnmounted: NewService: %v", err)
+	}
+	for _, cfg := range s.config.NasShares {
+		if cfg.Name == shareName {
+			return cfg.UserUnmounted
+		}
+	}
+	t.Fatalf("readConfigUserUnmounted: share %q not found", shareName)
+	return false
+}
+
+// TestUnmountNasShare_SetsUserUnmounted verifies the explicit unmount path
+// flips the persistent flag so the mount-watcher leaves it alone.
+func TestUnmountNasShare_SetsUserUnmounted(t *testing.T) {
+	tmpDir := t.TempDir()
+	configPath := filepath.Join(tmpDir, "sources.json")
+
+	mounter := NewMockMounter()
+	s, err := NewService(configPath, mounter)
+	if err != nil {
+		t.Fatalf("NewService failed: %v", err)
+	}
+
+	_, err = s.AddNasShare(context.Background(), AddNasShareRequest{
+		Name: "M2Share", IP: "192.168.1.50", Path: "Music", FSType: "cifs",
+	})
+	if err != nil {
+		t.Fatalf("AddNasShare failed: %v", err)
+	}
+
+	shares, _ := s.ListNasShares()
+	if len(shares) != 1 {
+		t.Fatalf("ListNasShares: got %d, want 1", len(shares))
+	}
+	shareID := shares[0].ID
+
+	result, err := s.UnmountNasShare(context.Background(), shareID)
+	if err != nil {
+		t.Fatalf("UnmountNasShare failed: %v", err)
+	}
+	if !result.Success {
+		t.Fatalf("UnmountNasShare returned success=false: %s", result.Error)
+	}
+
+	// In-memory flag set
+	if !s.config.NasShares[shareID].UserUnmounted {
+		t.Error("expected UserUnmounted=true in memory after Unmount")
+	}
+
+	// Persisted to disk
+	if !readConfigUserUnmounted(t, configPath, "M2Share") {
+		t.Error("expected UserUnmounted=true persisted to disk after Unmount")
+	}
+}
+
+// TestMountNasShare_ClearsUserUnmounted verifies that re-mounting a
+// previously user-unmounted share clears the intent flag and persists.
+func TestMountNasShare_ClearsUserUnmounted(t *testing.T) {
+	tmpDir := t.TempDir()
+	configPath := filepath.Join(tmpDir, "sources.json")
+
+	mounter := NewMockMounter()
+	s, err := NewService(configPath, mounter)
+	if err != nil {
+		t.Fatalf("NewService failed: %v", err)
+	}
+
+	_, err = s.AddNasShare(context.Background(), AddNasShareRequest{
+		Name: "M2Reset", IP: "192.168.1.51", Path: "Music", FSType: "cifs",
+	})
+	if err != nil {
+		t.Fatalf("AddNasShare failed: %v", err)
+	}
+
+	shares, _ := s.ListNasShares()
+	shareID := shares[0].ID
+
+	// Unmount sets the flag
+	if _, err := s.UnmountNasShare(context.Background(), shareID); err != nil {
+		t.Fatalf("UnmountNasShare failed: %v", err)
+	}
+	if !s.config.NasShares[shareID].UserUnmounted {
+		t.Fatal("precondition: expected UserUnmounted=true after unmount")
+	}
+
+	// Re-mount clears it
+	result, err := s.MountNasShare(context.Background(), shareID)
+	if err != nil {
+		t.Fatalf("MountNasShare failed: %v", err)
+	}
+	if !result.Success {
+		t.Fatalf("MountNasShare returned success=false: %s", result.Error)
+	}
+
+	if s.config.NasShares[shareID].UserUnmounted {
+		t.Error("expected UserUnmounted=false in memory after re-mount")
+	}
+	if readConfigUserUnmounted(t, configPath, "M2Reset") {
+		t.Error("expected UserUnmounted=false persisted to disk after re-mount")
+	}
+}
+
+// TestGetUnmountedShares_SkipsUserUnmounted verifies the watcher-driver
+// helper excludes shares the user has explicitly unmounted. Without this,
+// the 60s remount loop silently undoes user intent.
+func TestGetUnmountedShares_SkipsUserUnmounted(t *testing.T) {
+	tmpDir := t.TempDir()
+	configPath := filepath.Join(tmpDir, "sources.json")
+
+	mounter := NewMockMounter()
+	s, err := NewService(configPath, mounter)
+	if err != nil {
+		t.Fatalf("NewService failed: %v", err)
+	}
+
+	// Two shares, both currently mounted via AddNasShare
+	_, _ = s.AddNasShare(context.Background(), AddNasShareRequest{
+		Name: "Auto", IP: "192.168.1.60", Path: "Music", FSType: "cifs",
+	})
+	_, _ = s.AddNasShare(context.Background(), AddNasShareRequest{
+		Name: "Manual", IP: "192.168.1.61", Path: "Music", FSType: "cifs",
+	})
+
+	// Find the "Manual" share's ID
+	var manualID string
+	for _, cfg := range s.config.NasShares {
+		if cfg.Name == "Manual" {
+			manualID = cfg.ID
+			break
+		}
+	}
+	if manualID == "" {
+		t.Fatal("Manual share not found")
+	}
+
+	// User unmounts "Manual"
+	if _, err := s.UnmountNasShare(context.Background(), manualID); err != nil {
+		t.Fatalf("UnmountNasShare failed: %v", err)
+	}
+
+	// Simulate the "Auto" share losing its mount (e.g., network blip)
+	for _, cfg := range s.config.NasShares {
+		if cfg.Name == "Auto" {
+			mountPoint := filepath.Join(NasMountBase, sanitizeName(cfg.Name))
+			delete(mounter.MountedPaths, mountPoint)
+		}
+	}
+
+	unmounted := s.GetUnmountedShares()
+	// Auto should be in the list (it dropped); Manual must NOT be
+	// (user intent must persist).
+	gotAuto := false
+	gotManual := false
+	for _, id := range unmounted {
+		if id == manualID {
+			gotManual = true
+		}
+		for _, cfg := range s.config.NasShares {
+			if cfg.ID == id && cfg.Name == "Auto" {
+				gotAuto = true
+			}
+		}
+	}
+	if !gotAuto {
+		t.Error("expected Auto in GetUnmountedShares (it lost its mount)")
+	}
+	if gotManual {
+		t.Error("Manual must NOT be in GetUnmountedShares (user-unmounted)")
+	}
+}
+
+// TestMountAllShares_SkipsUserUnmounted verifies the startup auto-mount
+// path also honors UserUnmounted so user intent survives a reboot.
+func TestMountAllShares_SkipsUserUnmounted(t *testing.T) {
+	tmpDir := t.TempDir()
+	configPath := filepath.Join(tmpDir, "sources.json")
+
+	mounter := NewMockMounter()
+	s, err := NewService(configPath, mounter)
+	if err != nil {
+		t.Fatalf("NewService failed: %v", err)
+	}
+
+	_, _ = s.AddNasShare(context.Background(), AddNasShareRequest{
+		Name: "Sticky", IP: "192.168.1.70", Path: "Music", FSType: "cifs",
+	})
+	shares, _ := s.ListNasShares()
+	shareID := shares[0].ID
+
+	// User unmounts the share, then simulate restart by zeroing the
+	// mounter's view of the kernel state.
+	if _, err := s.UnmountNasShare(context.Background(), shareID); err != nil {
+		t.Fatalf("UnmountNasShare failed: %v", err)
+	}
+	mounter.MountedPaths = make(map[string]bool)
+	mounter.MountCalled = false
+
+	results := s.MountAllShares(context.Background())
+
+	if len(results) != 1 {
+		t.Fatalf("MountAllShares: got %d results, want 1", len(results))
+	}
+	if results[0].Mounted {
+		t.Error("user-unmounted share must NOT be mounted by MountAllShares")
+	}
+	if results[0].Message == "" {
+		t.Error("expected a skip message in the result")
+	}
+	if mounter.MountCalled {
+		t.Error("Mounter.Mount must NOT be called for a user-unmounted share")
+	}
+}
+
+// TestMountAllShares_StillListsAllShares verifies that a user-unmounted
+// share remains visible in ListNasShares — the flag must NOT hide the
+// share from the UI.
+func TestMountAllShares_StillListsAllShares(t *testing.T) {
+	tmpDir := t.TempDir()
+	configPath := filepath.Join(tmpDir, "sources.json")
+
+	mounter := NewMockMounter()
+	s, err := NewService(configPath, mounter)
+	if err != nil {
+		t.Fatalf("NewService failed: %v", err)
+	}
+
+	_, _ = s.AddNasShare(context.Background(), AddNasShareRequest{
+		Name: "Visible", IP: "192.168.1.71", Path: "Music", FSType: "cifs",
+	})
+	shares, _ := s.ListNasShares()
+	shareID := shares[0].ID
+
+	if _, err := s.UnmountNasShare(context.Background(), shareID); err != nil {
+		t.Fatalf("UnmountNasShare failed: %v", err)
+	}
+
+	shares, _ = s.ListNasShares()
+	if len(shares) != 1 {
+		t.Errorf("ListNasShares: got %d, want 1 (user-unmounted shares must still be visible)", len(shares))
+	}
+}

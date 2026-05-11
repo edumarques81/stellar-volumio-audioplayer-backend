@@ -88,4 +88,11 @@ type NasShareConfig struct {
 	Username          string `json:"username,omitempty"`
 	EncryptedPassword string `json:"password,omitempty"` // Stored encrypted
 	Options           string `json:"options,omitempty"`
+	// UserUnmounted is true when the user explicitly unmounted this share via
+	// the UI. The periodic mount-watcher skips shares with this flag set so
+	// it does not silently undo user intent. Cleared on any successful
+	// MountNasShare. Persisted via saveConfig so the intent survives reboot.
+	// omitempty keeps legacy configs (without this field) deserializing to
+	// false, which is the correct legacy behaviour.
+	UserUnmounted bool `json:"userUnmounted,omitempty"`
 }

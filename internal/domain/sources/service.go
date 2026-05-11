@@ -110,13 +110,14 @@ func (s *Service) AddNasShare(ctx context.Context, req AddNasShareRequest) (*Sou
 
 	// Create share config
 	shareConfig := &NasShareConfig{
-		ID:       id,
-		Name:     req.Name,
-		IP:       req.IP,
-		Path:     req.Path,
-		FSType:   req.FSType,
-		Username: req.Username,
-		Options:  req.Options,
+		ID:            id,
+		Name:          req.Name,
+		IP:            req.IP,
+		Path:          req.Path,
+		FSType:        req.FSType,
+		Username:      req.Username,
+		Options:       req.Options,
+		UserUnmounted: false, // freshly added shares are mount-eligible
 	}
 
 	// Encrypt password if provided
@@ -317,6 +318,14 @@ func (s *Service) MountNasShare(ctx context.Context, id string) (*SourceResult, 
 
 	// Check if already mounted
 	if s.mounter.IsMounted(mountPoint) {
+		// Already mounted is success; also reset the user-unmounted intent
+		// so the watcher resumes managing it.
+		if cfg.UserUnmounted {
+			cfg.UserUnmounted = false
+			if err := s.saveConfig(); err != nil {
+				log.Warn().Err(err).Str("id", id).Msg("Failed to persist UserUnmounted=false")
+			}
+		}
 		return &SourceResult{
 			Success: true,
 			Message: "share is already mounted",
@@ -352,6 +361,15 @@ func (s *Service) MountNasShare(ctx context.Context, id string) (*SourceResult, 
 		}, nil
 	}
 
+	// Successful mount clears any prior user-unmount intent so the watcher
+	// resumes auto-remount for this share on future stalls.
+	if cfg.UserUnmounted {
+		cfg.UserUnmounted = false
+		if err := s.saveConfig(); err != nil {
+			log.Warn().Err(err).Str("id", id).Msg("Failed to persist UserUnmounted=false")
+		}
+	}
+
 	return &SourceResult{
 		Success: true,
 		Message: fmt.Sprintf("NAS share '%s' mounted successfully", cfg.Name),
@@ -382,6 +400,14 @@ func (s *Service) UnmountNasShare(ctx context.Context, id string) (*SourceResult
 	mountPoint := filepath.Join(NasMountBase, sanitizeName(cfg.Name))
 
 	if !s.mounter.IsMounted(mountPoint) {
+		// Already unmounted at the kernel level; still record user intent
+		// so the watcher leaves it alone going forward.
+		if !cfg.UserUnmounted {
+			cfg.UserUnmounted = true
+			if err := s.saveConfig(); err != nil {
+				log.Warn().Err(err).Str("id", id).Msg("Failed to persist UserUnmounted=true")
+			}
+		}
 		return &SourceResult{
 			Success: true,
 			Message: "share is not mounted",
@@ -393,6 +419,14 @@ func (s *Service) UnmountNasShare(ctx context.Context, id string) (*SourceResult
 			Success: false,
 			Error:   fmt.Sprintf("failed to unmount: %v", err),
 		}, nil
+	}
+
+	// Record explicit user-unmount intent before returning. Persistence
+	// failure is treated as a warning — the unmount itself succeeded and
+	// the share's behaviour in-memory reflects the user's wish.
+	cfg.UserUnmounted = true
+	if err := s.saveConfig(); err != nil {
+		log.Warn().Err(err).Str("id", id).Msg("Failed to persist UserUnmounted=true")
 	}
 
 	return &SourceResult{
@@ -483,9 +517,11 @@ func (s *Service) DiscoverNasDevices(ctx context.Context) (*DiscoverResult, erro
 const backgroundMountTimeout = 30 * time.Second
 
 // MountAllShares attempts to mount all configured NAS shares.
-// Returns a summary of mount results for each share. The ctx bounds the
-// overall operation; each per-share mount call gets its own derived timeout
-// from backgroundMountTimeout so one dead host cannot stall the loop.
+// Returns a summary of mount results for each share. Shares the user has
+// explicitly unmounted (UserUnmounted=true) are skipped so user intent
+// persists across reboot. The ctx bounds the overall operation; each
+// per-share mount call gets its own derived timeout from
+// backgroundMountTimeout.
 func (s *Service) MountAllShares(ctx context.Context) []MountResult {
 	s.mu.RLock()
 	shares := make([]*NasShareConfig, 0, len(s.config.NasShares))
@@ -500,6 +536,16 @@ func (s *Service) MountAllShares(ctx context.Context) []MountResult {
 		result := MountResult{
 			ShareID:   cfg.ID,
 			ShareName: cfg.Name,
+		}
+
+		// Skip shares the user explicitly unmounted; their intent must
+		// persist across reboot.
+		if cfg.UserUnmounted {
+			result.Success = true
+			result.Message = "skipped: user-unmounted"
+			result.Mounted = false
+			results = append(results, result)
+			continue
 		}
 
 		mountPoint := filepath.Join(NasMountBase, sanitizeName(cfg.Name))
@@ -534,13 +580,19 @@ func (s *Service) MountAllShares(ctx context.Context) []MountResult {
 	return results
 }
 
-// GetUnmountedShares returns the IDs of configured shares that are not currently mounted.
+// GetUnmountedShares returns the IDs of configured shares that are not currently
+// mounted AND have not been explicitly unmounted by the user. The mount-watcher
+// uses this to decide what to remount, so honoring UserUnmounted here is
+// sufficient to keep user intent sticky across the periodic loop.
 func (s *Service) GetUnmountedShares() []string {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
 	var unmounted []string
 	for _, cfg := range s.config.NasShares {
+		if cfg.UserUnmounted {
+			continue
+		}
 		mountPoint := filepath.Join(NasMountBase, sanitizeName(cfg.Name))
 		if s.mounter == nil || !s.mounter.IsMounted(mountPoint) {
 			unmounted = append(unmounted, cfg.ID)
