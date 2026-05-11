@@ -803,7 +803,14 @@ func (s *Server) setupHandlers() {
 
 		// Add a new NAS share
 		client.On("addNasShare", func(args ...any) {
-			log.Info().Str("id", clientID).Interface("args", args).Msg("addNasShare requested")
+			// Log only the first arg (data map); Socket.IO appends the ack
+			// callback as the last arg, which zerolog can't marshal and
+			// would emit as "marshaling error: ...".
+			var data any
+			if len(args) > 0 {
+				data = args[0]
+			}
+			log.Info().Str("id", clientID).Interface("data", data).Msg("addNasShare requested")
 			if s.sourcesService == nil {
 				client.Emit("pushNasShareResult", sources.SourceResult{
 					Success: false,
@@ -821,7 +828,7 @@ func (s *Server) setupHandlers() {
 			}
 
 			// Parse the request
-			data, ok := args[0].(map[string]interface{})
+			dataMap, ok := args[0].(map[string]interface{})
 			if !ok {
 				client.Emit("pushNasShareResult", sources.SourceResult{
 					Success: false,
@@ -831,13 +838,13 @@ func (s *Server) setupHandlers() {
 			}
 
 			req := sources.AddNasShareRequest{
-				Name:     getString(data, "name"),
-				IP:       getString(data, "ip"),
-				Path:     getString(data, "path"),
-				FSType:   getString(data, "fstype"),
-				Username: getString(data, "username"),
-				Password: getString(data, "password"),
-				Options:  getString(data, "options"),
+				Name:     getString(dataMap, "name"),
+				IP:       getString(dataMap, "ip"),
+				Path:     getString(dataMap, "path"),
+				FSType:   getString(dataMap, "fstype"),
+				Username: getString(dataMap, "username"),
+				Password: getString(dataMap, "password"),
+				Options:  getString(dataMap, "options"),
 			}
 
 			// Bound the mount syscall at 6s. The live failure mode is
@@ -872,7 +879,11 @@ func (s *Server) setupHandlers() {
 
 		// Delete a NAS share
 		client.On("deleteNasShare", func(args ...any) {
-			log.Info().Str("id", clientID).Interface("args", args).Msg("deleteNasShare requested")
+			var data any
+			if len(args) > 0 {
+				data = args[0]
+			}
+			log.Info().Str("id", clientID).Interface("data", data).Msg("deleteNasShare requested")
 			if s.sourcesService == nil {
 				client.Emit("pushNasShareResult", sources.SourceResult{
 					Success: false,
@@ -890,8 +901,8 @@ func (s *Server) setupHandlers() {
 			}
 
 			var shareID string
-			if data, ok := args[0].(map[string]interface{}); ok {
-				shareID = getString(data, "id")
+			if dataMap, ok := args[0].(map[string]interface{}); ok {
+				shareID = getString(dataMap, "id")
 			} else if id, ok := args[0].(string); ok {
 				shareID = id
 			}
@@ -928,7 +939,11 @@ func (s *Server) setupHandlers() {
 
 		// Mount a NAS share
 		client.On("mountNasShare", func(args ...any) {
-			log.Info().Str("id", clientID).Interface("args", args).Msg("mountNasShare requested")
+			var data any
+			if len(args) > 0 {
+				data = args[0]
+			}
+			log.Info().Str("id", clientID).Interface("data", data).Msg("mountNasShare requested")
 			if s.sourcesService == nil {
 				client.Emit("pushNasShareResult", sources.SourceResult{
 					Success: false,
@@ -939,8 +954,8 @@ func (s *Server) setupHandlers() {
 
 			var shareID string
 			if len(args) > 0 {
-				if data, ok := args[0].(map[string]interface{}); ok {
-					shareID = getString(data, "id")
+				if dataMap, ok := args[0].(map[string]interface{}); ok {
+					shareID = getString(dataMap, "id")
 				} else if id, ok := args[0].(string); ok {
 					shareID = id
 				}
@@ -1011,7 +1026,11 @@ func (s *Server) setupHandlers() {
 
 		// Browse shares on a NAS device
 		client.On("browseNasShares", func(args ...any) {
-			log.Info().Str("id", clientID).Interface("args", args).Msg("browseNasShares requested")
+			var logData any
+			if len(args) > 0 {
+				logData = args[0]
+			}
+			log.Info().Str("id", clientID).Interface("data", logData).Msg("browseNasShares requested")
 			if s.sourcesService == nil {
 				client.Emit("pushBrowseNasShares", sources.BrowseSharesResult{
 					Shares: []sources.ShareInfo{},
@@ -1070,7 +1089,11 @@ func (s *Server) setupHandlers() {
 
 		// Unmount a NAS share
 		client.On("unmountNasShare", func(args ...any) {
-			log.Info().Str("id", clientID).Interface("args", args).Msg("unmountNasShare requested")
+			var logData any
+			if len(args) > 0 {
+				logData = args[0]
+			}
+			log.Info().Str("id", clientID).Interface("data", logData).Msg("unmountNasShare requested")
 			if s.sourcesService == nil {
 				client.Emit("pushNasShareResult", sources.SourceResult{
 					Success: false,
