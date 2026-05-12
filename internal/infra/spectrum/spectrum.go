@@ -277,8 +277,15 @@ func (s *Streamer) Process(left, right []float64) SpectrumData {
 	specL := fft.FFTReal(winL)
 	specR := fft.FFTReal(winR)
 
-	binsL, peakL, rmsL := s.computeChannelBins(specL)
-	binsR, peakR, rmsR := s.computeChannelBins(specR)
+	binsL, peakL := s.computeChannelBins(specL)
+	binsR, peakR := s.computeChannelBins(specR)
+
+	// RMS must reflect actual signal level, not spectral shape. Compute it
+	// in the time domain from the (normalised, un-windowed) PCM samples;
+	// the bin-derived RMS we used to return was always relative to the
+	// loudest bin and pegged ~0.4 regardless of input level.
+	rmsL := timeDomainRMS(left)
+	rmsR := timeDomainRMS(right)
 
 	// Transitional mono fallback for legacy consumers.
 	mono := make([]float64, s.cfg.NumBins)
@@ -307,9 +314,11 @@ func (s *Streamer) Process(left, right []float64) SpectrumData {
 }
 
 // computeChannelBins converts raw FFT complex output for a single channel
-// into logarithmically-grouped frequency bins normalised 0.0–1.0, plus
-// per-channel peak and RMS.
-func (s *Streamer) computeChannelBins(spectrum []complex128) (bins []float64, peak, rms float64) {
+// into logarithmically-grouped frequency bins normalised 0.0–1.0, and the
+// peak bin value. RMS is intentionally not returned here: a bin-normalised
+// RMS describes spectral shape, not signal level — compute RMS in the time
+// domain (see timeDomainRMS).
+func (s *Streamer) computeChannelBins(spectrum []complex128) (bins []float64, peak float64) {
 	bins = make([]float64, s.cfg.NumBins)
 
 	// Compute magnitude for each FFT bin (only first half — real input)
@@ -346,21 +355,29 @@ func (s *Streamer) computeChannelBins(spectrum []complex128) (bins []float64, pe
 		}
 	}
 
-	// Normalize bins to 0.0–1.0 and compute peak/RMS.
-	var sumSq float64
+	// Normalize bins to 0.0–1.0 and record the peak.
 	if maxMag > 0 {
 		for i := range bins {
 			bins[i] /= maxMag
 			if bins[i] > peak {
 				peak = bins[i]
 			}
-			sumSq += bins[i] * bins[i]
 		}
 	}
 
-	if len(bins) > 0 {
-		rms = math.Sqrt(sumSq / float64(len(bins)))
-	}
+	return bins, peak
+}
 
-	return bins, peak, rms
+// timeDomainRMS returns the RMS of the [-1, 1]-normalised PCM samples.
+// Result is in 0..1 linear amplitude — exactly what the frontend's
+// rmsToBarFill (−60 dBFS floor → 0 dBFS full) expects.
+func timeDomainRMS(samples []float64) float64 {
+	if len(samples) == 0 {
+		return 0
+	}
+	var sumSq float64
+	for _, x := range samples {
+		sumSq += x * x
+	}
+	return math.Sqrt(sumSq / float64(len(samples)))
 }

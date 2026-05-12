@@ -148,6 +148,46 @@ func TestProcessSilenceHasZeroPeaks(t *testing.T) {
 	}
 }
 
+// TestProcessRMSReflectsSignalLevel guards against the regression where RMS
+// was computed from already-bin-normalised magnitudes — which made it a
+// function of spectral shape, not signal level, so it pegged ~0.4 regardless
+// of input amplitude. A 50%-amplitude sine wave has time-domain RMS
+// ≈ 0.5 / sqrt(2) ≈ 0.354; silence has RMS = 0; quarter-amplitude has
+// RMS ≈ half of the 50% case. RMSL and RMSR must track independently.
+func TestProcessRMSReflectsSignalLevel(t *testing.T) {
+	cfg := Config{SampleRate: 44100, FFTSize: 2048, NumBins: 64, FPS: 30}
+	s := New(cfg)
+
+	// 50%-amplitude tone on L, silence on R.
+	pcm := synthFrame(cfg.FFTSize, cfg.SampleRate, 1000.0, 0)
+	left, right := decodeStereo(pcm, cfg.FFTSize)
+	data := s.Process(left, right)
+
+	const expectedRMS = 0.5 / math.Sqrt2 // ≈ 0.3536 — int16 amp 16000 ≈ 0.488
+	const amp = 16000.0 / 32768.0
+	const target = amp / math.Sqrt2 // ≈ 0.3450
+
+	if math.Abs(data.RMSL-target) > 0.02 {
+		t.Errorf("expected RMSL ≈ %.3f for 50%% sine, got %.3f", target, data.RMSL)
+	}
+	if data.RMSR > 0.01 {
+		t.Errorf("expected RMSR ≈ 0 for silent right, got %.3f", data.RMSR)
+	}
+
+	// Quarter-amplitude tone on L → RMS roughly halves.
+	pcmQuiet := make([]byte, len(pcm))
+	for i := 0; i < cfg.FFTSize; i++ {
+		l := int16(8000.0 * math.Sin(2*math.Pi*1000.0*float64(i)/float64(cfg.SampleRate)))
+		binary.LittleEndian.PutUint16(pcmQuiet[i*4:i*4+2], uint16(l))
+	}
+	leftQ, rightQ := decodeStereo(pcmQuiet, cfg.FFTSize)
+	dataQ := s.Process(leftQ, rightQ)
+	if dataQ.RMSL >= data.RMSL*0.7 {
+		t.Errorf("quarter-amp RMSL should be ~half of half-amp; got %.3f vs %.3f", dataQ.RMSL, data.RMSL)
+	}
+	_ = expectedRMS // documentation anchor for the constant above
+}
+
 // TestProcessIncludesTransitionalMonoBins ensures the deprecated mono
 // `Bins` field is still populated as the average of L and R, so legacy
 // consumers don't get a nil slice. Once M1.E lands, this can be removed.
