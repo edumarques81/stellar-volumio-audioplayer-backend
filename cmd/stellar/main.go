@@ -235,17 +235,35 @@ func main() {
 	// Audirvana now-playing poller disabled — see plan the-pi-will-never-resilient-hartmanis
 	// socketServer.StartAudirvanaPoller(ctx)
 
-	// Start spectrum analyzer (reads MPD FIFO, emits pushSpectrum via Socket.IO)
-	spectrumStreamer := spectrum.New(spectrum.Config{
-		FIFOPath:   "/tmp/mpd_spectrum.fifo",
-		SampleRate: 44100,
-		FFTSize:    2048,
-		NumBins:    64,
-		FPS:        30,
-	})
-	spectrumStreamer.Start(ctx, &socketIOEmitter{server: socketServer})
-	defer spectrumStreamer.Stop()
-	log.Info().Msg("Spectrum analyzer started (FIFO: /tmp/mpd_spectrum.fifo)")
+	// Spectrum source selection (M1.B):
+	//   STELLAR_SPECTRUM_SOURCE=local  → read the MPD FIFO in-process (Pi-only
+	//                                    deploy, legacy / dev path).
+	//   STELLAR_SPECTRUM_SOURCE=remote → don't open the FIFO; instead expose
+	//                                    /internal/spectrum so the Pi-side
+	//                                    stellar-spectrum daemon can POST
+	//                                    pre-computed frames.
+	//   STELLAR_SPECTRUM_SOURCE=""     → default to "local" during M1.A/B
+	//                                    (cutover flips this to "remote" in
+	//                                    M1.C; tracked in the plan).
+	spectrumSource := strings.ToLower(strings.TrimSpace(os.Getenv("STELLAR_SPECTRUM_SOURCE")))
+	if spectrumSource == "" {
+		spectrumSource = "local"
+	}
+
+	if spectrumSource == "local" {
+		spectrumStreamer := spectrum.New(spectrum.Config{
+			FIFOPath:   "/tmp/mpd_spectrum.fifo",
+			SampleRate: 44100,
+			FFTSize:    2048,
+			NumBins:    64,
+			FPS:        20, // CAVA reference rate; was 30 pre-M1.B
+		})
+		spectrumStreamer.Start(ctx, &socketIOEmitter{server: socketServer})
+		defer spectrumStreamer.Stop()
+		log.Info().Msg("Spectrum source: local FIFO (/tmp/mpd_spectrum.fifo @ 20 fps)")
+	} else {
+		log.Info().Str("source", spectrumSource).Msg("Spectrum source: remote (daemon will POST to /internal/spectrum)")
+	}
 
 	// Start UPnP AV Renderer for Audirvana discovery
 	upnpService := upnp.NewService(
@@ -267,6 +285,19 @@ func main() {
 
 	// Socket.io endpoint
 	mux.Handle("/socket.io/", socketServer)
+
+	// Spectrum ingest endpoint (M1.B):
+	// The Pi-side stellar-spectrum daemon POSTs computed frames here when
+	// the backend runs on a different host than MPD. Authenticated via
+	// STELLAR_SPECTRUM_KEY (shared bearer token); an empty key disables
+	// the endpoint entirely with a 503 to prevent open-relay misconfig.
+	spectrumKey := strings.TrimSpace(os.Getenv("STELLAR_SPECTRUM_KEY"))
+	mux.Handle("/internal/spectrum", socketServer.SpectrumIngestHandler(spectrumKey))
+	if spectrumKey != "" {
+		log.Info().Str("route", "/internal/spectrum").Msg("Spectrum ingest endpoint enabled")
+	} else {
+		log.Info().Msg("Spectrum ingest endpoint disabled (STELLAR_SPECTRUM_KEY unset)")
+	}
 
 	// Health check
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
