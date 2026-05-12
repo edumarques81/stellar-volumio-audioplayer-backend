@@ -8,6 +8,12 @@ CMD_DIR := cmd/stellar
 COVER_FILE := coverage.out
 COVER_HTML := coverage.html
 
+# stellar-spectrum daemon (M1.B) — runs on the Pi alongside MPD, forwards
+# computed FFT frames to the Mac backend over HTTP.
+SPECTRUM_BINARY_NAME := stellar-spectrum
+SPECTRUM_CMD_DIR := cmd/stellar-spectrum
+SPECTRUM_PI_BINARY := $(BIN_DIR)/stellar-spectrum-arm64
+
 # Build settings
 GO := go
 GOFLAGS := -v
@@ -23,7 +29,7 @@ PI_BINARY := $(BIN_DIR)/stellar-arm64
 .DEFAULT_GOAL := build
 
 # Phony targets
-.PHONY: all build build-local build-pi clean test test-verbose test-race coverage lint fmt vet check deps tidy run help
+.PHONY: all build build-local build-pi build-spectrum build-spectrum-local clean test test-verbose test-race coverage lint fmt vet check deps tidy run help
 
 ## help: Show this help message
 help:
@@ -52,6 +58,22 @@ build-local:
 	@mkdir -p $(BIN_DIR)
 	$(GO) build $(GOFLAGS) -ldflags "$(LDFLAGS)" -o $(BIN_DIR)/$(BINARY_NAME) ./$(CMD_DIR)
 	@echo "Binary built: $(BIN_DIR)/$(BINARY_NAME)"
+
+## build-spectrum: Cross-compile stellar-spectrum daemon for Raspberry Pi 5 (ARM64 Linux)
+build-spectrum:
+	@echo "Cross-compiling $(SPECTRUM_BINARY_NAME) for Raspberry Pi 5 (ARM64)..."
+	@mkdir -p $(BIN_DIR)
+	CGO_ENABLED=0 GOOS=$(PI_GOOS) GOARCH=$(PI_GOARCH) \
+		$(GO) build -ldflags "$(LDFLAGS)" \
+		-o $(SPECTRUM_PI_BINARY) ./$(SPECTRUM_CMD_DIR)
+	@echo "Binary built: $(SPECTRUM_PI_BINARY)"
+
+## build-spectrum-local: Build stellar-spectrum for host (macOS dev / smoke test)
+build-spectrum-local:
+	@echo "Building $(SPECTRUM_BINARY_NAME) for local platform..."
+	@mkdir -p $(BIN_DIR)
+	$(GO) build $(GOFLAGS) -ldflags "$(LDFLAGS)" -o $(BIN_DIR)/$(SPECTRUM_BINARY_NAME) ./$(SPECTRUM_CMD_DIR)
+	@echo "Binary built: $(BIN_DIR)/$(SPECTRUM_BINARY_NAME)"
 
 ## clean: Remove build artifacts
 clean:
