@@ -1,5 +1,16 @@
 // Package spectrum captures audio from MPD's FIFO output, performs FFT analysis,
-// and streams frequency bin data to the frontend via Socket.IO.
+// and streams per-channel L/R frequency bin data to the frontend via Socket.IO.
+//
+// Two consumers use this package:
+//
+//   - cmd/stellar — the main backend, when it runs co-located with MPD on the Pi
+//     (legacy / development path). It calls Streamer.Start with a SocketEmitter
+//     that broadcasts directly to all connected Socket.IO clients.
+//
+//   - cmd/stellar-spectrum — the tiny Pi-side daemon introduced in M1.B. It
+//     reads the same FIFO locally and forwards each computed frame to the
+//     Mac-hosted backend over HTTP. The daemon supplies its own Emitter that
+//     POSTs each payload, so the FFT/window/bin code is shared verbatim.
 //
 // Integration: see README.md in this directory.
 package spectrum
@@ -24,18 +35,41 @@ type Config struct {
 	SampleRate int    // PCM sample rate (typically 44100)
 	FFTSize    int    // FFT window size (power of 2, e.g. 2048)
 	NumBins    int    // Number of output frequency bins (e.g. 64)
-	FPS        int    // Target frames per second (e.g. 30)
+	FPS        int    // Target frames per second (e.g. 20-30)
 }
 
 // SpectrumData is the payload emitted via Socket.IO as "pushSpectrum".
+//
+// The L/R fields (BinsL/BinsR, PeakL/PeakR, RMSL/RMSR, SampleRate, TS) are
+// the canonical shape introduced in M1.B for the L/R VU meter.
+//
+// Bins/Peak/RMS are kept as a transitional mono fallback (left+right)/2
+// so any pre-M1.B frontend consumer that subscribes to `pushSpectrum`
+// does not crash on missing fields. Deprecated — remove once M1.E ships.
+//
+//nolint:revive // SpectrumData stutters with package name but is the
+// established public type and renaming would break callers.
 type SpectrumData struct {
-	Bins []float64 `json:"bins"` // Frequency bins normalized 0.0-1.0
-	Peak float64   `json:"peak"` // Overall peak level
-	RMS  float64   `json:"rms"`  // Overall RMS level
+	// Per-channel data (M1.B+)
+	BinsL      []float64 `json:"binsL"`
+	BinsR      []float64 `json:"binsR"`
+	PeakL      float64   `json:"peakL"`
+	PeakR      float64   `json:"peakR"`
+	RMSL       float64   `json:"rmsL"`
+	RMSR       float64   `json:"rmsR"`
+	SampleRate int       `json:"sampleRate"`
+	TS         int64     `json:"ts"` // Unix milliseconds at emit time
+
+	// Deprecated mono fallback: (left+right)/2. Will be removed after M1.E.
+	Bins []float64 `json:"bins"`
+	Peak float64   `json:"peak"`
+	RMS  float64   `json:"rms"`
 }
 
 // SocketEmitter is the interface the spectrum streamer needs to broadcast events.
-// This matches the typical Socket.IO server's BroadcastToNamespace or similar.
+// This matches the typical Socket.IO server's BroadcastToNamespace or similar,
+// and is also implemented by the HTTP-forwarding emitter used by
+// cmd/stellar-spectrum.
 type SocketEmitter interface {
 	BroadcastToAll(event string, data interface{})
 }
@@ -149,7 +183,7 @@ func (s *Streamer) run(ctx context.Context, emitter SocketEmitter) {
 
 		log.Printf("[Spectrum] FIFO opened, streaming at %d fps", s.cfg.FPS)
 		s.streamFromFIFO(ctx, fifo, emitter, frameInterval)
-		fifo.Close()
+		_ = fifo.Close()
 
 		// FIFO closed (MPD stopped?) — wait and retry
 		log.Printf("[Spectrum] FIFO closed, retrying in 2s")
@@ -166,7 +200,8 @@ func (s *Streamer) streamFromFIFO(ctx context.Context, fifo *os.File, emitter So
 	bytesPerFrame := 4
 	bufSize := s.cfg.FFTSize * bytesPerFrame
 	buf := make([]byte, bufSize)
-	samples := make([]float64, s.cfg.FFTSize)
+	left := make([]float64, s.cfg.FFTSize)
+	right := make([]float64, s.cfg.FFTSize)
 
 	ticker := time.NewTicker(frameInterval)
 	defer ticker.Stop()
@@ -189,38 +224,93 @@ func (s *Streamer) streamFromFIFO(ctx context.Context, fifo *os.File, emitter So
 			return
 		}
 
-		// Convert 16-bit stereo PCM to mono float64 samples
+		// Split 16-bit stereo PCM into normalised L/R float channels.
 		numFrames := n / bytesPerFrame
-		for i := 0; i < numFrames && i < s.cfg.FFTSize; i++ {
-			offset := i * bytesPerFrame
-			left := int16(binary.LittleEndian.Uint16(buf[offset : offset+2]))
-			right := int16(binary.LittleEndian.Uint16(buf[offset+2 : offset+4]))
-			// Mix to mono and normalize to [-1.0, 1.0]
-			mono := (float64(left) + float64(right)) / 2.0
-			samples[i] = mono / 32768.0
-		}
+		decodeStereoPCM(buf, numFrames, s.cfg.FFTSize, left, right)
 
-		// Apply Hann window
-		for i := range samples {
-			samples[i] *= s.hannWindow[i]
-		}
-
-		// Run FFT
-		spectrum := fft.FFTReal(samples)
-
-		// Compute frequency bins with logarithmic grouping
-		data := s.computeBins(spectrum)
-
-		// Emit via Socket.IO
+		data := s.Process(left, right)
 		emitter.BroadcastToAll("pushSpectrum", data)
 	}
 }
 
-// computeBins converts raw FFT complex output into logarithmically-grouped
-// frequency bins, normalized to 0.0-1.0.
-func (s *Streamer) computeBins(spectrum []complex128) SpectrumData {
-	bins := make([]float64, s.cfg.NumBins)
-	var peak, sumSq float64
+// decodeStereoPCM splits an interleaved 16-bit little-endian stereo PCM
+// buffer into two normalised float64 channel slices. Frames past numFrames
+// (i.e. trailing portion of the buffer that wasn't filled by ReadFull) are
+// zeroed.
+func decodeStereoPCM(buf []byte, numFrames, fftSize int, left, right []float64) {
+	limit := numFrames
+	if limit > fftSize {
+		limit = fftSize
+	}
+	for i := 0; i < limit; i++ {
+		offset := i * 4
+		l := int16(binary.LittleEndian.Uint16(buf[offset : offset+2]))
+		r := int16(binary.LittleEndian.Uint16(buf[offset+2 : offset+4]))
+		left[i] = float64(l) / 32768.0
+		right[i] = float64(r) / 32768.0
+	}
+	for i := limit; i < fftSize; i++ {
+		left[i] = 0
+		right[i] = 0
+	}
+}
+
+// Process runs the Hann window + FFT on a single L/R frame pair and returns
+// the per-channel SpectrumData. Exposed publicly so tests can feed
+// synthesized PCM directly without involving a FIFO, and so cmd/stellar-spectrum
+// can reuse the exact same compute path the legacy in-process emitter uses.
+//
+// left and right must be the same length as cfg.FFTSize, normalised to [-1, 1].
+func (s *Streamer) Process(left, right []float64) SpectrumData {
+	// Defensive copies because we mutate them in-place for windowing.
+	winL := make([]float64, s.cfg.FFTSize)
+	winR := make([]float64, s.cfg.FFTSize)
+	for i := 0; i < s.cfg.FFTSize; i++ {
+		if i < len(left) {
+			winL[i] = left[i] * s.hannWindow[i]
+		}
+		if i < len(right) {
+			winR[i] = right[i] * s.hannWindow[i]
+		}
+	}
+
+	specL := fft.FFTReal(winL)
+	specR := fft.FFTReal(winR)
+
+	binsL, peakL, rmsL := s.computeChannelBins(specL)
+	binsR, peakR, rmsR := s.computeChannelBins(specR)
+
+	// Transitional mono fallback for legacy consumers.
+	mono := make([]float64, s.cfg.NumBins)
+	for i := range mono {
+		mono[i] = (binsL[i] + binsR[i]) / 2.0
+	}
+	monoPeak := peakL
+	if peakR > monoPeak {
+		monoPeak = peakR
+	}
+	monoRMS := (rmsL + rmsR) / 2.0
+
+	return SpectrumData{
+		BinsL:      binsL,
+		BinsR:      binsR,
+		PeakL:      peakL,
+		PeakR:      peakR,
+		RMSL:       rmsL,
+		RMSR:       rmsR,
+		SampleRate: s.cfg.SampleRate,
+		TS:         time.Now().UnixMilli(),
+		Bins:       mono,
+		Peak:       monoPeak,
+		RMS:        monoRMS,
+	}
+}
+
+// computeChannelBins converts raw FFT complex output for a single channel
+// into logarithmically-grouped frequency bins normalised 0.0–1.0, plus
+// per-channel peak and RMS.
+func (s *Streamer) computeChannelBins(spectrum []complex128) (bins []float64, peak, rms float64) {
+	bins = make([]float64, s.cfg.NumBins)
 
 	// Compute magnitude for each FFT bin (only first half — real input)
 	halfFFT := s.cfg.FFTSize / 2
@@ -256,7 +346,8 @@ func (s *Streamer) computeBins(spectrum []complex128) SpectrumData {
 		}
 	}
 
-	// Normalize bins to 0.0-1.0 and compute peak/RMS
+	// Normalize bins to 0.0–1.0 and compute peak/RMS.
+	var sumSq float64
 	if maxMag > 0 {
 		for i := range bins {
 			bins[i] /= maxMag
@@ -267,14 +358,9 @@ func (s *Streamer) computeBins(spectrum []complex128) SpectrumData {
 		}
 	}
 
-	rms := 0.0
 	if len(bins) > 0 {
 		rms = math.Sqrt(sumSq / float64(len(bins)))
 	}
 
-	return SpectrumData{
-		Bins: bins,
-		Peak: peak,
-		RMS:  rms,
-	}
+	return bins, peak, rms
 }
