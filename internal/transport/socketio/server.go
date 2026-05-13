@@ -2352,6 +2352,16 @@ func (s *Server) GetAlbumArtworkByTrackPath(trackPath string) ([]byte, string) {
 	return nil, ""
 }
 
+// isArtworkRedirectURL reports whether an artwork.file_path value should be
+// served via HTTP 302 redirect rather than read from local disk. It covers
+// external URLs (Deezer/MusicBrainz hotlinks) and same-server fallback paths
+// like "/albumart?path=<track-uri>" that the first-album-fallback enrichment
+// branch writes when both MusicBrainz and Deezer lookups fail.
+func isArtworkRedirectURL(filePath string) bool {
+	return strings.HasPrefix(filePath, "http") ||
+		strings.HasPrefix(filePath, "/albumart?")
+}
+
 func (s *Server) GetArtistArtwork(artistID, artistName string) *ArtistArtworkInfo {
 	if s.cacheDAO == nil {
 		return nil
@@ -2381,8 +2391,10 @@ func (s *Server) GetArtistArtwork(artistID, artistName string) *ArtistArtworkInf
 		return nil
 	}
 
-	// Check if it's a URL (Deezer hotlink or album art)
-	if strings.HasPrefix(artwork.FilePath, "http") {
+	// Redirect to the URL when file_path is an external link (Deezer/MusicBrainz)
+	// or a same-server albumart-fallback path written by the first-album-fallback
+	// enrichment branch (e.g. /albumart?path=<track-uri>).
+	if isArtworkRedirectURL(artwork.FilePath) {
 		return &ArtistArtworkInfo{
 			IsURL: true,
 			URL:   artwork.FilePath,
