@@ -370,11 +370,15 @@ func (c *Coordinator) CreateArtistSaveFunc() SaveFuncArtist {
 			return fmt.Errorf("write artist artwork file: %w", err)
 		}
 
-		// Generate artwork ID and update artist
-		artworkID := generateArtworkID(artistID, "artist")
+		// Insert the artwork row in the cache so GetArtworkByArtist can find
+		// it. Reuse UpdateArtistArtworkURL — its name says "URL" but the schema
+		// stores the value in artwork.file_path, and the HTTP /artistart handler
+		// (server.go:GetArtistArtwork ~line 2385) reads either a URL (if
+		// file_path starts with "http") or a local file. Pass the absolute file
+		// path; the handler's prefix check routes to the file-read branch.
 		if c.artistProvider != nil {
-			if err := c.artistProvider.UpdateArtistArtwork(artistID, artworkID); err != nil {
-				log.Warn().Err(err).Str("artistID", artistID).Msg("Failed to update artist artwork")
+			if err := c.artistProvider.UpdateArtistArtworkURL(artistID, filePath, "fanarttv"); err != nil {
+				log.Warn().Err(err).Str("artistID", artistID).Msg("Failed to insert artist artwork record")
 			}
 		}
 

@@ -372,6 +372,57 @@ func TestDBClear(t *testing.T) {
 	}
 }
 
+// TestDBClear_PreservesArtwork asserts that Clear() preserves the artwork
+// table. Artwork is enrichment data (Fanart.tv / Deezer / Cover Art Archive),
+// slow to rebuild and not derivable from MPD. Artist/album IDs are
+// deterministic so artwork rows still resolve after rebuild repopulates
+// artists+albums.
+func TestDBClear_PreservesArtwork(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "cache_test")
+	if err != nil {
+		t.Fatalf("Failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	dbPath := filepath.Join(tmpDir, "test.db")
+	db := cache.NewDB(dbPath)
+
+	if err := db.Open(); err != nil {
+		t.Fatalf("Failed to open database: %v", err)
+	}
+	defer db.Close()
+
+	dao := cache.NewDAO(db)
+
+	// Seed an artist + an artwork row.
+	if err := dao.InsertArtist(&cache.CachedArtist{ID: "artist1", Name: "Test Artist"}); err != nil {
+		t.Fatalf("InsertArtist: %v", err)
+	}
+	if err := dao.InsertArtwork(&cache.CachedArtwork{
+		ID: "art1", ArtistID: "artist1", Type: "artist",
+		FilePath: "/tmp/test.jpg", Source: "fanarttv",
+	}); err != nil {
+		t.Fatalf("InsertArtwork: %v", err)
+	}
+
+	if err := db.Clear(); err != nil {
+		t.Fatalf("Clear: %v", err)
+	}
+
+	// Artists are MPD-derived and should be wiped (existing TestDBClear covers this).
+	// Artwork is enrichment data and must survive.
+	art, err := dao.GetArtworkByArtist("artist1")
+	if err != nil {
+		t.Fatalf("GetArtworkByArtist: %v", err)
+	}
+	if art == nil {
+		t.Fatal("Artwork row was wiped by Clear() — should have been preserved (enrichment data, not MPD-derived)")
+	}
+	if art.FilePath != "/tmp/test.jpg" {
+		t.Errorf("Artwork FilePath = %q, want /tmp/test.jpg", art.FilePath)
+	}
+}
+
 func TestSchema_BioTablesExist(t *testing.T) {
 	t.Parallel()
 	tmpDir := t.TempDir()

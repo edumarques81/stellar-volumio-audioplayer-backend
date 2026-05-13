@@ -427,7 +427,13 @@ func (d *DB) Clear() error {
 		return fmt.Errorf("database not open")
 	}
 
-	tables := []string{"tracks", "albums", "artists", "artwork", "radio_stations"}
+	// Note: "artwork" is intentionally excluded — it's enrichment data
+	// (Fanart.tv / Deezer / Cover Art Archive), slow to rebuild and not
+	// derivable from MPD. Artist/album IDs are deterministic so artwork
+	// rows still resolve correctly after rebuild repopulates artists+albums.
+	// Orphan artwork rows (artist renamed/removed) are acceptable disk
+	// waste until GC is added separately.
+	tables := []string{"tracks", "albums", "artists", "radio_stations"}
 	for _, table := range tables {
 		if _, err := d.db.Exec("DELETE FROM " + table); err != nil {
 			return fmt.Errorf("failed to clear %s: %w", table, err)
