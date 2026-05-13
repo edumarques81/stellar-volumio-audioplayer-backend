@@ -1833,6 +1833,15 @@ func (s *Server) setupHandlers() {
 				"message": "Item removed from '" + playlistName + "'",
 			})
 		})
+
+		// Reload-all-clients channel. Any client may request a fan-out reload
+		// (used by the NavColumn Refresh button after a library:cache rebuild
+		// completes) so the LCD kiosk picks up freshly-cached data even when
+		// the tap came from a different client.
+		client.On("clients:reload", func(args ...any) {
+			log.Info().Str("id", clientID).Msg("clients:reload requested; broadcasting pushClientsReload")
+			s.io.Emit("pushClientsReload", map[string]interface{}{})
+		})
 	})
 }
 
