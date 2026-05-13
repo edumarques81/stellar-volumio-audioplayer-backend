@@ -337,40 +337,80 @@ func (s *Service) GetArtists(req GetArtistsRequest) ArtistsResponse {
 	}
 }
 
-// GetArtistAlbums returns albums by a specific artist.
+// GetArtistAlbums returns albums by a specific artist with fully-populated
+// URI / AlbumArt / quality fields. Mirrors GetAlbums's data-flow
+// (iterate base paths via GetAlbumDetails) but filters by AlbumArtist so
+// every Album record returned is the same shape downstream consumers get
+// from `library:albums:list` — which means `playAlbum(album)` works and
+// album covers render.
 func (s *Service) GetArtistAlbums(req GetArtistAlbumsRequest) ArtistAlbumsResponse {
-	var albums []Album
+	albums := make([]Album, 0)
 
-	albumInfos, err := s.mpd.FindAlbumsByArtist(req.Artist)
-	if err != nil {
-		log.Debug().Err(err).Str("artist", req.Artist).Msg("Failed to find albums by artist")
-		return ArtistAlbumsResponse{
-			Artist:     req.Artist,
-			Albums:     []Album{},
-			Pagination: Pagination{Page: 1, Limit: DefaultLimit},
+	// Scope to all sources — artist filtering at this layer is by name only.
+	basePaths := s.getBasePathsForScope(ScopeAll)
+
+	for _, basePath := range basePaths {
+		sourceType := s.sourceTypeForBasePath(basePath)
+		albumDetails, err := s.mpd.GetAlbumDetails(basePath)
+		if err != nil {
+			log.Debug().Err(err).Str("path", basePath).Msg("Failed to get albums from database")
+			continue
+		}
+
+		for _, details := range albumDetails {
+			// Case-insensitive AlbumArtist match — MPD tag casing is unreliable.
+			if !strings.EqualFold(details.AlbumArtist, req.Artist) {
+				continue
+			}
+
+			// Derive URI from the first track's directory.
+			uri := ""
+			if details.FirstTrack != "" {
+				uri = path.Dir(details.FirstTrack)
+			}
+
+			albumID := generateID(details.Album + "\x00" + details.AlbumArtist + "\x00" + uri)
+
+			albumArt := ""
+			if details.FirstTrack != "" {
+				albumArt = "/albumart?path=" + details.FirstTrack
+			}
+
+			// Parse audio format and detect track type (same logic as GetAlbums).
+			var sampleRate, bitDepth int
+			if details.Format != "" {
+				parts := strings.Split(details.Format, ":")
+				if len(parts) >= 2 {
+					sampleRate, _ = strconv.Atoi(parts[0])
+					bitDepth, _ = strconv.Atoi(parts[1])
+				}
+			}
+			trackType := ""
+			if details.FirstTrack != "" {
+				if idx := strings.LastIndex(details.FirstTrack, "."); idx >= 0 {
+					trackType = strings.ToLower(details.FirstTrack[idx+1:])
+				}
+			}
+			quality := formatQualityLabel(sampleRate, bitDepth, trackType)
+
+			albums = append(albums, Album{
+				ID:         albumID,
+				Title:      details.Album,
+				Artist:     details.AlbumArtist,
+				URI:        uri,
+				AlbumArt:   albumArt,
+				TrackCount: details.TrackCount,
+				Source:     sourceType,
+				Quality:    quality,
+				TrackType:  trackType,
+				Genre:      details.Genre,
+			})
 		}
 	}
 
-	// For each album, get full details
-	// Note: This is a simplified implementation. In production, we would
-	// use a more efficient query or cache.
-	for _, info := range albumInfos {
-		albumID := generateID(info.Album + "\x00" + info.AlbumArtist)
-
-		album := Album{
-			ID:     albumID,
-			Title:  info.Album,
-			Artist: info.AlbumArtist,
-			Source: SourceLocal, // Default, would need track info to determine
-		}
-
-		albums = append(albums, album)
-	}
-
-	// Sort albums
 	s.sortAlbums(albums, req.Sort)
 
-	// Apply pagination
+	// Pagination (same shape as before).
 	total := len(albums)
 	page := req.Page
 	limit := req.Limit
@@ -390,17 +430,14 @@ func (s *Service) GetArtistAlbums(req GetArtistAlbumsRequest) ArtistAlbumsRespon
 		end = len(albums)
 	}
 
-	paginatedAlbums := albums[start:end]
-	hasMore := end < total
-
 	return ArtistAlbumsResponse{
 		Artist: req.Artist,
-		Albums: paginatedAlbums,
+		Albums: albums[start:end],
 		Pagination: Pagination{
 			Page:    page,
 			Limit:   limit,
 			Total:   total,
-			HasMore: hasMore,
+			HasMore: end < total,
 		},
 	}
 }

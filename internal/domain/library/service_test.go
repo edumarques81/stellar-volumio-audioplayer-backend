@@ -517,10 +517,9 @@ func TestService_GetArtists_Pagination(t *testing.T) {
 // --- GetArtistAlbums Tests ---
 
 func TestService_GetArtistAlbums_Empty(t *testing.T) {
+	// No album details anywhere -> empty response.
 	mockMPD := &MockMPDClient{
-		FindAlbumsByArtistResp: map[string][]AlbumInfo{
-			"Unknown Artist": {},
-		},
+		GetAlbumDetailsResp: map[string][]AlbumDetails{},
 	}
 
 	service := NewService(mockMPD, &MockPathClassifier{})
@@ -539,14 +538,8 @@ func TestService_GetArtistAlbums_Empty(t *testing.T) {
 
 func TestService_GetArtistAlbums_WithAlbums(t *testing.T) {
 	mockMPD := &MockMPDClient{
-		FindAlbumsByArtistResp: map[string][]AlbumInfo{
-			"Test Artist": {
-				{Album: "Album 1", AlbumArtist: "Test Artist"},
-				{Album: "Album 2", AlbumArtist: "Test Artist"},
-			},
-		},
 		GetAlbumDetailsResp: map[string][]AlbumDetails{
-			"": {
+			"INTERNAL": {
 				{Album: "Album 1", AlbumArtist: "Test Artist", TrackCount: 10, FirstTrack: "INTERNAL/Album1/track.flac"},
 				{Album: "Album 2", AlbumArtist: "Test Artist", TrackCount: 8, FirstTrack: "INTERNAL/Album2/track.flac"},
 			},
@@ -565,6 +558,97 @@ func TestService_GetArtistAlbums_WithAlbums(t *testing.T) {
 	}
 	if resp.Artist != "Test Artist" {
 		t.Errorf("Expected artist 'Test Artist', got %s", resp.Artist)
+	}
+}
+
+func TestService_GetArtistAlbums_PopulatesFullFields(t *testing.T) {
+	// Two albums by the same artist, spread across INTERNAL and NAS base
+	// paths, so we also verify multi-source scoping. A third album by a
+	// different artist exists in USB and must NOT appear in the result.
+	mockMPD := &MockMPDClient{
+		GetAlbumDetailsResp: map[string][]AlbumDetails{
+			"INTERNAL": {
+				{
+					Album:       "In Rainbows",
+					AlbumArtist: "Radiohead",
+					TrackCount:  10,
+					FirstTrack:  "INTERNAL/Radiohead/In Rainbows/01 - 15 Step.flac",
+					Format:      "44100:16:2",
+				},
+			},
+			"USB": {
+				{
+					Album:       "Some Other Album",
+					AlbumArtist: "Other Artist",
+					TrackCount:  5,
+					FirstTrack:  "USB/Other/track.flac",
+					Format:      "44100:16:2",
+				},
+			},
+			"NAS": {
+				{
+					Album:       "OK Computer",
+					AlbumArtist: "Radiohead",
+					TrackCount:  12,
+					FirstTrack:  "NAS/Radiohead/OK Computer/01 - Airbag.flac",
+					Format:      "96000:24:2",
+				},
+			},
+		},
+	}
+
+	service := NewService(mockMPD, &MockPathClassifier{})
+
+	resp := service.GetArtistAlbums(GetArtistAlbumsRequest{
+		Artist: "Radiohead",
+		Sort:   SortAlphabetical,
+	})
+
+	if resp.Artist != "Radiohead" {
+		t.Fatalf("Expected artist 'Radiohead', got %q", resp.Artist)
+	}
+	if len(resp.Albums) != 2 {
+		t.Fatalf("Expected 2 Radiohead albums (across INTERNAL + NAS), got %d", len(resp.Albums))
+	}
+
+	// Alphabetical sort: "In Rainbows" before "OK Computer"
+	inRainbows := resp.Albums[0]
+	okComputer := resp.Albums[1]
+
+	if inRainbows.Title != "In Rainbows" {
+		t.Errorf("Expected first album 'In Rainbows', got %q", inRainbows.Title)
+	}
+	if inRainbows.URI != "INTERNAL/Radiohead/In Rainbows" {
+		t.Errorf("Expected URI 'INTERNAL/Radiohead/In Rainbows', got %q", inRainbows.URI)
+	}
+	if inRainbows.AlbumArt != "/albumart?path=INTERNAL/Radiohead/In Rainbows/01 - 15 Step.flac" {
+		t.Errorf("Expected AlbumArt to point at first track, got %q", inRainbows.AlbumArt)
+	}
+	if inRainbows.TrackCount != 10 {
+		t.Errorf("Expected TrackCount 10, got %d", inRainbows.TrackCount)
+	}
+	if inRainbows.TrackType != "flac" {
+		t.Errorf("Expected TrackType 'flac', got %q", inRainbows.TrackType)
+	}
+	if inRainbows.Source != SourceLocal {
+		t.Errorf("Expected Source SourceLocal for INTERNAL, got %q", inRainbows.Source)
+	}
+
+	if okComputer.URI != "NAS/Radiohead/OK Computer" {
+		t.Errorf("Expected NAS URI, got %q", okComputer.URI)
+	}
+	if okComputer.AlbumArt == "" {
+		t.Errorf("Expected non-empty AlbumArt on NAS album")
+	}
+	if okComputer.Source != SourceNAS {
+		t.Errorf("Expected Source SourceNAS, got %q", okComputer.Source)
+	}
+
+	// Negative case: the USB album by 'Other Artist' must not leak in.
+	for _, a := range resp.Albums {
+		if a.Artist != "Radiohead" {
+			t.Errorf("Unexpected non-Radiohead album in response: %+v", a)
+		}
 	}
 }
 
