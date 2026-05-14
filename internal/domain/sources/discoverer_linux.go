@@ -1,3 +1,5 @@
+//go:build linux
+
 package sources
 
 import (
@@ -319,12 +321,3 @@ func parseShareLine(line string) *ShareInfo {
 	}
 }
 
-// ShareBrowseError represents an error during share browsing.
-type ShareBrowseError struct {
-	Code    string
-	Message string
-}
-
-func (e *ShareBrowseError) Error() string {
-	return e.Message
-}
