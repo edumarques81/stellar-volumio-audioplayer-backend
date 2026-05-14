@@ -41,3 +41,32 @@ func TestFixturesLoad(t *testing.T) {
 		t.Error("rest fixture has empty IP")
 	}
 }
+
+// TestCanonicalMatchesRESTFixture asserts that the canonical Reporter on
+// the current host produces a Status that, when marshalled, byte-equals
+// the pre-change REST fixture captured in Commit 3a. This is the gate
+// for safely deleting netinfo_legacy_linux.go.
+//
+// Meaningful only when run on the same Pi host (in the same network
+// state) whose state was captured into rest_pre.json. Gated by env var
+// so the rest of the suite isn't host-specific.
+//
+// CAVEAT: the captured fixture is ethernet state. The known drift between
+// canonical and legacy lives in the wifi-quality scaling branch order
+// (legacy passes q through directly for q ∈ [0,100]; canonical rescales
+// q ∈ [0,70] to q*100/70). For ethernet hosts the wifi codepath is not
+// exercised and byte-equality holds. For wifi hosts at low signal the
+// dedup is a known behaviour change of ±1 Strength bucket — accepted per
+// spec decision #7.
+func TestCanonicalMatchesRESTFixture(t *testing.T) {
+	if os.Getenv("STELLAR_NETINFO_FIXTURE_TEST") != "1" {
+		t.Skip("set STELLAR_NETINFO_FIXTURE_TEST=1 to run on the captured host")
+	}
+	want := readFixture(t, "rest_pre.json")
+	got := NewPlatform().GetStatus()
+	gotJSON, _ := json.Marshal(got)
+	wantJSON, _ := json.Marshal(want)
+	if string(gotJSON) != string(wantJSON) {
+		t.Errorf("canonical vs fixture mismatch:\ngot:  %s\nwant: %s", gotJSON, wantJSON)
+	}
+}

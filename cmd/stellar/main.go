@@ -415,7 +415,7 @@ func main() {
 
 	// Network status endpoint
 	mux.HandleFunc("/api/v1/network", func(w http.ResponseWriter, _ *http.Request) {
-		status := netinfo.LegacyStatusForREST()
+		status := netReporter.GetStatus()
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(status)
 	})
