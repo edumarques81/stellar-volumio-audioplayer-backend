@@ -29,7 +29,7 @@ PI_BINARY := $(BIN_DIR)/stellar-arm64
 .DEFAULT_GOAL := build
 
 # Phony targets
-.PHONY: all build build-local build-pi build-spectrum build-spectrum-local clean test test-verbose test-race coverage lint fmt vet check deps tidy run help
+.PHONY: all build build-local build-pi build-darwin build-windows build-spectrum build-spectrum-local clean test test-verbose test-race coverage lint fmt vet check deps tidy run help
 
 ## help: Show this help message
 help:
@@ -58,6 +58,30 @@ build-local:
 	@mkdir -p $(BIN_DIR)
 	$(GO) build $(GOFLAGS) -ldflags "$(LDFLAGS)" -o $(BIN_DIR)/$(BINARY_NAME) ./$(CMD_DIR)
 	@echo "Binary built: $(BIN_DIR)/$(BINARY_NAME)"
+
+# Cross-compilation for macOS (Darwin ARM64) — M1.A target
+DARWIN_BINARY := $(BIN_DIR)/stellar-darwin-arm64
+
+## build-darwin: Cross-compile for macOS (ARM64) — M1.A portability target
+build-darwin:
+	@echo "Cross-compiling for macOS (Darwin ARM64)..."
+	@mkdir -p $(BIN_DIR)
+	GOOS=darwin GOARCH=arm64 \
+		$(GO) build -ldflags "$(LDFLAGS)" -o $(DARWIN_BINARY) ./$(CMD_DIR)
+	@echo "Binary built: $(DARWIN_BINARY)"
+
+# Cross-compilation for Windows (AMD64) — M1.A target. Stubs only on Windows;
+# this target exists to catch linker errors and missing-impl gaps that go vet
+# alone misses.
+WINDOWS_BINARY := $(BIN_DIR)/stellar-windows-amd64.exe
+
+## build-windows: Cross-compile for Windows (AMD64) — M1.A portability target
+build-windows:
+	@echo "Cross-compiling for Windows (AMD64)..."
+	@mkdir -p $(BIN_DIR)
+	GOOS=windows GOARCH=amd64 \
+		$(GO) build -ldflags "$(LDFLAGS)" -o $(WINDOWS_BINARY) ./$(CMD_DIR)
+	@echo "Binary built: $(WINDOWS_BINARY)"
 
 ## build-spectrum: Cross-compile stellar-spectrum daemon for Raspberry Pi 5 (ARM64 Linux)
 build-spectrum:

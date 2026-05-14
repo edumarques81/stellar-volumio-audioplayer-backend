@@ -1,5 +1,6 @@
-// Package socketio provides the Socket.io server for client communication.
-package socketio
+//go:build linux
+
+package lcd
 
 import (
 	"os"
@@ -9,9 +10,18 @@ import (
 	"github.com/rs/zerolog/log"
 )
 
-// LCDStatus represents the current LCD display status.
-type LCDStatus struct {
-	IsOn bool `json:"isOn"` // true if LCD is on
+// linuxController is the production Linux LCD controller. It falls back
+// through backlight sysfs -> DRM DPMS -> vcgencmd -> wlr-randr -> xrandr/xset.
+type linuxController struct{}
+
+func newPlatform() Controller { return &linuxController{} }
+
+func (c *linuxController) Status() (Status, error) {
+	return getLCDStatus(), nil
+}
+
+func (c *linuxController) Set(on bool) error {
+	return setLCDPower(on)
 }
 
 // isWaylandSession checks if we're running under a Wayland compositor.
@@ -80,8 +90,8 @@ func getDRMDisplayPath() string {
 }
 
 // getLCDStatusWayland gets LCD status using wlr-randr (for Wayland/Cage).
-func getLCDStatusWayland() (LCDStatus, bool) {
-	status := LCDStatus{IsOn: true}
+func getLCDStatusWayland() (Status, bool) {
+	status := Status{IsOn: true}
 
 	cmd := exec.Command("wlr-randr")
 	cmd.Env = getWaylandEnv()
@@ -125,9 +135,9 @@ func getLCDStatusWayland() (LCDStatus, bool) {
 	return status, false
 }
 
-// GetLCDStatus returns the current LCD display status.
-func GetLCDStatus() LCDStatus {
-	status := LCDStatus{IsOn: true} // Default to on
+// getLCDStatus returns the current LCD display status.
+func getLCDStatus() Status {
+	status := Status{IsOn: true} // Default to on
 
 	// Try backlight sysfs first (official Pi touchscreen)
 	blPath := getBacklightPath()
@@ -281,8 +291,8 @@ func setLCDPowerWayland(on bool) error {
 	return nil
 }
 
-// SetLCDPower turns the LCD display on or off.
-func SetLCDPower(on bool) error {
+// setLCDPower turns the LCD display on or off.
+func setLCDPower(on bool) error {
 	// Try backlight sysfs first — this is the best method because it only
 	// turns off the backlight while keeping the touch digitizer active.
 	// This enables touch-to-wake on the official Pi touchscreen.
@@ -352,11 +362,4 @@ func SetLCDPower(on bool) error {
 
 	log.Error().Bool("on", on).Msg("All LCD power methods failed")
 	return os.ErrNotExist
-}
-
-// BroadcastLCDStatus sends LCD status to all connected clients.
-func (s *Server) BroadcastLCDStatus() {
-	status := GetLCDStatus()
-	s.io.Emit("pushLcdStatus", status)
-	log.Debug().Bool("isOn", status.IsOn).Msg("Broadcast LCD status")
 }

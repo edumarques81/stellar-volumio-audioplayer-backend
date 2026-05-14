@@ -27,6 +27,7 @@ import (
 	"github.com/edumarques81/stellar-volumio-audioplayer-backend/internal/domain/player"
 	"github.com/edumarques81/stellar-volumio-audioplayer-backend/internal/domain/sources"
 	"github.com/edumarques81/stellar-volumio-audioplayer-backend/internal/domain/upnp"
+	"github.com/edumarques81/stellar-volumio-audioplayer-backend/internal/infra/lcd"
 	"github.com/edumarques81/stellar-volumio-audioplayer-backend/internal/infra/llm"
 	"github.com/edumarques81/stellar-volumio-audioplayer-backend/internal/infra/mpd"
 	"github.com/edumarques81/stellar-volumio-audioplayer-backend/internal/infra/paths"
@@ -174,6 +175,12 @@ func main() {
 		log.Fatal().Err(err).Msg("Failed to create Socket.io server")
 	}
 	defer socketServer.Close()
+
+	// Wire platform-selected LCD controller (real impl on Linux/Pi, stubs
+	// on darwin/windows). Must run before the HTTP server starts accepting
+	// connections — the connection callback reads s.lcdController without
+	// locking.
+	socketServer.SetLCDController(lcd.NewPlatform())
 
 	// Initialize library cache (triggers background build if empty)
 	socketServer.InitializeCache()

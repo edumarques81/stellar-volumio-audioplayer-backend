@@ -30,6 +30,7 @@ import (
 	"github.com/edumarques81/stellar-volumio-audioplayer-backend/internal/domain/sources"
 	"github.com/edumarques81/stellar-volumio-audioplayer-backend/internal/domain/streaming/qobuz"
 	"github.com/edumarques81/stellar-volumio-audioplayer-backend/internal/infra/cache"
+	"github.com/edumarques81/stellar-volumio-audioplayer-backend/internal/infra/lcd"
 	mpdclient "github.com/edumarques81/stellar-volumio-audioplayer-backend/internal/infra/mpd"
 	"github.com/edumarques81/stellar-volumio-audioplayer-backend/internal/version"
 )
@@ -73,7 +74,25 @@ type Server struct {
 	// fallback that recovered the state. Surfaced via the
 	// "pushDiagnostics" Socket.IO event each time it increments.
 	tickerRecoveredBroadcasts atomic.Int64
+	lcdController             lcd.Controller
 }
+
+// serverBroadcaster adapts the Socket.IO server to the lcd.Broadcaster (and
+// future netinfo.Broadcaster, sources.Broadcaster) interfaces. It emits to
+// every connected client via the io-level emit.
+type serverBroadcaster struct{ s *Server }
+
+func (b serverBroadcaster) Emit(event string, payload any) {
+	b.s.io.Emit(event, payload)
+}
+
+// Broadcaster returns the global event-broadcasting adapter for this server.
+// Passed to infra packages so they can emit without importing zishang520.
+func (s *Server) Broadcaster() serverBroadcaster { return serverBroadcaster{s} }
+
+// SetLCDController wires the platform-selected LCD controller. Called from
+// main.go after the Server is constructed.
+func (s *Server) SetLCDController(c lcd.Controller) { s.lcdController = c }
 
 // NewServer creates a new Socket.io server.
 // bitPerfect indicates whether the system is configured for bit-perfect audio output.
@@ -271,7 +290,10 @@ func (s *Server) setupHandlers() {
 			// Also send network, LCD, system info, and audio status
 			client.Emit("pushNetworkStatus", GetNetworkStatus())
 			client.Emit("pushSystemInfo", GetSystemInfo())
-			client.Emit("pushLcdStatus", GetLCDStatus())
+			{
+				status, _ := s.lcdController.Status()
+				client.Emit("pushLcdStatus", status)
+			}
 			client.Emit("pushAudioStatus", s.audioController.GetStatus())
 			// Broadcast actual audio engine state (MPD vs Audirvana)
 			s.pushAudioEngineState(client)
@@ -582,26 +604,26 @@ func (s *Server) setupHandlers() {
 		// LCD control events
 		client.On("getLcdStatus", func(args ...any) {
 			log.Debug().Str("id", clientID).Msg("getLcdStatus")
-			status := GetLCDStatus()
+			status, _ := s.lcdController.Status()
 			client.Emit("pushLcdStatus", status)
 		})
 
 		client.On("lcdStandby", func(args ...any) {
 			log.Debug().Str("id", clientID).Msg("lcdStandby")
-			if err := SetLCDPower(false); err != nil {
+			if err := s.lcdController.Set(false); err != nil {
 				log.Error().Err(err).Msg("lcdStandby failed")
 				return
 			}
-			s.BroadcastLCDStatus()
+			lcd.BroadcastStatus(s.Broadcaster(), s.lcdController)
 		})
 
 		client.On("lcdWake", func(args ...any) {
 			log.Debug().Str("id", clientID).Msg("lcdWake")
-			if err := SetLCDPower(true); err != nil {
+			if err := s.lcdController.Set(true); err != nil {
 				log.Error().Err(err).Msg("lcdWake failed")
 				return
 			}
-			s.BroadcastLCDStatus()
+			lcd.BroadcastStatus(s.Broadcaster(), s.lcdController)
 		})
 
 		// Audio status events
