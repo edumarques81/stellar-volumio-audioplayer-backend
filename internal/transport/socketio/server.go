@@ -32,6 +32,7 @@ import (
 	"github.com/edumarques81/stellar-volumio-audioplayer-backend/internal/infra/cache"
 	"github.com/edumarques81/stellar-volumio-audioplayer-backend/internal/infra/lcd"
 	mpdclient "github.com/edumarques81/stellar-volumio-audioplayer-backend/internal/infra/mpd"
+	"github.com/edumarques81/stellar-volumio-audioplayer-backend/internal/infra/netinfo"
 	"github.com/edumarques81/stellar-volumio-audioplayer-backend/internal/version"
 )
 
@@ -63,7 +64,6 @@ type Server struct {
 	connLimiter         *ConnectionLimiter // Limits concurrent external connections
 	mu                  sync.RWMutex
 	clients             map[string]*socket.Socket
-	lastNetwork         NetworkStatus
 	lastBroadcastMu     sync.Mutex
 	lastBroadcastState  map[string]interface{} // Last state sent via BroadcastState for diffing
 	// tickerRecoveredBroadcasts counts state broadcasts emitted by the
@@ -75,6 +75,7 @@ type Server struct {
 	// "pushDiagnostics" Socket.IO event each time it increments.
 	tickerRecoveredBroadcasts atomic.Int64
 	lcdController             lcd.Controller
+	netReporter               netinfo.Reporter
 }
 
 // serverBroadcaster adapts the Socket.IO server to the lcd.Broadcaster (and
@@ -93,6 +94,10 @@ func (s *Server) Broadcaster() serverBroadcaster { return serverBroadcaster{s} }
 // SetLCDController wires the platform-selected LCD controller. Called from
 // main.go after the Server is constructed.
 func (s *Server) SetLCDController(c lcd.Controller) { s.lcdController = c }
+
+// SetNetReporter wires the platform-selected Reporter. Called from main.go
+// after the Server is constructed.
+func (s *Server) SetNetReporter(r netinfo.Reporter) { s.netReporter = r }
 
 // NewServer creates a new Socket.io server.
 // bitPerfect indicates whether the system is configured for bit-perfect audio output.
@@ -288,7 +293,7 @@ func (s *Server) setupHandlers() {
 			s.pushState(client)
 			s.pushQueue(client)
 			// Also send network, LCD, system info, and audio status
-			client.Emit("pushNetworkStatus", GetNetworkStatus())
+			client.Emit("pushNetworkStatus", s.netReporter.GetStatus())
 			client.Emit("pushSystemInfo", GetSystemInfo())
 			{
 				status, _ := s.lcdController.Status()
@@ -597,7 +602,7 @@ func (s *Server) setupHandlers() {
 		// Network status events
 		client.On("getNetworkStatus", func(args ...any) {
 			log.Debug().Str("id", clientID).Msg("getNetworkStatus")
-			status := GetNetworkStatus()
+			status := s.netReporter.GetStatus()
 			client.Emit("pushNetworkStatus", status)
 		})
 

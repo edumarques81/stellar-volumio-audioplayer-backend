@@ -2,16 +2,13 @@
 package main
 
 import (
-	"bufio"
 	"context"
 	"encoding/json"
 	"flag"
 	"net/http"
 	"os"
-	"os/exec"
 	"os/signal"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -30,6 +27,7 @@ import (
 	"github.com/edumarques81/stellar-volumio-audioplayer-backend/internal/infra/lcd"
 	"github.com/edumarques81/stellar-volumio-audioplayer-backend/internal/infra/llm"
 	"github.com/edumarques81/stellar-volumio-audioplayer-backend/internal/infra/mpd"
+	"github.com/edumarques81/stellar-volumio-audioplayer-backend/internal/infra/netinfo"
 	"github.com/edumarques81/stellar-volumio-audioplayer-backend/internal/infra/paths"
 	"github.com/edumarques81/stellar-volumio-audioplayer-backend/internal/infra/spectrum"
 	"github.com/edumarques81/stellar-volumio-audioplayer-backend/internal/infra/wikipedia"
@@ -182,6 +180,12 @@ func main() {
 	// locking.
 	socketServer.SetLCDController(lcd.NewPlatform())
 
+	// Wire platform-selected network Reporter (real impls on Linux/darwin,
+	// stub on windows). Must run before the HTTP server accepts connections —
+	// the connection callback reads s.netReporter without locking.
+	netReporter := netinfo.NewPlatform()
+	socketServer.SetNetReporter(netReporter)
+
 	// Initialize library cache (triggers background build if empty)
 	socketServer.InitializeCache()
 
@@ -235,7 +239,7 @@ func main() {
 	}
 
 	// Start network watcher for Socket.IO push notifications
-	socketServer.StartNetworkWatcher(ctx)
+	netinfo.StartWatcher(ctx, netReporter, socketServer.Broadcaster())
 
 	// Start mount watcher for periodic NAS share re-mount
 	socketServer.StartMountWatcher(ctx)
@@ -410,8 +414,8 @@ func main() {
 	})
 
 	// Network status endpoint
-	mux.HandleFunc("/api/v1/network", func(w http.ResponseWriter, r *http.Request) {
-		status := getNetworkStatus()
+	mux.HandleFunc("/api/v1/network", func(w http.ResponseWriter, _ *http.Request) {
+		status := netinfo.LegacyStatusForREST()
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(status)
 	})
@@ -531,148 +535,6 @@ func itoa(i int) string {
 		buf[pos] = '-'
 	}
 	return string(buf[pos:])
-}
-
-// NetworkStatus represents the current network connection status
-type NetworkStatus struct {
-	Type     string `json:"type"`     // "wifi", "ethernet", "none"
-	SSID     string `json:"ssid"`     // WiFi network name (if wifi)
-	Signal   int    `json:"signal"`   // WiFi signal strength 0-100 (if wifi)
-	IP       string `json:"ip"`       // IP address
-	Strength int    `json:"strength"` // Signal strength level 0-3 (for icon)
-}
-
-// getNetworkStatus returns the current network connection status
-func getNetworkStatus() NetworkStatus {
-	status := NetworkStatus{
-		Type:     "none",
-		Signal:   0,
-		Strength: 0,
-	}
-
-	// Check ethernet first (usually eth0 or end0 on newer Pi)
-	for _, iface := range []string{"eth0", "end0"} {
-		carrierPath := "/sys/class/net/" + iface + "/carrier"
-		if data, err := os.ReadFile(carrierPath); err == nil {
-			if strings.TrimSpace(string(data)) == "1" {
-				status.Type = "ethernet"
-				status.IP = getIPAddress(iface)
-				status.Signal = 100
-				status.Strength = 3
-				return status
-			}
-		}
-	}
-
-	// Check WiFi (usually wlan0)
-	for _, iface := range []string{"wlan0", "wlan1"} {
-		operstatePath := "/sys/class/net/" + iface + "/operstate"
-		if data, err := os.ReadFile(operstatePath); err == nil {
-			if strings.TrimSpace(string(data)) == "up" {
-				status.Type = "wifi"
-				status.IP = getIPAddress(iface)
-				status.SSID, status.Signal = getWifiInfo(iface)
-				// Convert signal to strength level (0-3)
-				switch {
-				case status.Signal >= 70:
-					status.Strength = 3 // Full signal
-				case status.Signal >= 50:
-					status.Strength = 2 // Medium
-				case status.Signal >= 30:
-					status.Strength = 1 // Weak
-				default:
-					status.Strength = 0 // Very weak
-				}
-				return status
-			}
-		}
-	}
-
-	return status
-}
-
-// getIPAddress returns the IP address for a given interface
-func getIPAddress(iface string) string {
-	out, err := exec.Command("ip", "-4", "addr", "show", iface).Output()
-	if err != nil {
-		return ""
-	}
-
-	lines := strings.Split(string(out), "\n")
-	for _, line := range lines {
-		line = strings.TrimSpace(line)
-		if strings.HasPrefix(line, "inet ") {
-			parts := strings.Fields(line)
-			if len(parts) >= 2 {
-				// Remove CIDR notation
-				ip := strings.Split(parts[1], "/")[0]
-				return ip
-			}
-		}
-	}
-	return ""
-}
-
-// getWifiInfo returns SSID and signal strength (0-100) for a WiFi interface
-func getWifiInfo(iface string) (string, int) {
-	ssid := ""
-	signal := 0
-
-	// Get SSID using iwgetid
-	out, err := exec.Command("iwgetid", iface, "-r").Output()
-	if err == nil {
-		ssid = strings.TrimSpace(string(out))
-	}
-
-	// Get signal from /proc/net/wireless
-	file, err := os.Open("/proc/net/wireless")
-	if err != nil {
-		return ssid, signal
-	}
-	defer file.Close()
-
-	scanner := bufio.NewScanner(file)
-	for scanner.Scan() {
-		line := scanner.Text()
-		if strings.Contains(line, iface) {
-			fields := strings.Fields(line)
-			if len(fields) >= 4 {
-				// Signal level is in field 3 (link quality) or field 4 (signal level)
-				// Format is usually: interface: status link level noise
-				// Signal level is typically in dBm (negative) or link quality (0-100)
-				linkQuality := strings.TrimSuffix(fields[2], ".")
-				if q, err := strconv.Atoi(linkQuality); err == nil {
-					// If it's a percentage (0-100), use directly
-					if q >= 0 && q <= 100 {
-						signal = q
-					} else if q >= 0 && q <= 70 {
-						// It's likely link quality out of 70
-						signal = (q * 100) / 70
-					}
-				}
-
-				// Also try signal level in dBm (field 3)
-				if signal == 0 && len(fields) >= 4 {
-					sigLevel := strings.TrimSuffix(fields[3], ".")
-					if dbm, err := strconv.Atoi(sigLevel); err == nil {
-						// Convert dBm to percentage (-100 dBm = 0%, -50 dBm = 100%)
-						if dbm < 0 {
-							signal = 2 * (dbm + 100)
-							if signal < 0 {
-								signal = 0
-							}
-							if signal > 100 {
-								signal = 100
-							}
-						}
-					}
-				}
-			}
-			break
-		}
-	}
-
-	return ssid, signal
 }
 
 // mpdClientAdapter adapts the MPD client to the localmusic.MPDClient interface.
