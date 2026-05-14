@@ -12,13 +12,11 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/rs/zerolog/log"
+
+	"github.com/edumarques81/stellar-volumio-audioplayer-backend/internal/infra/paths"
 )
 
 const (
-	// NasMountBase is the base directory for NAS mounts.
-	NasMountBase = "/mnt/NAS"
-	// UsbMountBase is the base directory for USB mounts.
-	UsbMountBase = "/mnt/USB"
 	// MpdMusicDir is the MPD music directory.
 	MpdMusicDir = "/var/lib/mpd/music"
 )
@@ -106,7 +104,7 @@ func (s *Service) AddNasShare(ctx context.Context, req AddNasShareRequest) (*Sou
 
 	// Generate ID and mount point
 	id := uuid.New().String()
-	mountPoint := filepath.Join(NasMountBase, sanitizeName(req.Name))
+	mountPoint := filepath.Join(paths.NasMountBase(), sanitizeName(req.Name))
 
 	// Create share config
 	shareConfig := &NasShareConfig{
@@ -189,7 +187,7 @@ func (s *Service) ListNasShares() ([]NasShare, error) {
 	shares := make([]NasShare, 0, len(s.config.NasShares))
 
 	for _, cfg := range s.config.NasShares {
-		mountPoint := filepath.Join(NasMountBase, sanitizeName(cfg.Name))
+		mountPoint := filepath.Join(paths.NasMountBase(), sanitizeName(cfg.Name))
 		mounted := false
 		if s.mounter != nil {
 			mounted = s.mounter.IsMounted(mountPoint)
@@ -221,7 +219,7 @@ func (s *Service) GetNasShareInfo(id string) (*NasShare, error) {
 		return nil, fmt.Errorf("share not found: %s", id)
 	}
 
-	mountPoint := filepath.Join(NasMountBase, sanitizeName(cfg.Name))
+	mountPoint := filepath.Join(paths.NasMountBase(), sanitizeName(cfg.Name))
 	mounted := false
 	if s.mounter != nil {
 		mounted = s.mounter.IsMounted(mountPoint)
@@ -254,7 +252,7 @@ func (s *Service) DeleteNasShare(ctx context.Context, id string) (*SourceResult,
 		}, nil
 	}
 
-	mountPoint := filepath.Join(NasMountBase, sanitizeName(cfg.Name))
+	mountPoint := filepath.Join(paths.NasMountBase(), sanitizeName(cfg.Name))
 
 	// Unmount if mounted
 	if s.mounter != nil && s.mounter.IsMounted(mountPoint) {
@@ -314,7 +312,7 @@ func (s *Service) MountNasShare(ctx context.Context, id string) (*SourceResult, 
 		}, nil
 	}
 
-	mountPoint := filepath.Join(NasMountBase, sanitizeName(cfg.Name))
+	mountPoint := filepath.Join(paths.NasMountBase(), sanitizeName(cfg.Name))
 
 	// Check if already mounted
 	if s.mounter.IsMounted(mountPoint) {
@@ -397,7 +395,7 @@ func (s *Service) UnmountNasShare(ctx context.Context, id string) (*SourceResult
 		}, nil
 	}
 
-	mountPoint := filepath.Join(NasMountBase, sanitizeName(cfg.Name))
+	mountPoint := filepath.Join(paths.NasMountBase(), sanitizeName(cfg.Name))
 
 	if !s.mounter.IsMounted(mountPoint) {
 		// Already unmounted at the kernel level; still record user intent
@@ -548,7 +546,7 @@ func (s *Service) MountAllShares(ctx context.Context) []MountResult {
 			continue
 		}
 
-		mountPoint := filepath.Join(NasMountBase, sanitizeName(cfg.Name))
+		mountPoint := filepath.Join(paths.NasMountBase(), sanitizeName(cfg.Name))
 
 		// Check if already mounted
 		if s.mounter != nil && s.mounter.IsMounted(mountPoint) {
@@ -593,7 +591,7 @@ func (s *Service) GetUnmountedShares() []string {
 		if cfg.UserUnmounted {
 			continue
 		}
-		mountPoint := filepath.Join(NasMountBase, sanitizeName(cfg.Name))
+		mountPoint := filepath.Join(paths.NasMountBase(), sanitizeName(cfg.Name))
 		if s.mounter == nil || !s.mounter.IsMounted(mountPoint) {
 			unmounted = append(unmounted, cfg.ID)
 		}

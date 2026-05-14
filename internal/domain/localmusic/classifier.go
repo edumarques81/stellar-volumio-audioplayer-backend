@@ -1,13 +1,13 @@
 package localmusic
 
 import (
-	"bufio"
-	"os"
 	"path"
 	"strings"
 	"sync"
 
 	"github.com/rs/zerolog/log"
+
+	"github.com/edumarques81/stellar-volumio-audioplayer-backend/internal/infra/paths"
 )
 
 // PathClassifier classifies music file paths by source type.
@@ -134,7 +134,7 @@ func (c *PathClassifier) getMountType(filePath string) string {
 	return matchedType
 }
 
-// loadMounts reads /proc/mounts to get current mount information.
+// loadMounts reads the host mount table to get current mount information.
 func (c *PathClassifier) loadMounts() map[string]string {
 	c.cacheMu.RLock()
 	if len(c.mountCache) > 0 {
@@ -154,21 +154,14 @@ func (c *PathClassifier) loadMounts() map[string]string {
 
 	mounts := make(map[string]string)
 
-	file, err := os.Open("/proc/mounts")
+	entries, err := paths.ListMounts()
 	if err != nil {
-		log.Warn().Err(err).Msg("Failed to read /proc/mounts, assuming all paths are local")
+		log.Warn().Err(err).Msg("Failed to read mounts, assuming all paths are local")
 		return mounts
 	}
-	defer file.Close()
 
-	scanner := bufio.NewScanner(file)
-	for scanner.Scan() {
-		fields := strings.Fields(scanner.Text())
-		if len(fields) >= 3 {
-			mountPoint := fields[1]
-			fsType := fields[2]
-			mounts[mountPoint] = fsType
-		}
+	for _, m := range entries {
+		mounts[m.MountPoint] = m.FSType
 	}
 
 	c.mountCache = mounts

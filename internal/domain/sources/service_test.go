@@ -7,6 +7,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/edumarques81/stellar-volumio-audioplayer-backend/internal/infra/paths"
 )
 
 func TestNewService(t *testing.T) {
@@ -1156,7 +1158,7 @@ func TestGetUnmountedShares_SkipsUserUnmounted(t *testing.T) {
 	// Simulate the "Auto" share losing its mount (e.g., network blip)
 	for _, cfg := range s.config.NasShares {
 		if cfg.Name == "Auto" {
-			mountPoint := filepath.Join(NasMountBase, sanitizeName(cfg.Name))
+			mountPoint := filepath.Join(paths.NasMountBase(), sanitizeName(cfg.Name))
 			delete(mounter.MountedPaths, mountPoint)
 		}
 	}

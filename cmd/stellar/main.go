@@ -29,6 +29,7 @@ import (
 	"github.com/edumarques81/stellar-volumio-audioplayer-backend/internal/domain/upnp"
 	"github.com/edumarques81/stellar-volumio-audioplayer-backend/internal/infra/llm"
 	"github.com/edumarques81/stellar-volumio-audioplayer-backend/internal/infra/mpd"
+	"github.com/edumarques81/stellar-volumio-audioplayer-backend/internal/infra/paths"
 	"github.com/edumarques81/stellar-volumio-audioplayer-backend/internal/infra/spectrum"
 	"github.com/edumarques81/stellar-volumio-audioplayer-backend/internal/infra/wikipedia"
 	"github.com/edumarques81/stellar-volumio-audioplayer-backend/internal/transport/socketio"
@@ -94,7 +95,7 @@ func main() {
 	playerService := player.NewService(mpdClient)
 
 	// Create sources service for NAS/USB management
-	sourcesConfigPath := filepath.Join("/data/stellar", "sources.json")
+	sourcesConfigPath := filepath.Join(paths.DataDir(), "sources.json")
 	sourcesService, err := sources.NewService(sourcesConfigPath, sources.NewLinuxMounter())
 	if err != nil {
 		log.Warn().Err(err).Msg("Failed to create sources service - NAS/USB management disabled")
@@ -158,7 +159,7 @@ func main() {
 	}
 
 	// Create local music service for local-only browsing and history
-	localMusicDataDir := filepath.Join("/data/stellar")
+	localMusicDataDir := paths.DataDir()
 	mpdMusicDir := "/var/lib/mpd/music"
 	mpdAdapter := &mpdClientAdapter{client: mpdClient}
 	localMusicService := localmusic.NewService(mpdAdapter, localMusicDataDir, mpdMusicDir)
