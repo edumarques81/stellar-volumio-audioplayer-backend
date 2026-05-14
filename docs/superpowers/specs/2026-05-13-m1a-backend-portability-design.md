@@ -29,8 +29,8 @@ The Mac is the *interim* host. Plan B's long-term destination is a Windows mini-
 6. **Windows scope:** Pure stubs everywhere this phase. `*_windows.go` files exist solely so `GOOS=windows go build` succeeds; all functions return `ErrUnsupported` or zero values. No `netsh`/`wmic` work in M1.A.
 7. **Netinfo deduplication:** The two existing Linux network impls (one in `cmd/stellar/main.go:528-708`, one in `internal/transport/socketio/network.go`) collapse into a single canonical Linux impl inside `internal/infra/netinfo`. Both the REST `/api/v1/network` handler and the Socket.IO `pushNetworkStatus` event delegate to that one impl.
 8. **Test strategy:** Per-platform tests live in `*_linux_test.go` / `*_darwin_test.go` (build-tagged) and only run on their target OS. A shared `interface_test.go` (no tag) covers cross-platform contracts that don't need OS facilities (e.g., `LCDStatus` zero-value behaviour, paths package returning non-empty strings, error type sentinel checks).
-9. **Makefile:** Add `build-darwin` (cross-compile darwin/arm64) this phase. The existing `build` (linux/arm64 Pi) and `build-local` (host) targets stay unchanged. `build-windows` is deferred — Windows compiles will be validated by `GOOS=windows go vet` in CI rather than producing a binary.
-10. **Falsifiable success gate:** `strings bin/stellar-darwin-arm64 | grep -E '/(proc|sys|mnt)/'` returns zero matches; `nm bin/stellar-darwin-arm64 | grep -E 'wlr_randr|nmcli|mount\.cifs'` returns zero matches. The Mac binary is structurally Pi-free.
+9. **Makefile:** Add `build-darwin` (cross-compile darwin/arm64) AND `build-windows` (cross-compile windows/amd64) this phase. The existing `build` (linux/arm64 Pi) and `build-local` (host) targets stay unchanged. Pure-Go `modernc.org/sqlite` already supports both targets, so producing a real Windows binary is near-free and catches linker / missing-impl issues that `go vet` alone misses.
+10. **Falsifiable success gate:** `strings bin/stellar-darwin-arm64 | grep -E '/(proc|sys|mnt)/|/etc/(network|resolv)'` returns zero matches; `nm bin/stellar-darwin-arm64 | grep -E 'wlr_randr|nmcli|mount\.cifs'` returns zero matches. The Mac binary is structurally Pi-free. (`/dev` and `/run` deliberately excluded from the strings grep — too noisy because of stdlib `/dev/null`-style references.)
 
 ## Out of scope (explicit)
 
@@ -164,13 +164,14 @@ func RegisterHandlers(reg HandlerRegistrar, brd Broadcaster, c Controller)
 
 ## Migration & sequencing
 
-Implementation lands as **four sequential commits** (one per package) plus a fifth wiring commit. Each commit leaves the binary buildable and tests green on Linux.
+Implementation lands as **six sequential commits**. Each commit leaves the binary buildable and tests green on Linux. The netinfo work is split across two commits so that if a behavioural-drift regression appears, bisect cleanly isolates "move" from "dedup."
 
 1. **Commit 1 — `internal/infra/paths`.** Pure additive package. Replace callsites in `main.go`, `sources/service.go`, `localmusic/classifier.go`. No behavior change on Pi. Concrete test: existing Pi backend still parses `/proc/mounts` correctly via `paths.ListMounts()`.
-2. **Commit 2 — `internal/infra/lcd`.** Move `socketio/lcd.go` body into `internal/infra/lcd/lcd_linux.go`. Add darwin/windows stubs. Add `handlers.go`. Delete `socketio/lcd.go`. Add `build-darwin` Makefile target. Concrete test: `make build` (Pi cross-compile) and `make build-darwin` both succeed; LCD power tile still works on the Pi.
-3. **Commit 3 — `internal/infra/netinfo`.** Move + dedupe the two Linux impls. Add darwin/windows. Delete `socketio/network.go` and the network helpers in `main.go`. Concrete test: REST `/api/v1/network` and Socket.IO `pushNetworkStatus` both return the same payload as before on the Pi; `make build-darwin` produces a binary whose `getNetworkStatus()` runs `networksetup` (verified by a one-shot Mac smoke run).
-4. **Commit 4 — `internal/domain/sources` rename + darwin impls.** Rename existing Linux files, add darwin counterparts, add `platform_*.go` selector files. Concrete test: existing `sources` Go tests still pass on Linux; new darwin tests pass on macOS; `sources.NewPlatformMounter()` returns a `LinuxMounter` on Pi.
-5. **Commit 5 — final wiring + falsifiable success gate.** `main.go` switches its `sources.NewLinuxMounter()` calls to `sources.NewPlatformMounter()`. Run the success-gate grep against `bin/stellar-darwin-arm64`. Document new flags / behavior in `docs/ARCHITECTURE.md`.
+2. **Commit 2 — `internal/infra/lcd`.** Move `socketio/lcd.go` body into `internal/infra/lcd/lcd_linux.go`. Add darwin/windows stubs. Add `handlers.go`. Delete `socketio/lcd.go`. Add `build-darwin` AND `build-windows` Makefile targets. Concrete test: `make build` (Pi cross-compile), `make build-darwin`, and `make build-windows` all succeed; LCD power tile still works on the Pi.
+3. **Commit 3a — `internal/infra/netinfo` move (keep both impls).** Create the new package shape. Move `socketio/network.go` Linux logic into `internal/infra/netinfo/netinfo_linux.go` *unchanged*. Move `main.go:528-708` helpers into a sibling file inside the same package, *also unchanged* — call it `netinfo_legacy_linux.go` and keep its functions exported only to the package. Add darwin + windows. Both old callsites (REST `/api/v1/network` and Socket.IO `pushNetworkStatus`) now route through the new package but each still calls *its own* original impl. Capture pre-change JSON payloads as test fixtures (`netinfo_fixture_test.go`) — assert both impls produce equal output for the current Pi state. Concrete test: payload bytes from REST and pushNetworkStatus match the fixtures byte-for-byte after deploy.
+4. **Commit 3b — netinfo dedup to canonical impl.** Delete `netinfo_legacy_linux.go`. Route both callsites at the canonical `netinfo_linux.go` impl. Fixture test from 3a still passes. Concrete test: bisect-safe — if any drift appears, the regression is provably inside this commit, not the move.
+5. **Commit 4 — `internal/domain/sources` rename + darwin impls.** Rename existing Linux files, add darwin counterparts, add `platform_*.go` selector files. Concrete test: existing `sources` Go tests still pass on Linux; new darwin tests pass on macOS; `sources.NewPlatformMounter()` returns a `LinuxMounter` on Pi.
+6. **Commit 5 — final wiring + falsifiable success gate.** `main.go` switches its `sources.NewLinuxMounter()` calls to `sources.NewPlatformMounter()`. Run the success-gate grep against `bin/stellar-darwin-arm64` and confirm `bin/stellar-windows-amd64.exe` builds. Document new flags / behavior in `docs/ARCHITECTURE.md`.
 
 Each commit is independently revertable. If any reviewer pass surfaces a problem after a commit, the next commit can absorb the fix rather than amending.
 
@@ -205,12 +206,13 @@ Before declaring M1.A done:
 
 1. `make build` (Pi ARM64) succeeds; binary identical-ish size to current (within 5%).
 2. `make build-darwin` succeeds; produces `bin/stellar-darwin-arm64`.
-3. `go test ./...` passes on macOS with `GOOS=darwin`.
-4. `go vet -tags=windows ./...` passes (no symbols leak into windows builds).
-5. `strings bin/stellar-darwin-arm64 | grep -E '/(proc|sys|mnt)/'` → 0 matches.
+3. `make build-windows` succeeds; produces `bin/stellar-windows-amd64.exe` (Windows impls are stubs; this gate exists to catch linker errors and missing-symbol leaks that `go vet` alone misses).
+4. `go test ./...` passes on macOS with `GOOS=darwin`.
+5. `strings bin/stellar-darwin-arm64 | grep -E '/(proc|sys|mnt)/|/etc/(network|resolv)'` → 0 matches. (`/dev` and `/run` deliberately excluded — too noisy because of stdlib `/dev/null`-style references.)
 6. `nm bin/stellar-darwin-arm64 | grep -E 'wlr_randr|nmcli|mount\.cifs'` → 0 matches.
 7. Pi backend redeployed from the new tree: existing LCD power tile, network status broadcast, and NAS browse all still work.
 8. No grep of `internal/infra/` matches `zishang520` or `transport/socketio`.
+9. Netinfo dedup verification (Commit 3b): REST `/api/v1/network` and Socket.IO `pushNetworkStatus` payloads match the Commit-3a fixtures byte-for-byte on a redeployed Pi backend.
 
 ## Non-goals reminder
 
