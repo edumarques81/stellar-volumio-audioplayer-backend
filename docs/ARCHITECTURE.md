@@ -479,3 +479,37 @@ logging:
 - [MPD Protocol](https://mpd.readthedocs.io/en/latest/protocol.html)
 - [gompd](https://github.com/fhs/gompd) - Go MPD client
 - [go-socket.io](https://github.com/googollee/go-socket.io) - Socket.io for Go
+
+## Cross-platform abstraction layer (M1.A)
+
+The backend builds for `linux/arm64` (Pi production), `darwin/arm64` (Mac
+interim host), and `windows/amd64` (long-term Plan B host, stubs only).
+Platform-specific logic is concentrated in three infra packages and one
+domain-package refactor:
+
+| Package | Role | Linux | Darwin | Windows |
+|---|---|---|---|---|
+| `internal/infra/paths` | Filesystem layout + mount enumeration + system identity | `/data/stellar`, `/mnt/{NAS,USB}`, parses `/proc/mounts` and `/proc/cpuinfo` | `~/Library/Application Support/stellar`, `/Volumes/stellar-nas`, parses `mount(8)` + `sysctl hw.model` | `%LOCALAPPDATA%\stellar`, `ErrUnsupported` for mounts |
+| `internal/infra/lcd` | LCD power control + status broadcast | wlr-randr + DPMS + backlight sysfs + vcgencmd + xrandr fallback chain | stub: `Status` always reports `IsOn=true`, `Set` returns `ErrUnsupported` | same as darwin |
+| `internal/infra/netinfo` | Network state read + `pushNetworkStatus` broadcast | reads `/sys/class/net/*`, `iwgetid`, `/proc/net/wireless` | `networksetup -listallhardwareports` + `/sbin/ifconfig` + `airport -I` | stub: returns `Status{Type: "none"}` |
+| `internal/domain/sources` | NAS share mount + LAN discovery | `mount -t {cifs,nfs}`, `nmblookup`, `avahi-browse`, `smbclient -L` | `/sbin/mount_smbfs`, `/sbin/mount_nfs`, `/usr/bin/dns-sd -B _smb._tcp.`, `/usr/bin/smbutil view` | pure stubs returning `ErrUnsupported` |
+
+**Selection pattern:** each package exposes a `NewPlatform()` constructor
+selected by `//go:build linux|darwin|windows` tags. The transport layer
+(`internal/transport/socketio/server.go`) implements the `Broadcaster`
+interface that infra packages depend on, so `internal/infra/*` never imports
+`github.com/zishang520/socket.io/v3`.
+
+**Build targets:**
+- `make build` — Linux ARM64 (Pi, default)
+- `make build-darwin` — Darwin ARM64 (Mac interim host for M1.C cutover)
+- `make build-windows` — Windows AMD64 (Plan B; stubs only)
+
+**Falsifiable gate:**
+
+```
+strings bin/stellar-darwin-arm64 | grep -E '/(proc|sys|mnt)/|/etc/(network|resolv)'
+```
+
+Must return zero matches — proves the darwin binary contains no leaked
+Linux-only paths.

@@ -3,8 +3,8 @@ package socketio
 
 import (
 	"os"
-	"strings"
 
+	"github.com/edumarques81/stellar-volumio-audioplayer-backend/internal/infra/paths"
 	"github.com/edumarques81/stellar-volumio-audioplayer-backend/internal/version"
 )
 
@@ -39,18 +39,8 @@ func GetSystemInfo() SystemInfo {
 		info.ID = hostname
 	}
 
-	// Try to get more specific hardware info from /proc/cpuinfo
-	if data, err := os.ReadFile("/proc/cpuinfo"); err == nil {
-		lines := strings.Split(string(data), "\n")
-		for _, line := range lines {
-			if strings.HasPrefix(line, "Model") {
-				parts := strings.SplitN(line, ":", 2)
-				if len(parts) == 2 {
-					info.Hardware = strings.TrimSpace(parts[1])
-					break
-				}
-			}
-		}
+	if hw := paths.SystemHardware(); hw != "" {
+		info.Hardware = hw
 	}
 
 	return info

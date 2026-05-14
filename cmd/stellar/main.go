@@ -95,13 +95,13 @@ func main() {
 
 	// Create sources service for NAS/USB management
 	sourcesConfigPath := filepath.Join(paths.DataDir(), "sources.json")
-	sourcesService, err := sources.NewService(sourcesConfigPath, sources.NewLinuxMounter())
+	sourcesService, err := sources.NewService(sourcesConfigPath, sources.NewPlatformMounter())
 	if err != nil {
 		log.Warn().Err(err).Msg("Failed to create sources service - NAS/USB management disabled")
 		sourcesService = nil
 	} else {
 		// Set up NAS discoverer for Phase 2 discovery functionality
-		sourcesService.SetDiscoverer(sources.NewLinuxDiscoverer())
+		sourcesService.SetDiscoverer(sources.NewPlatformDiscoverer())
 		log.Info().Str("config", sourcesConfigPath).Msg("Sources service initialized with NAS discovery")
 
 		// Auto-mount all configured NAS shares on startup. The 2-minute
