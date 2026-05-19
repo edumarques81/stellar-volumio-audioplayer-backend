@@ -513,3 +513,44 @@ strings bin/stellar-darwin-arm64 | grep -E '/(proc|sys|mnt)/|/etc/(network|resol
 
 Must return zero matches — proves the darwin binary contains no leaked
 Linux-only paths.
+
+## M1.C topology cutover (2026-05-19)
+
+The backend now runs on the Mac (`192.168.86.221`) supervised by launchd. The Pi
+runs MPD plus three small HTTP/FIFO services:
+
+- `lcd-control.service` (:8081, Node) — `/api/screen/{on,off,status}` with
+  `X-Auth-Token`. Replaces the in-process LCD control that ran inside the
+  Pi-resident backend pre-M1.C. The backend's `internal/infra/lcd/RemoteController`
+  is the HTTP client; the env-driven `NewPlatform()` on darwin/windows selects
+  it when `STELLAR_LCD_REMOTE_URL` + `STELLAR_LCD_REMOTE_TOKEN` are set.
+- `stellar-mount-control.service` (:8082, Node) — nine endpoints covering the
+  full `sources.Mounter` + `sources.Discoverer` interface surface (mount, unmount,
+  is-mounted, create/remove mountpoint, create/remove symlink, browse shares,
+  discover devices). Bearer-token auth. Backend's
+  `internal/domain/sources/RemoteMounter` + `RemoteDiscoverer` are the clients,
+  selected via `NewPlatformMounter()` / `NewPlatformDiscoverer()` on the same
+  env-driven pattern.
+- `stellar-spectrum.service` (no socket — pushes outbound) — runs the
+  `cmd/stellar-spectrum` daemon from M1.B. Reads `/tmp/mpd_spectrum.fifo`,
+  computes per-channel L/R FFT, POSTs each frame to the Mac backend's
+  `/internal/spectrum` ingest endpoint with `Authorization: Bearer
+  <STELLAR_SPECTRUM_KEY>`. Backend was set to `STELLAR_SPECTRUM_SOURCE=remote`
+  via env file. In-process FFT codepath retained for rollback.
+
+Frontend kiosk loads from Mac Vite dev server (`http://192.168.86.221:5173/`)
+and reads `/config.json` whose `backendUrl` field flipped from `Pi:3000` to
+`Mac:3000` at cutover time.
+
+Mac data dirs: `~/stellar-backend/data/library.db` (SQLite cache — hardcoded
+path, see OPERATIONS.md tech-debt), `~/Library/Application Support/stellar/`
+(`sources.json`, local music) via M1.A's `paths.DataDir()`. Pi data dirs
+unchanged at `~eduardo/stellar-backend/data/` (left intact for rollback).
+
+The Pi `stellar-backend.service` is `stopped` + `disabled` but the unit file
++ binary remain installed. Rollback is one `launchctl bootout` (Mac) + one
+`systemctl enable --now stellar-backend` (Pi) + revert `config.json`.
+
+Design rationale + full decision history in
+`docs/superpowers/specs/2026-05-19-m1c-cutover-design.md`. Runbook in
+`docs/OPERATIONS.md`. Cutover verification: `deploy/verify-cutover.sh`.
