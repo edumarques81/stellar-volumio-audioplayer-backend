@@ -26,5 +26,6 @@ set +a
 
 cd "$BACKEND_DIR"
 exec /usr/bin/caffeinate -dis "$BIN" \
+  -port "${STELLAR_PORT:-3000}" \
   -mpd-host "${STELLAR_MPD_HOST:-192.168.86.25}" \
   -mpd-port "${STELLAR_MPD_PORT:-6600}"
