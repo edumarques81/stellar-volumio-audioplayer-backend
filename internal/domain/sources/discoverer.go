@@ -22,8 +22,8 @@ type Discoverer interface {
 // _linux.go / _darwin.go files) so callers that need to type-assert do not
 // have to be themselves build-tagged.
 type ShareBrowseError struct {
-	Code    string
-	Message string
+	Code    string `json:"code"`
+	Message string `json:"message"`
 }
 
 func (e *ShareBrowseError) Error() string {
