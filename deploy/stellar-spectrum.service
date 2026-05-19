@@ -1,0 +1,21 @@
+[Unit]
+Description=Stellar Spectrum FFT Daemon (Pi-side)
+Documentation=https://github.com/edumarques81/stellar-volumio-audioplayer-backend
+After=mpd.service network.target
+Wants=mpd.service
+
+[Service]
+Type=simple
+User=eduardo
+Group=audio
+WorkingDirectory=/home/eduardo/stellar-backend
+EnvironmentFile=/etc/stellar-spectrum/env
+ExecStart=/home/eduardo/stellar-backend/stellar-spectrum
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=stellar-spectrum
+
+[Install]
+WantedBy=multi-user.target
