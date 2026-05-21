@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"runtime"
 	"strings"
+	"time"
 
 	"github.com/rs/zerolog/log"
 	"github.com/zishang520/socket.io/servers/socket/v3"
@@ -14,20 +15,38 @@ import (
 
 // SystemActionDeps lets tests substitute the side-effecting executors.
 // Production deployment uses DefaultShutdown / DefaultReboot.
+//
+// Broadcast is optional — when set, RegisterHandlers emits a one-shot
+// `pushShutdownNotice` warning to all clients before the (deferred) exec.
+// This preserves the legacy server.go inline handler's 3-second UX.
+//
+// On post-M1.C topologies the Mac/Windows backend wires Shutdown/Reboot to
+// RemoteSystemActions so the action lands on the Pi appliance instead of
+// the backend host. main.go selects the impl via STELLAR_MOUNT_REMOTE_*.
 type SystemActionDeps struct {
-	Shutdown func() error
-	Reboot   func() error
+	Shutdown  func() error
+	Reboot    func() error
+	Broadcast func(event string, payload any)
 }
 
-// SystemActionHandlers wires system:shutdown / system:reboot to root commands.
+// shutdownWarningDelay is the user-visible warning window between the
+// `pushShutdownNotice` broadcast and the actual exec — matches the legacy
+// inline handler that lived in server.go pre-M1.D.
+const shutdownWarningDelay = 3 * time.Second
+
+// SystemActionHandlers wires the `shutdown` / `reboot` socket events to root
+// commands. Both UI surfaces (PowerModal on the home screen + SystemSettings
+// on the settings page) emit the bare event names (no `system:` prefix); this
+// is the post-M1.D convergence — earlier code had two parallel dispatch paths
+// (`system:shutdown` here, a duplicate unauthenticated `shutdown` handler in
+// server.go). The duplicate is deleted; this is the single canonical path.
 //
-// Auth: only loopback callers (127.0.0.1 / ::1) are allowed. Non-loopback
-// callers are refused with a generic "unauthorized" error event — they do
-// NOT silently fail, and they do NOT see the IP echoed back. The full
-// detail (including remote IP) is logged at warn level for ops.
-// This is a SECURITY guarantee documented in the Plan 3 spec: the redesigned
-// frontend (which lives on the same Pi) must hit the backend over loopback,
-// while remote Volumio Connect mobile apps cannot trigger power actions.
+// Auth: only loopback callers (127.0.0.1 / ::1) are allowed by default; the
+// trusted-remotes allowlist (STELLAR_POWER_TRUSTED_REMOTES) extends to
+// specific LAN clients. Non-loopback callers are refused with a generic
+// "unauthorized" error event — they do NOT silently fail, and they do NOT
+// see the IP echoed back. The full detail (including remote IP) is logged
+// at warn level for ops.
 //
 // The check happens BEFORE any system call.
 type SystemActionHandlers struct {
@@ -95,30 +114,50 @@ func parseTrustedSpecs(specs []string) ([]*net.IPNet, error) {
 	return nets, nil
 }
 
-// RegisterHandlers attaches the socket events.
+// RegisterHandlers attaches the socket events. The action follows a
+// fire-and-forget pattern so the kiosk has a 3-second user-visible warning
+// before the Pi powers down: auth gate → optional broadcast → goroutine
+// (sleep + exec). The HTTP/socket call itself returns immediately so the
+// frontend can render the toast before the Pi connection drops.
 func (h *SystemActionHandlers) RegisterHandlers(client *socket.Socket) {
-	client.On("system:shutdown", func(_ ...interface{}) {
-		ip := extractRemoteIP(client)
-		if err := h.handleShutdownInternal(ip); err != nil {
-			log.Warn().Err(err).Str("remote_ip", ip).Msg("system:shutdown rejected")
-			_ = client.Emit("system:action:error", map[string]string{
-				"action": "shutdown",
-				"error":  clientErrorMessage(err),
-			})
-			return
+	client.On("shutdown", func(_ ...interface{}) { h.handleEvent(client, "shutdown") })
+	client.On("reboot", func(_ ...interface{}) { h.handleEvent(client, "reboot") })
+}
+
+// handleEvent is the single auth+broadcast+exec pipeline. action ∈ {"shutdown","reboot"}.
+func (h *SystemActionHandlers) handleEvent(client *socket.Socket, action string) {
+	ip := extractRemoteIP(client)
+	if !h.isAuthorized(ip) {
+		log.Warn().Err(errNonLoopback).Str("remote_ip", ip).Str("action", action).Msg("system action rejected")
+		_ = client.Emit("system:action:error", map[string]string{
+			"action": action,
+			"error":  "unauthorized",
+		})
+		return
+	}
+	log.Info().Str("remote_ip", ip).Str("action", action).Dur("delay", shutdownWarningDelay).Msg("system action authorized; broadcasting + deferred exec")
+	if h.deps.Broadcast != nil {
+		message := "Shutting down in 3 seconds..."
+		if action == "reboot" {
+			message = "Rebooting in 3 seconds..."
 		}
-	})
-	client.On("system:reboot", func(_ ...interface{}) {
-		ip := extractRemoteIP(client)
-		if err := h.handleRebootInternal(ip); err != nil {
-			log.Warn().Err(err).Str("remote_ip", ip).Msg("system:reboot rejected")
-			_ = client.Emit("system:action:error", map[string]string{
-				"action": "reboot",
-				"error":  clientErrorMessage(err),
-			})
-			return
+		h.deps.Broadcast("pushShutdownNotice", map[string]any{
+			"action":  action,
+			"message": message,
+		})
+	}
+	go func() {
+		time.Sleep(shutdownWarningDelay)
+		var err error
+		if action == "reboot" {
+			err = h.deps.Reboot()
+		} else {
+			err = h.deps.Shutdown()
 		}
-	})
+		if err != nil {
+			log.Error().Err(err).Str("action", action).Msg("system action exec failed")
+		}
+	}()
 }
 
 // clientErrorMessage sanitizes the outgoing error payload. Non-loopback
@@ -132,24 +171,23 @@ func clientErrorMessage(err error) string {
 	return err.Error()
 }
 
-// handleShutdownInternal: auth check FIRST, then dispatch.
-// Tests target this directly so the security gate is verifiable
-// without a real socket. Unauthorized callers wrap errNonLoopback so
-// the surface error message can be sanitized in RegisterHandlers while
-// the warn log still captures the IP.
+// handleShutdownInternal: synchronous test seam — auth check FIRST, then
+// dispatch. The production code path is handleEvent (async); this stays
+// because the security-gate tests target it without spinning a real socket.
+// Unauthorized callers wrap errNonLoopback so callers can errors.Is-check.
 func (h *SystemActionHandlers) handleShutdownInternal(remoteIP string) error {
 	if !h.isAuthorized(remoteIP) {
-		return fmt.Errorf("system:shutdown from %q: %w", remoteIP, errNonLoopback)
+		return fmt.Errorf("shutdown from %q: %w", remoteIP, errNonLoopback)
 	}
-	log.Info().Str("remote_ip", remoteIP).Msg("system:shutdown authorized; executing")
+	log.Info().Str("remote_ip", remoteIP).Msg("shutdown authorized; executing")
 	return h.deps.Shutdown()
 }
 
 func (h *SystemActionHandlers) handleRebootInternal(remoteIP string) error {
 	if !h.isAuthorized(remoteIP) {
-		return fmt.Errorf("system:reboot from %q: %w", remoteIP, errNonLoopback)
+		return fmt.Errorf("reboot from %q: %w", remoteIP, errNonLoopback)
 	}
-	log.Info().Str("remote_ip", remoteIP).Msg("system:reboot authorized; executing")
+	log.Info().Str("remote_ip", remoteIP).Msg("reboot authorized; executing")
 	return h.deps.Reboot()
 }
 

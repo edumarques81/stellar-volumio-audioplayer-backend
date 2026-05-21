@@ -218,17 +218,32 @@ func main() {
 		log.Warn().Msg("Cache DB unavailable; bio + last-played services disabled")
 	}
 
-	// Register system shutdown/reboot handlers. Loopback callers are always
-	// authorized. STELLAR_POWER_TRUSTED_REMOTES (comma-separated IP/CIDR
-	// list) extends the gate to LAN clients — used for dev mode where the
-	// frontend runs on a separate machine. Empty/unset == loopback-only.
+	// Register `shutdown` / `reboot` socket handlers. Loopback callers are
+	// always authorized; STELLAR_POWER_TRUSTED_REMOTES (CSV of IPs/CIDRs)
+	// extends the gate to LAN clients (kiosk + dev frontend). In the M1.C+
+	// Mac/Windows topology, STELLAR_MOUNT_REMOTE_URL+_TOKEN being set tells
+	// us to route the action to the Pi mount-control service
+	// (/api/system/*) so it lands on the audio appliance instead of the
+	// backend host. On Linux (Pi-resident) those env vars are unset and
+	// DefaultShutdown/DefaultReboot exec /sbin/shutdown locally.
 	trustedRemotes := strings.Split(os.Getenv("STELLAR_POWER_TRUSTED_REMOTES"), ",")
-	systemActionHandlers, err := socketio.NewSystemActionHandlersWithTrusted(socketio.SystemActionDeps{}, trustedRemotes)
+	sysDeps := socketio.SystemActionDeps{
+		Broadcast: socketServer.Broadcaster().Emit,
+	}
+	if mountURL := os.Getenv("STELLAR_MOUNT_REMOTE_URL"); mountURL != "" {
+		if mountTok := os.Getenv("STELLAR_MOUNT_REMOTE_TOKEN"); mountTok != "" {
+			rsa := socketio.NewRemoteSystemActions(mountURL, mountTok)
+			sysDeps.Shutdown = rsa.Shutdown
+			sysDeps.Reboot = rsa.Reboot
+			log.Info().Str("base_url", mountURL).Msg("System actions routed to Pi via mount-control /api/system/*")
+		}
+	}
+	systemActionHandlers, err := socketio.NewSystemActionHandlersWithTrusted(sysDeps, trustedRemotes)
 	if err != nil {
 		log.Fatal().Err(err).Msg("Invalid STELLAR_POWER_TRUSTED_REMOTES")
 	}
 	socketServer.SetSystemActionHandlers(systemActionHandlers)
-	log.Info().Strs("trusted_remotes", trustedRemotes).Msg("System action handlers registered (system:shutdown / system:reboot)")
+	log.Info().Strs("trusted_remotes", trustedRemotes).Bool("remote_exec", sysDeps.Shutdown != nil).Msg("System action handlers registered (shutdown / reboot)")
 
 	// Start MPD watcher
 	ctx, cancel := context.WithCancel(context.Background())
