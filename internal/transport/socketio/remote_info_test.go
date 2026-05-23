@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -119,4 +120,87 @@ func TestRemoteInfoClient_HappyPaths(t *testing.T) {
 			t.Errorf("Enabled = true, want false")
 		}
 	})
+}
+
+func TestRemoteInfoClient_FailureModes(t *testing.T) {
+	cases := []struct {
+		name      string
+		setup     func(t *testing.T) (string, string) // returns (baseURL, token)
+		wantErrIs string                              // substring match on err.Error()
+	}{
+		{
+			name: "HTTP 401 unauthorized",
+			setup: func(t *testing.T) (string, string) {
+				srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					http.Error(w, "unauthorized", http.StatusUnauthorized)
+				}))
+				t.Cleanup(srv.Close)
+				return srv.URL, "wrong-token"
+			},
+			wantErrIs: "HTTP 401",
+		},
+		{
+			name: "HTTP 500 Pi shell-out failed",
+			setup: func(t *testing.T) (string, string) {
+				srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					http.Error(w, "shell failed", http.StatusInternalServerError)
+				}))
+				t.Cleanup(srv.Close)
+				return srv.URL, "token"
+			},
+			wantErrIs: "HTTP 500",
+		},
+		{
+			name: "connection refused",
+			setup: func(t *testing.T) (string, string) {
+				// Bind a port, immediately close it, then return its URL.
+				srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+				url := srv.URL
+				srv.Close()
+				return url, "token"
+			},
+			wantErrIs: "", // any error (connection refused message varies by OS)
+		},
+		{
+			name: "JSON decode failure",
+			setup: func(t *testing.T) (string, string) {
+				srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					w.Header().Set("Content-Type", "application/json")
+					_, _ = w.Write([]byte("not json"))
+				}))
+				t.Cleanup(srv.Close)
+				return srv.URL, "token"
+			},
+			wantErrIs: "decode",
+		},
+	}
+
+	methods := []struct {
+		name string
+		call func(*RemoteInfoClient) error
+	}{
+		{"SystemInfo", func(c *RemoteInfoClient) error { _, e := c.SystemInfo(); return e }},
+		{"DeviceInfo", func(c *RemoteInfoClient) error { _, e := c.DeviceInfo(); return e }},
+		{"NetworkStatus", func(c *RemoteInfoClient) error { _, e := c.NetworkStatus(); return e }},
+		{"BitPerfect", func(c *RemoteInfoClient) error { _, e := c.BitPerfect(); return e }},
+		{"DsdMode", func(c *RemoteInfoClient) error { _, e := c.DsdMode(); return e }},
+		{"MixerMode", func(c *RemoteInfoClient) error { _, e := c.MixerMode(); return e }},
+	}
+
+	for _, tc := range cases {
+		for _, m := range methods {
+			tc, m := tc, m
+			t.Run(tc.name+"/"+m.name, func(t *testing.T) {
+				baseURL, token := tc.setup(t)
+				client := NewRemoteInfoClientWithClient(baseURL, token, &http.Client{Timeout: 2 * time.Second})
+				err := m.call(client)
+				if err == nil {
+					t.Fatalf("want error, got nil")
+				}
+				if tc.wantErrIs != "" && !strings.Contains(err.Error(), tc.wantErrIs) {
+					t.Errorf("err = %q, want substring %q", err.Error(), tc.wantErrIs)
+				}
+			})
+		}
+	}
 }
