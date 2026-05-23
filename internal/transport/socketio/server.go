@@ -58,8 +58,9 @@ type Server struct {
 	cacheDB             *cache.DB
 	cacheDAO            *cache.DAO
 	audirvanaService    *audirvana.Service
-	deviceService       *device.Service   // Volumio device identity
-	volumioHandlers     *VolumioHandlers  // Volumio Connect compatibility
+	deviceService       *device.Service    // Volumio device identity
+	volumioHandlers     *VolumioHandlers   // Volumio Connect compatibility
+	remoteInfo          RemoteInfoReader   // nil on Linux/Pi-resident build; set via UseRemoteInfo
 	connLimiter         *ConnectionLimiter // Limits concurrent external connections
 	mu                  sync.RWMutex
 	clients             map[string]*socket.Socket
@@ -97,6 +98,14 @@ func (s *Server) SetLCDController(c lcd.Controller) { s.lcdController = c }
 // SetNetReporter wires the platform-selected Reporter. Called from main.go
 // after the Server is constructed.
 func (s *Server) SetNetReporter(r netinfo.Reporter) { s.netReporter = r }
+
+// UseRemoteInfo wires a RemoteInfoReader that proxies six host-specific
+// read handlers to the Pi appliance. Called from cmd/stellar/main.go when
+// STELLAR_MOUNT_REMOTE_URL + _TOKEN are both set. When nil, the existing
+// handlers fall through to local implementations.
+func (s *Server) UseRemoteInfo(r RemoteInfoReader) {
+	s.remoteInfo = r
+}
 
 // NewServer creates a new Socket.io server.
 // bitPerfect indicates whether the system is configured for bit-perfect audio output.
