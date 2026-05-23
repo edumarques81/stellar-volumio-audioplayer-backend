@@ -10,12 +10,15 @@ import (
 
 // fakeRemoteAudio is a programmable stub for handler-branch tests in later tasks. Satisfies RemoteAudioClient.
 type fakeRemoteAudio struct {
-	systemInfoFn    func() (SystemInfo, error)
-	deviceInfoFn    func() (device.DeviceInfo, error)
-	networkStatusFn func() (netinfo.Status, error)
-	bitPerfectFn    func() (BitPerfectStatus, error)
-	dsdModeFn       func() (DsdModeResponse, error)
-	mixerModeFn     func() (MixerModeResponse, error)
+	systemInfoFn      func() (SystemInfo, error)
+	deviceInfoFn      func() (device.DeviceInfo, error)
+	networkStatusFn   func() (netinfo.Status, error)
+	bitPerfectFn      func() (BitPerfectStatus, error)
+	dsdModeFn         func() (DsdModeResponse, error)
+	mixerModeFn       func() (MixerModeResponse, error)
+	setDsdModeFn      func(mode string) (DsdModeResponse, error)
+	setMixerModeFn    func(enabled bool) (MixerModeResponse, error)
+	applyBitPerfectFn func() (ApplyBitPerfectResponse, error)
 }
 
 func (f *fakeRemoteAudio) SystemInfo() (SystemInfo, error)        { return f.systemInfoFn() }
@@ -24,6 +27,15 @@ func (f *fakeRemoteAudio) NetworkStatus() (netinfo.Status, error) { return f.net
 func (f *fakeRemoteAudio) BitPerfect() (BitPerfectStatus, error)  { return f.bitPerfectFn() }
 func (f *fakeRemoteAudio) DsdMode() (DsdModeResponse, error)      { return f.dsdModeFn() }
 func (f *fakeRemoteAudio) MixerMode() (MixerModeResponse, error)  { return f.mixerModeFn() }
+func (f *fakeRemoteAudio) SetDsdMode(mode string) (DsdModeResponse, error) {
+	return f.setDsdModeFn(mode)
+}
+func (f *fakeRemoteAudio) SetMixerMode(enabled bool) (MixerModeResponse, error) {
+	return f.setMixerModeFn(enabled)
+}
+func (f *fakeRemoteAudio) ApplyBitPerfect() (ApplyBitPerfectResponse, error) {
+	return f.applyBitPerfectFn()
+}
 
 var errStub = errors.New("stub error")
 

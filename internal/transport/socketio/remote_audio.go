@@ -29,6 +29,9 @@ type RemoteAudioClient interface {
 	BitPerfect() (BitPerfectStatus, error)
 	DsdMode() (DsdModeResponse, error)
 	MixerMode() (MixerModeResponse, error)
+	SetDsdMode(mode string) (DsdModeResponse, error)
+	SetMixerMode(enabled bool) (MixerModeResponse, error)
+	ApplyBitPerfect() (ApplyBitPerfectResponse, error)
 }
 
 // RemoteAudioClientImpl proxies six read handlers to the Pi-resident
@@ -168,5 +171,23 @@ func (r *RemoteAudioClientImpl) DsdMode() (DsdModeResponse, error) {
 func (r *RemoteAudioClientImpl) MixerMode() (MixerModeResponse, error) {
 	var out MixerModeResponse
 	err := r.get("/api/audio/mixer", &out)
+	return out, err
+}
+
+func (r *RemoteAudioClientImpl) SetDsdMode(mode string) (DsdModeResponse, error) {
+	var out DsdModeResponse
+	err := r.post("/api/audio/dsd", map[string]string{"mode": mode}, &out)
+	return out, err
+}
+
+func (r *RemoteAudioClientImpl) SetMixerMode(enabled bool) (MixerModeResponse, error) {
+	var out MixerModeResponse
+	err := r.post("/api/audio/mixer", map[string]bool{"enabled": enabled}, &out)
+	return out, err
+}
+
+func (r *RemoteAudioClientImpl) ApplyBitPerfect() (ApplyBitPerfectResponse, error) {
+	var out ApplyBitPerfectResponse
+	err := r.post("/api/audio/bitperfect/apply", nil, &out)
 	return out, err
 }

@@ -2,6 +2,7 @@ package socketio
 
 import (
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -203,4 +204,86 @@ func TestRemoteAudioClientImpl_FailureModes(t *testing.T) {
 			})
 		}
 	}
+}
+
+func TestRemoteAudioClient_WriteHappyPaths(t *testing.T) {
+	// Fixtures for the 3 POST endpoints.
+	var (
+		gotDsdBody    map[string]any
+		gotMixerBody  map[string]any
+		gotApplyBody  string
+		lastPostToken string
+	)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "method", http.StatusMethodNotAllowed)
+			return
+		}
+		lastPostToken = r.Header.Get("X-Auth-Token")
+		switch r.URL.Path {
+		case "/api/audio/dsd":
+			_ = json.NewDecoder(r.Body).Decode(&gotDsdBody)
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(DsdModeResponse{Mode: gotDsdBody["mode"].(string), Success: true})
+		case "/api/audio/mixer":
+			_ = json.NewDecoder(r.Body).Decode(&gotMixerBody)
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(MixerModeResponse{Enabled: gotMixerBody["enabled"].(bool), Success: true})
+		case "/api/audio/bitperfect/apply":
+			buf, _ := io.ReadAll(r.Body)
+			gotApplyBody = string(buf)
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(ApplyBitPerfectResponse{Success: true, Applied: []string{"mixer_type = bit-perfect"}, Errors: []string{}})
+		default:
+			http.Error(w, "no route", http.StatusNotFound)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	client := NewRemoteAudioClientWithClient(srv.URL, "write-token", &http.Client{Timeout: 2 * time.Second})
+
+	t.Run("SetDsdMode", func(t *testing.T) {
+		resp, err := client.SetDsdMode("dop")
+		if err != nil {
+			t.Fatalf("err: %v", err)
+		}
+		if resp.Mode != "dop" {
+			t.Errorf("Mode = %q, want dop", resp.Mode)
+		}
+		if !resp.Success {
+			t.Errorf("Success = false, want true")
+		}
+		if gotDsdBody["mode"] != "dop" {
+			t.Errorf("body mode = %v, want dop", gotDsdBody["mode"])
+		}
+		if lastPostToken != "write-token" {
+			t.Errorf("token = %q, want write-token", lastPostToken)
+		}
+	})
+	t.Run("SetMixerMode", func(t *testing.T) {
+		resp, err := client.SetMixerMode(true)
+		if err != nil {
+			t.Fatalf("err: %v", err)
+		}
+		if !resp.Enabled {
+			t.Errorf("Enabled = false, want true")
+		}
+		if gotMixerBody["enabled"] != true {
+			t.Errorf("body enabled = %v, want true", gotMixerBody["enabled"])
+		}
+	})
+	t.Run("ApplyBitPerfect", func(t *testing.T) {
+		resp, err := client.ApplyBitPerfect()
+		if err != nil {
+			t.Fatalf("err: %v", err)
+		}
+		if !resp.Success {
+			t.Errorf("Success = false, want true")
+		}
+		if len(resp.Applied) != 1 {
+			t.Errorf("Applied len = %d, want 1", len(resp.Applied))
+		}
+		if gotApplyBody != "" {
+			t.Errorf("body = %q, want empty (no body for apply)", gotApplyBody)
+		}
+	})
 }
