@@ -76,3 +76,21 @@ func TestServer_systemInfo_RemoteError_ReturnsZeroValue(t *testing.T) {
 		t.Errorf("Host = %q, want empty on remote error", got.Host)
 	}
 }
+
+func TestVolumioHandlers_DeviceInfo_RemoteSuccess(t *testing.T) {
+	stub := &fakeRemoteInfo{
+		deviceInfoFn: func() (device.DeviceInfo, error) {
+			return device.DeviceInfo{UUID: "pi-uuid", Name: "stellar.local"}, nil
+		},
+	}
+	s := &Server{}
+	s.UseRemoteInfo(stub)
+	h := &VolumioHandlers{server: s}
+	info, err := h.server.remoteInfo.DeviceInfo()
+	if err != nil {
+		t.Fatalf("err: %v", err)
+	}
+	if info.UUID != "pi-uuid" {
+		t.Errorf("UUID = %q, want pi-uuid", info.UUID)
+	}
+}

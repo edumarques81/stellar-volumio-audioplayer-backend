@@ -53,6 +53,26 @@ func (h *VolumioHandlers) registerDeviceHandlers(client *socket.Socket, clientID
 	client.On("getDeviceInfo", func(args ...any) {
 		log.Debug().Str("id", clientID).Msg("getDeviceInfo")
 
+		// Remote-info proxy (M1.E): when the Mac/Windows backend is wired to
+		// a Pi appliance, fetch identity from the Pi instead of the host.
+		if h.server != nil && h.server.remoteInfo != nil {
+			info, err := h.server.remoteInfo.DeviceInfo()
+			if err != nil {
+				log.Warn().Err(err).Str("path", "/api/system/device").Msg("remote DeviceInfo failed; emitting zero value")
+				client.Emit("pushDeviceInfo", map[string]interface{}{
+					"uuid": "",
+					"name": "",
+				})
+				return
+			}
+			client.Emit("pushDeviceInfo", map[string]interface{}{
+				"uuid": info.UUID,
+				"name": info.Name,
+			})
+			return
+		}
+
+		// Local fallthrough (Linux Pi-resident build).
 		if h.deviceService == nil {
 			client.Emit("pushDeviceInfo", map[string]interface{}{
 				"uuid": "",
