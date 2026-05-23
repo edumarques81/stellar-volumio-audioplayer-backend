@@ -287,3 +287,82 @@ func TestRemoteAudioClient_WriteHappyPaths(t *testing.T) {
 		}
 	})
 }
+
+func TestRemoteAudioClient_WriteFailureModes(t *testing.T) {
+	cases := []struct {
+		name      string
+		setup     func(t *testing.T) (string, string)
+		wantErrIs string
+	}{
+		{
+			name: "HTTP 401 unauthorized",
+			setup: func(t *testing.T) (string, string) {
+				srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					http.Error(w, "unauthorized", http.StatusUnauthorized)
+				}))
+				t.Cleanup(srv.Close)
+				return srv.URL, "wrong-token"
+			},
+			wantErrIs: "HTTP 401",
+		},
+		{
+			name: "HTTP 500 Pi shell-out failed",
+			setup: func(t *testing.T) (string, string) {
+				srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					http.Error(w, "write failed", http.StatusInternalServerError)
+				}))
+				t.Cleanup(srv.Close)
+				return srv.URL, "token"
+			},
+			wantErrIs: "HTTP 500",
+		},
+		{
+			name: "connection refused",
+			setup: func(t *testing.T) (string, string) {
+				srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+				url := srv.URL
+				srv.Close()
+				return url, "token"
+			},
+			wantErrIs: "", // any error (connection refused message varies by OS)
+		},
+		{
+			name: "JSON decode failure",
+			setup: func(t *testing.T) (string, string) {
+				srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					w.Header().Set("Content-Type", "application/json")
+					_, _ = w.Write([]byte("not json"))
+				}))
+				t.Cleanup(srv.Close)
+				return srv.URL, "token"
+			},
+			wantErrIs: "decode",
+		},
+	}
+
+	methods := []struct {
+		name string
+		call func(*RemoteAudioClientImpl) error
+	}{
+		{"SetDsdMode", func(c *RemoteAudioClientImpl) error { _, e := c.SetDsdMode("native"); return e }},
+		{"SetMixerMode", func(c *RemoteAudioClientImpl) error { _, e := c.SetMixerMode(false); return e }},
+		{"ApplyBitPerfect", func(c *RemoteAudioClientImpl) error { _, e := c.ApplyBitPerfect(); return e }},
+	}
+
+	for _, tc := range cases {
+		for _, m := range methods {
+			tc, m := tc, m
+			t.Run(tc.name+"/"+m.name, func(t *testing.T) {
+				baseURL, token := tc.setup(t)
+				client := NewRemoteAudioClientWithClient(baseURL, token, &http.Client{Timeout: 2 * time.Second})
+				err := m.call(client)
+				if err == nil {
+					t.Fatalf("want error, got nil")
+				}
+				if tc.wantErrIs != "" && !strings.Contains(err.Error(), tc.wantErrIs) {
+					t.Errorf("err = %q, want substring %q", err.Error(), tc.wantErrIs)
+				}
+			})
+		}
+	}
+}
