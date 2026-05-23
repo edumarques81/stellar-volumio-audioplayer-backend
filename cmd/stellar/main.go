@@ -261,8 +261,16 @@ func main() {
 		log.Fatal().Err(err).Msg("Failed to start MPD watcher")
 	}
 
-	// Start network watcher for Socket.IO push notifications
-	netinfo.StartWatcher(ctx, netReporter, socketServer.Broadcaster())
+	// Start network watcher for Socket.IO push notifications.
+	// Skip the 30s netinfo watcher when running in remote mode. The Pi's
+	// network rarely changes during a kiosk session on Ethernet, and the
+	// frontend pulls /api/network/status on Settings tab mount + reconnect.
+	// Polling the Pi every 30s would waste a HTTP round-trip per session.
+	if os.Getenv("STELLAR_MOUNT_REMOTE_URL") == "" || os.Getenv("STELLAR_MOUNT_REMOTE_TOKEN") == "" {
+		netinfo.StartWatcher(ctx, netReporter, socketServer.Broadcaster())
+	} else {
+		log.Info().Msg("Network watcher skipped (remote mode active — frontend pulls on demand)")
+	}
 
 	// Start mount watcher for periodic NAS share re-mount
 	socketServer.StartMountWatcher(ctx)
