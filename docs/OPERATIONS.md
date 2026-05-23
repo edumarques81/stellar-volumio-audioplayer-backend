@@ -26,6 +26,8 @@ Raspberry Pi 5 (192.168.86.25, eduardo@stellar.local)
 
 ## Mac backend ops
 
+> **Note:** The LaunchAgent (`com.stellar.backend`) is permanently disabled because NordVPN Threat Protection Pro blocks launchd-spawned unsigned binaries (responsible-process heuristic — see memory `reference_nordvpn_launchd_vs_shell_filter`). The Mac stellar backend is now started shell-spawned via `deploy/stellar-restart.sh`, which `~/bin/stellar-restart.sh` symlinks to. `launchctl print` is still useful for inspection if the LaunchAgent ever gets re-enabled, but `launchctl kickstart -k` will not work.
+
 ### Health checks
 
 ```bash
@@ -50,7 +52,7 @@ launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.stellar.backend.plis
 launchctl bootout gui/$(id -u)/com.stellar.backend
 
 # Restart
-launchctl kickstart -k gui/$(id -u)/com.stellar.backend
+~/bin/stellar-restart.sh backend
 
 # Tail live logs while restarting
 tail -f ~/Library/Logs/stellar-backend.{out,err}.log
@@ -62,7 +64,7 @@ tail -f ~/Library/Logs/stellar-backend.{out,err}.log
 cd ~/workspace/stellar-streamer/stellar-volumio-audioplayer-backend
 make build-darwin
 install -m 755 bin/stellar-darwin-arm64 ~/stellar-backend/stellar
-launchctl kickstart -k gui/$(id -u)/com.stellar.backend
+~/bin/stellar-restart.sh backend
 ```
 
 The `deploy/install-mac-backend.sh` script does the same thing idempotently — running it on subsequent invocations rebuilds the binary and reloads the agent.
@@ -76,7 +78,7 @@ stat -f '%Lp' ~/.config/stellar-backend/env
 # Edit env file (will fail-fast the next service start if perms drift wider than 600)
 chmod 600 ~/.config/stellar-backend/env
 ${EDITOR:-vi} ~/.config/stellar-backend/env
-launchctl kickstart -k gui/$(id -u)/com.stellar.backend
+~/bin/stellar-restart.sh backend
 ```
 
 ## Pi services ops (via ssh)
@@ -165,7 +167,7 @@ SERVICE=lcd-control   # or stellar-mount-control or stellar-spectrum
 NEW=$(openssl rand -hex 32)
 ssh eduardo@192.168.86.25 "echo $NEW | sudo tee /etc/${SERVICE}/token >/dev/null && sudo systemctl restart ${SERVICE}"
 # Manually edit ~/.config/stellar-backend/env on Mac, update the matching STELLAR_*_TOKEN field
-launchctl kickstart -k gui/$(id -u)/com.stellar.backend
+~/bin/stellar-restart.sh backend
 echo "New token (paste into Mac env): $NEW"
 ```
 
