@@ -301,7 +301,7 @@ func (s *Server) setupHandlers() {
 			s.pushState(client)
 			s.pushQueue(client)
 			// Also send network, LCD, system info, and audio status
-			client.Emit("pushNetworkStatus", s.netReporter.GetStatus())
+			client.Emit("pushNetworkStatus", s.networkStatus())
 			client.Emit("pushSystemInfo", s.systemInfo())
 			{
 				status, _ := s.lcdController.Status()
@@ -610,8 +610,7 @@ func (s *Server) setupHandlers() {
 		// Network status events
 		client.On("getNetworkStatus", func(args ...any) {
 			log.Debug().Str("id", clientID).Msg("getNetworkStatus")
-			status := s.netReporter.GetStatus()
-			client.Emit("pushNetworkStatus", status)
+			client.Emit("pushNetworkStatus", s.networkStatus())
 		})
 
 		// LCD control events
@@ -1991,6 +1990,22 @@ func (s *Server) systemInfo() SystemInfo {
 	info.SystemVersion = version.GetInfo().Version
 	info.BuildDate = version.GetInfo().BuildTime
 	return info
+}
+
+// networkStatus returns the network status to emit. When remoteInfo is
+// wired (M1.E remote mode), proxies to the Pi appliance. On error,
+// returns netinfo.Status{} (zero value) so Settings renders "—".
+// Otherwise reads from the local netReporter.
+func (s *Server) networkStatus() netinfo.Status {
+	if s.remoteInfo == nil {
+		return s.netReporter.GetStatus()
+	}
+	status, err := s.remoteInfo.NetworkStatus()
+	if err != nil {
+		log.Warn().Err(err).Str("path", "/api/network/status").Msg("remote NetworkStatus failed; emitting zero value")
+		return netinfo.Status{}
+	}
+	return status
 }
 
 // pushState sends current state to a client.

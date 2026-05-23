@@ -94,3 +94,29 @@ func TestVolumioHandlers_DeviceInfo_RemoteSuccess(t *testing.T) {
 		t.Errorf("UUID = %q, want pi-uuid", info.UUID)
 	}
 }
+
+func TestServer_networkStatus_RemoteSuccess(t *testing.T) {
+	stub := &fakeRemoteInfo{
+		networkStatusFn: func() (netinfo.Status, error) {
+			return netinfo.Status{Type: "ethernet", IP: "192.168.86.25", Strength: 100}, nil
+		},
+	}
+	s := &Server{}
+	s.UseRemoteInfo(stub)
+	got := s.networkStatus()
+	if got.IP != "192.168.86.25" {
+		t.Errorf("IP = %q, want 192.168.86.25", got.IP)
+	}
+}
+
+func TestServer_networkStatus_RemoteError_ReturnsZeroValue(t *testing.T) {
+	stub := &fakeRemoteInfo{
+		networkStatusFn: func() (netinfo.Status, error) { return netinfo.Status{}, errStub },
+	}
+	s := &Server{}
+	s.UseRemoteInfo(stub)
+	got := s.networkStatus()
+	if got.IP != "" {
+		t.Errorf("IP = %q, want empty on remote error", got.IP)
+	}
+}
