@@ -5,6 +5,11 @@
 *.so
 *.dylib
 
+# Cross-compiled Pi binary (`make build`) + Mac native binary
+# (`make build-local`) — produced locally, not versioned.
+/stellar
+/stellar-arm64
+
 # Test binary
 *.test
 
