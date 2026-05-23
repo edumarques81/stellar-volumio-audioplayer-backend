@@ -391,48 +391,54 @@ func (c *Client) watchLoop(addr string, subsystems []string, initial *mpd.Watche
 	}()
 
 	for {
-		// Drain events from the current watcher until it errors or until
-		// stop is signalled. Any successful event resets the backoff so a
-		// long-stable connection followed by a transient failure starts
-		// at 500ms again.
-		eventDelivered := false
-		errored := false
-		for !errored {
-			select {
-			case <-stop:
-				return
-			case subsystem, ok := <-watcher.Event:
-				if !ok {
-					// Channel closed unexpectedly (not via our stop
-					// signal). Treat as terminal — gompd has torn down
-					// this watcher and we have no live instance to
-					// reconnect with. The deferred Close() above is a
-					// no-op because the channels are already closed,
-					// but we nil out the watcher so it doesn't try.
-					watcher = nil
+		// Only drain events if we have a live watcher. If the previous
+		// reconnect attempt failed, watcher is nil here and we skip
+		// straight to the sleep+retry path below, avoiding a nil-deref
+		// panic on watcher.Event / watcher.Error.
+		if watcher != nil {
+			// Drain events from the current watcher until it errors or
+			// until stop is signalled. Any successful event resets the
+			// backoff so a long-stable connection followed by a
+			// transient failure starts at 500ms again.
+			eventDelivered := false
+			errored := false
+			for !errored {
+				select {
+				case <-stop:
 					return
+				case subsystem, ok := <-watcher.Event:
+					if !ok {
+						// Channel closed unexpectedly (not via our stop
+						// signal). Treat as terminal — gompd has torn down
+						// this watcher and we have no live instance to
+						// reconnect with. The deferred Close() above is a
+						// no-op because the channels are already closed,
+						// but we nil out the watcher so it doesn't try.
+						watcher = nil
+						return
+					}
+					ch <- subsystem
+					eventDelivered = true
+				case err, ok := <-watcher.Error:
+					if !ok {
+						watcher = nil
+						return
+					}
+					log.Error().Err(err).Msg("MPD watcher error")
+					errored = true
 				}
-				ch <- subsystem
-				eventDelivered = true
-			case err, ok := <-watcher.Error:
-				if !ok {
-					watcher = nil
-					return
-				}
-				log.Error().Err(err).Msg("MPD watcher error")
-				errored = true
 			}
-		}
 
-		if eventDelivered {
-			backoff = initialBackoff
-		}
+			if eventDelivered {
+				backoff = initialBackoff
+			}
 
-		// Tear down the dead watcher. Close() is safe to call on a
-		// watcher whose connection is already broken — gompd's noidle
-		// write may fail but the goroutine will still exit.
-		_ = watcher.Close()
-		watcher = nil
+			// Tear down the dead watcher. Close() is safe to call on a
+			// watcher whose connection is already broken — gompd's noidle
+			// write may fail but the goroutine will still exit.
+			_ = watcher.Close()
+			watcher = nil
+		}
 
 		// Sleep with backoff, but bail early if we're being torn down.
 		select {

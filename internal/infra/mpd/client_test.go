@@ -461,6 +461,76 @@ func TestWatchReconnectsOnBrokenPipe(t *testing.T) {
 	}
 }
 
+// TestWatchNilDerefAfterFailedReconnect is a regression test for the
+// nil-deref panic in watchLoop that kills the Mac stellar backend every time
+// the Pi reboots.
+//
+// Sequence that triggered the bug:
+//  1. MPD connection is live; watcher drains events normally.
+//  2. Pi reboots → MPD TCP socket dies → watcher.Error fires.
+//  3. watchLoop sets watcher = nil, sleeps, then calls mpd.NewWatcher.
+//  4. Pi is still mid-reboot → NewWatcher returns an error → continue.
+//  5. Outer for-loop top: code immediately selects on watcher.Event — but
+//     watcher is still nil from step 3. → PANIC: nil pointer dereference.
+//
+// Fix: gate the inner drain block on `if watcher != nil {}`. When the
+// previous reconnect failed, the loop skips straight to the next
+// sleep+NewWatcher without touching the nil watcher.
+//
+// Test approach (Option A): use a real TCP listener that speaks just enough
+// MPD protocol for mpd.NewWatcher to succeed on the first accept, then close
+// the listener so that all subsequent reconnect attempts fail with ECONNREFUSED.
+// We then call Client.Close() and assert it returns without panicking.
+func TestWatchNilDerefAfterFailedReconnect(t *testing.T) {
+	// First connection: answer the idle command, then slam the socket shut
+	// to force a watcher error (simulates Pi dropping off the network).
+	first := func(_ int, conn net.Conn) {
+		r := bufio.NewReader(conn)
+		// Drain whatever the watcher sends (typically "idle <subsystems>").
+		_, _ = readCommand(t, r)
+		// Abruptly close to force watcher.Error to fire.
+		_ = conn.Close()
+	}
+
+	server := startFakeMPD(t, first)
+	host, port := server.hostPort()
+
+	client := mpd.NewClient(host, port, "")
+	ch, err := client.Watch("player")
+	if err != nil {
+		t.Fatalf("Watch returned error: %v", err)
+	}
+
+	// Wait long enough for the first watcher error to be received and the
+	// first reconnect to be attempted, then close the server so that
+	// subsequent NewWatcher calls all fail with ECONNREFUSED.  The loop
+	// will cycle through at least one failed-reconnect iteration (the
+	// nil-deref path) before we signal Close().
+	time.Sleep(200 * time.Millisecond)
+	server.close()
+
+	// Give the loop one more backoff cycle so it hits the watcher==nil
+	// branch at the top of the outer for-loop.
+	time.Sleep(700 * time.Millisecond)
+
+	// Close() must return without panicking and within a reasonable timeout.
+	done := make(chan error, 1)
+	go func() { done <- client.Close() }()
+
+	select {
+	case closeErr := <-done:
+		if closeErr != nil {
+			t.Errorf("Close returned unexpected error: %v", closeErr)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Client.Close did not return within 5s — watchLoop may have panicked or hung")
+	}
+
+	// The watch channel must drain/close after Client.Close().
+	for range ch {
+	}
+}
+
 // TestWatchCloseDuringReconnectBackoff verifies that Client.Close() unblocks
 // the watch goroutine cleanly while it is sleeping in a reconnect backoff.
 // This guards against the double-close race that the lifecycle refactor
