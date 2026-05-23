@@ -742,17 +742,39 @@ func (s *Server) setupHandlers() {
 
 		client.On("setDsdMode", func(args ...any) {
 			log.Info().Str("id", clientID).Interface("args", args).Msg("setDsdMode requested")
-			if len(args) > 0 {
-				if m, ok := args[0].(map[string]interface{}); ok {
-					if mode, ok := m["mode"].(string); ok {
-						result := SetDsdMode(mode)
-						log.Info().Bool("success", result.Success).Str("mode", result.Mode).Msg("pushDsdMode")
-						client.Emit("pushDsdMode", result)
-						// Broadcast to all clients
-						s.io.Emit("pushDsdMode", result)
-					}
-				}
+			if len(args) == 0 {
+				return
 			}
+			m, ok := args[0].(map[string]interface{})
+			if !ok {
+				return
+			}
+			mode, ok := m["mode"].(string)
+			if !ok {
+				return
+			}
+
+			// Remote mode (M1.E.1): proxy write to Pi, broadcast Pi-truth via read helper.
+			if s.remoteAudio != nil {
+				ack, err := s.remoteAudio.SetDsdMode(mode)
+				if err != nil {
+					log.Warn().Err(err).Str("path", "/api/audio/dsd").Msg("remote SetDsdMode failed")
+					client.Emit("pushDsdMode", DsdModeResponse{Mode: mode, Success: false, Error: err.Error()})
+					return
+				}
+				log.Info().Bool("success", ack.Success).Str("mode", ack.Mode).Msg("remote setDsdMode ack")
+				// Broadcast Pi-truth state (fresh read via M1.E helper), not the write-ack.
+				freshState := s.dsdMode()
+				s.io.Emit("pushDsdMode", freshState)
+				return
+			}
+
+			// Local mode (Linux Pi-resident build).
+			result := SetDsdMode(mode)
+			log.Info().Bool("success", result.Success).Str("mode", result.Mode).Msg("pushDsdMode")
+			client.Emit("pushDsdMode", result)
+			// Broadcast to all clients
+			s.io.Emit("pushDsdMode", result)
 		})
 
 		// Mixer mode events
