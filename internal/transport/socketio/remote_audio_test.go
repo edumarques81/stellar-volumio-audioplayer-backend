@@ -32,7 +32,7 @@ func piStub(t *testing.T, fixtures map[string]any) (*httptest.Server, *string) {
 	return srv, &lastToken
 }
 
-func TestRemoteInfoClient_HappyPaths(t *testing.T) {
+func TestRemoteAudioClientImpl_HappyPaths(t *testing.T) {
 	// Fixtures use the ACTUAL struct shapes (not the plan's drafted shapes,
 	// which had wrong field names for BitPerfectStatus and MixerModeResponse).
 	fixtures := map[string]any{
@@ -53,7 +53,7 @@ func TestRemoteInfoClient_HappyPaths(t *testing.T) {
 		"/api/audio/mixer": MixerModeResponse{Enabled: false, Success: true},
 	}
 	srv, lastToken := piStub(t, fixtures)
-	client := NewRemoteInfoClientWithClient(srv.URL, "test-token", &http.Client{Timeout: 2 * time.Second})
+	client := NewRemoteAudioClientWithClient(srv.URL, "test-token", &http.Client{Timeout: 2 * time.Second})
 
 	t.Run("SystemInfo", func(t *testing.T) {
 		got, err := client.SystemInfo()
@@ -122,7 +122,7 @@ func TestRemoteInfoClient_HappyPaths(t *testing.T) {
 	})
 }
 
-func TestRemoteInfoClient_FailureModes(t *testing.T) {
+func TestRemoteAudioClientImpl_FailureModes(t *testing.T) {
 	cases := []struct {
 		name      string
 		setup     func(t *testing.T) (string, string) // returns (baseURL, token)
@@ -177,14 +177,14 @@ func TestRemoteInfoClient_FailureModes(t *testing.T) {
 
 	methods := []struct {
 		name string
-		call func(*RemoteInfoClient) error
+		call func(*RemoteAudioClientImpl) error
 	}{
-		{"SystemInfo", func(c *RemoteInfoClient) error { _, e := c.SystemInfo(); return e }},
-		{"DeviceInfo", func(c *RemoteInfoClient) error { _, e := c.DeviceInfo(); return e }},
-		{"NetworkStatus", func(c *RemoteInfoClient) error { _, e := c.NetworkStatus(); return e }},
-		{"BitPerfect", func(c *RemoteInfoClient) error { _, e := c.BitPerfect(); return e }},
-		{"DsdMode", func(c *RemoteInfoClient) error { _, e := c.DsdMode(); return e }},
-		{"MixerMode", func(c *RemoteInfoClient) error { _, e := c.MixerMode(); return e }},
+		{"SystemInfo", func(c *RemoteAudioClientImpl) error { _, e := c.SystemInfo(); return e }},
+		{"DeviceInfo", func(c *RemoteAudioClientImpl) error { _, e := c.DeviceInfo(); return e }},
+		{"NetworkStatus", func(c *RemoteAudioClientImpl) error { _, e := c.NetworkStatus(); return e }},
+		{"BitPerfect", func(c *RemoteAudioClientImpl) error { _, e := c.BitPerfect(); return e }},
+		{"DsdMode", func(c *RemoteAudioClientImpl) error { _, e := c.DsdMode(); return e }},
+		{"MixerMode", func(c *RemoteAudioClientImpl) error { _, e := c.MixerMode(); return e }},
 	}
 
 	for _, tc := range cases {
@@ -192,7 +192,7 @@ func TestRemoteInfoClient_FailureModes(t *testing.T) {
 			tc, m := tc, m
 			t.Run(tc.name+"/"+m.name, func(t *testing.T) {
 				baseURL, token := tc.setup(t)
-				client := NewRemoteInfoClientWithClient(baseURL, token, &http.Client{Timeout: 2 * time.Second})
+				client := NewRemoteAudioClientWithClient(baseURL, token, &http.Client{Timeout: 2 * time.Second})
 				err := m.call(client)
 				if err == nil {
 					t.Fatalf("want error, got nil")

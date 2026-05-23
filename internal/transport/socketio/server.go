@@ -60,7 +60,7 @@ type Server struct {
 	audirvanaService    *audirvana.Service
 	deviceService       *device.Service    // Volumio device identity
 	volumioHandlers     *VolumioHandlers   // Volumio Connect compatibility
-	remoteInfo          RemoteInfoReader   // nil on Linux/Pi-resident build; set via UseRemoteInfo
+	remoteAudio         RemoteAudioClient  // nil on Linux/Pi-resident build; set via UseRemoteAudio
 	connLimiter         *ConnectionLimiter // Limits concurrent external connections
 	mu                  sync.RWMutex
 	clients             map[string]*socket.Socket
@@ -99,12 +99,12 @@ func (s *Server) SetLCDController(c lcd.Controller) { s.lcdController = c }
 // after the Server is constructed.
 func (s *Server) SetNetReporter(r netinfo.Reporter) { s.netReporter = r }
 
-// UseRemoteInfo wires a RemoteInfoReader that proxies six host-specific
+// UseRemoteAudio wires a RemoteAudioClient that proxies six host-specific
 // read handlers to the Pi appliance. Called from cmd/stellar/main.go when
 // STELLAR_MOUNT_REMOTE_URL + _TOKEN are both set. When nil, the existing
 // handlers fall through to local implementations.
-func (s *Server) UseRemoteInfo(r RemoteInfoReader) {
-	s.remoteInfo = r
+func (s *Server) UseRemoteAudio(r RemoteAudioClient) {
+	s.remoteAudio = r
 }
 
 // NewServer creates a new Socket.io server.
@@ -1969,7 +1969,7 @@ func (s *Server) maybeRecordLastPlayed(state map[string]interface{}) {
 	}
 }
 
-// systemInfo returns the SystemInfo to emit. When remoteInfo is wired
+// systemInfo returns the SystemInfo to emit. When remoteAudio is wired
 // (M1.E remote mode), proxies to the Pi appliance and returns
 // SystemInfo{} on any error so Settings renders "—". Otherwise returns
 // the host's own SystemInfo (Linux Pi-resident build path).
@@ -1979,10 +1979,10 @@ func (s *Server) maybeRecordLastPlayed(state map[string]interface{}) {
 // from the Mac binary so the Version display in Settings remains
 // honest about what's actually running.
 func (s *Server) systemInfo() SystemInfo {
-	if s.remoteInfo == nil {
+	if s.remoteAudio == nil {
 		return GetSystemInfo()
 	}
-	info, err := s.remoteInfo.SystemInfo()
+	info, err := s.remoteAudio.SystemInfo()
 	if err != nil {
 		log.Warn().Err(err).Str("path", "/api/system/info").Msg("remote SystemInfo failed; emitting zero value")
 		return SystemInfo{}
@@ -1992,15 +1992,15 @@ func (s *Server) systemInfo() SystemInfo {
 	return info
 }
 
-// networkStatus returns the network status to emit. When remoteInfo is
+// networkStatus returns the network status to emit. When remoteAudio is
 // wired (M1.E remote mode), proxies to the Pi appliance. On error,
 // returns netinfo.Status{} (zero value) so Settings renders "—".
 // Otherwise reads from the local netReporter.
 func (s *Server) networkStatus() netinfo.Status {
-	if s.remoteInfo == nil {
+	if s.remoteAudio == nil {
 		return s.netReporter.GetStatus()
 	}
-	status, err := s.remoteInfo.NetworkStatus()
+	status, err := s.remoteAudio.NetworkStatus()
 	if err != nil {
 		log.Warn().Err(err).Str("path", "/api/network/status").Msg("remote NetworkStatus failed; emitting zero value")
 		return netinfo.Status{}
@@ -2008,14 +2008,14 @@ func (s *Server) networkStatus() netinfo.Status {
 	return status
 }
 
-// bitPerfect returns BitPerfectStatus to emit. When remoteInfo is wired,
+// bitPerfect returns BitPerfectStatus to emit. When remoteAudio is wired,
 // proxies to the Pi appliance; on error returns BitPerfectStatus{} so
 // Settings renders an empty state instead of fabricated Mac-local data.
 func (s *Server) bitPerfect() BitPerfectStatus {
-	if s.remoteInfo == nil {
+	if s.remoteAudio == nil {
 		return GetBitPerfectStatus()
 	}
-	got, err := s.remoteInfo.BitPerfect()
+	got, err := s.remoteAudio.BitPerfect()
 	if err != nil {
 		log.Warn().Err(err).Str("path", "/api/audio/bitperfect").Msg("remote BitPerfect failed; emitting zero value")
 		return BitPerfectStatus{}
@@ -2027,10 +2027,10 @@ func (s *Server) bitPerfect() BitPerfectStatus {
 // safe fallback ({Mode:"native", Success:false}) so the frontend's
 // 'native' | 'dop' type remains valid.
 func (s *Server) dsdMode() DsdModeResponse {
-	if s.remoteInfo == nil {
+	if s.remoteAudio == nil {
 		return GetDsdMode()
 	}
-	got, err := s.remoteInfo.DsdMode()
+	got, err := s.remoteAudio.DsdMode()
 	if err != nil {
 		log.Warn().Err(err).Str("path", "/api/audio/dsd").Msg("remote DsdMode failed; emitting safe fallback")
 		return DsdModeResponse{Mode: "native", Success: false}
@@ -2041,10 +2041,10 @@ func (s *Server) dsdMode() DsdModeResponse {
 // mixerMode returns MixerModeResponse. On Pi-unreachable returns a safe
 // fallback ({Enabled:false, Success:false}) so the toggle defaults to off.
 func (s *Server) mixerMode() MixerModeResponse {
-	if s.remoteInfo == nil {
+	if s.remoteAudio == nil {
 		return GetMixerMode()
 	}
-	got, err := s.remoteInfo.MixerMode()
+	got, err := s.remoteAudio.MixerMode()
 	if err != nil {
 		log.Warn().Err(err).Str("path", "/api/audio/mixer").Msg("remote MixerMode failed; emitting safe fallback")
 		return MixerModeResponse{Enabled: false, Success: false}

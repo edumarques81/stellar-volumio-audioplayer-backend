@@ -55,8 +55,8 @@ func (h *VolumioHandlers) registerDeviceHandlers(client *socket.Socket, clientID
 
 		// Remote-info proxy (M1.E): when the Mac/Windows backend is wired to
 		// a Pi appliance, fetch identity from the Pi instead of the host.
-		if h.server != nil && h.server.remoteInfo != nil {
-			info, err := h.server.remoteInfo.DeviceInfo()
+		if h.server != nil && h.server.remoteAudio != nil {
+			info, err := h.server.remoteAudio.DeviceInfo()
 			if err != nil {
 				log.Warn().Err(err).Str("path", "/api/system/device").Msg("remote DeviceInfo failed; emitting zero value")
 				client.Emit("pushDeviceInfo", map[string]interface{}{

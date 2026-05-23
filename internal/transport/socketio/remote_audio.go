@@ -11,8 +11,8 @@ import (
 	"github.com/edumarques81/stellar-volumio-audioplayer-backend/internal/infra/netinfo"
 )
 
-// RemoteInfoReader is the read-side proxy interface used by socket handlers
-// to fetch host-specific data from the Pi appliance. RemoteInfoClient is
+// RemoteAudioClient is the read-side proxy interface used by socket handlers
+// to fetch host-specific data from the Pi appliance. RemoteAudioClientImpl is
 // the production HTTP implementation; tests inject stubs.
 //
 // All methods are best-effort: callers receive a zero-value response and a
@@ -20,7 +20,7 @@ import (
 // can't be decoded. The server handler then emits the zero value to the
 // frontend, which renders "—". This is per the M1.E design — honest empty
 // payload beats fabricated Mac-local data.
-type RemoteInfoReader interface {
+type RemoteAudioClient interface {
 	SystemInfo() (SystemInfo, error)
 	DeviceInfo() (device.DeviceInfo, error)
 	NetworkStatus() (netinfo.Status, error)
@@ -29,27 +29,27 @@ type RemoteInfoReader interface {
 	MixerMode() (MixerModeResponse, error)
 }
 
-// RemoteInfoClient proxies six read handlers to the Pi-resident
+// RemoteAudioClientImpl proxies six read handlers to the Pi-resident
 // stellar-mount-control.service. Used by Mac/Windows backend hosts in
 // the M1.C+ topology where the backend lives off the audio appliance.
 // Reuses the same env vars (STELLAR_MOUNT_REMOTE_URL + _TOKEN) and the
 // same X-Auth-Token gate as RemoteSystemActions (M1.D).
-type RemoteInfoClient struct {
+type RemoteAudioClientImpl struct {
 	baseURL string
 	token   string
 	client  *http.Client
 }
 
-// NewRemoteInfoClient builds a reader with a default 5s timeout. Match
+// NewRemoteAudioClient builds a reader with a default 5s timeout. Match
 // RemoteSystemActions's budget — these calls happen on the request path
 // for Settings tab loads, so 5s is the upper bound a user will tolerate.
-func NewRemoteInfoClient(baseURL, token string) *RemoteInfoClient {
-	return NewRemoteInfoClientWithClient(baseURL, token, &http.Client{Timeout: 5 * time.Second})
+func NewRemoteAudioClient(baseURL, token string) *RemoteAudioClientImpl {
+	return NewRemoteAudioClientWithClient(baseURL, token, &http.Client{Timeout: 5 * time.Second})
 }
 
-// NewRemoteInfoClientWithClient lets tests inject a fake transport.
-func NewRemoteInfoClientWithClient(baseURL, token string, client *http.Client) *RemoteInfoClient {
-	return &RemoteInfoClient{
+// NewRemoteAudioClientWithClient lets tests inject a fake transport.
+func NewRemoteAudioClientWithClient(baseURL, token string, client *http.Client) *RemoteAudioClientImpl {
+	return &RemoteAudioClientImpl{
 		baseURL: strings.TrimRight(baseURL, "/"),
 		token:   token,
 		client:  client,
@@ -58,22 +58,22 @@ func NewRemoteInfoClientWithClient(baseURL, token string, client *http.Client) *
 
 // get builds the GET, sets the auth header, decodes JSON into dst,
 // wraps errors with the path so log lines are greppable.
-func (r *RemoteInfoClient) get(path string, dst any) error {
+func (r *RemoteAudioClientImpl) get(path string, dst any) error {
 	req, err := http.NewRequest(http.MethodGet, r.baseURL+path, nil)
 	if err != nil {
-		return fmt.Errorf("remote info: build %s: %w", path, err)
+		return fmt.Errorf("remote audio: build %s: %w", path, err)
 	}
 	req.Header.Set("X-Auth-Token", r.token)
 	resp, err := r.client.Do(req)
 	if err != nil {
-		return fmt.Errorf("remote info: %s: %w", path, err)
+		return fmt.Errorf("remote audio: %s: %w", path, err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("remote info: %s: HTTP %d", path, resp.StatusCode)
+		return fmt.Errorf("remote audio: %s: HTTP %d", path, resp.StatusCode)
 	}
 	if err := json.NewDecoder(resp.Body).Decode(dst); err != nil {
-		return fmt.Errorf("remote info: %s: decode: %w", path, err)
+		return fmt.Errorf("remote audio: %s: decode: %w", path, err)
 	}
 	return nil
 }
@@ -81,37 +81,37 @@ func (r *RemoteInfoClient) get(path string, dst any) error {
 // SystemInfo fetches the Pi's identity + hardware. Caller-side
 // (server.systemInfo helper, Task 8) merges the binary's version/builddate
 // after this returns.
-func (r *RemoteInfoClient) SystemInfo() (SystemInfo, error) {
+func (r *RemoteAudioClientImpl) SystemInfo() (SystemInfo, error) {
 	var out SystemInfo
 	err := r.get("/api/system/info", &out)
 	return out, err
 }
 
-func (r *RemoteInfoClient) DeviceInfo() (device.DeviceInfo, error) {
+func (r *RemoteAudioClientImpl) DeviceInfo() (device.DeviceInfo, error) {
 	var out device.DeviceInfo
 	err := r.get("/api/system/device", &out)
 	return out, err
 }
 
-func (r *RemoteInfoClient) NetworkStatus() (netinfo.Status, error) {
+func (r *RemoteAudioClientImpl) NetworkStatus() (netinfo.Status, error) {
 	var out netinfo.Status
 	err := r.get("/api/network/status", &out)
 	return out, err
 }
 
-func (r *RemoteInfoClient) BitPerfect() (BitPerfectStatus, error) {
+func (r *RemoteAudioClientImpl) BitPerfect() (BitPerfectStatus, error) {
 	var out BitPerfectStatus
 	err := r.get("/api/audio/bitperfect", &out)
 	return out, err
 }
 
-func (r *RemoteInfoClient) DsdMode() (DsdModeResponse, error) {
+func (r *RemoteAudioClientImpl) DsdMode() (DsdModeResponse, error) {
 	var out DsdModeResponse
 	err := r.get("/api/audio/dsd", &out)
 	return out, err
 }
 
-func (r *RemoteInfoClient) MixerMode() (MixerModeResponse, error) {
+func (r *RemoteAudioClientImpl) MixerMode() (MixerModeResponse, error) {
 	var out MixerModeResponse
 	err := r.get("/api/audio/mixer", &out)
 	return out, err
