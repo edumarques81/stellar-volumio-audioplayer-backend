@@ -1,8 +1,10 @@
 package socketio
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"strings"
 	"time"
@@ -35,25 +37,40 @@ type RemoteAudioClient interface {
 // Reuses the same env vars (STELLAR_MOUNT_REMOTE_URL + _TOKEN) and the
 // same X-Auth-Token gate as RemoteSystemActions (M1.D).
 type RemoteAudioClientImpl struct {
-	baseURL string
-	token   string
-	client  *http.Client
+	baseURL     string
+	token       string
+	readClient  *http.Client
+	writeClient *http.Client
 }
 
-// NewRemoteAudioClient builds a reader with a default 5s timeout. Match
-// RemoteSystemActions's budget — these calls happen on the request path
-// for Settings tab loads, so 5s is the upper bound a user will tolerate.
+// NewRemoteAudioClient builds a client with a 5s read timeout and a 30s write
+// timeout. Read timeout matches RemoteSystemActions's budget — Settings tab
+// loads must stay snappy. Write timeout accommodates Pi-side operations such
+// as `systemctl restart mpd` (D3 spec: up to ~10s).
 func NewRemoteAudioClient(baseURL, token string) *RemoteAudioClientImpl {
-	return NewRemoteAudioClientWithClient(baseURL, token, &http.Client{Timeout: 5 * time.Second})
+	return NewRemoteAudioClientWithClients(
+		baseURL, token,
+		&http.Client{Timeout: 5 * time.Second},
+		&http.Client{Timeout: 30 * time.Second},
+	)
 }
 
-// NewRemoteAudioClientWithClient lets tests inject a fake transport.
-func NewRemoteAudioClientWithClient(baseURL, token string, client *http.Client) *RemoteAudioClientImpl {
+// NewRemoteAudioClientWithClients lets tests inject separate read and write
+// transports (e.g. a fast stub for reads, a slow stub for write paths).
+func NewRemoteAudioClientWithClients(baseURL, token string, readClient, writeClient *http.Client) *RemoteAudioClientImpl {
 	return &RemoteAudioClientImpl{
-		baseURL: strings.TrimRight(baseURL, "/"),
-		token:   token,
-		client:  client,
+		baseURL:     strings.TrimRight(baseURL, "/"),
+		token:       token,
+		readClient:  readClient,
+		writeClient: writeClient,
 	}
+}
+
+// NewRemoteAudioClientWithClient is a convenience wrapper for callers that
+// only have a single *http.Client (e.g. existing tests). Both the read and
+// write paths use the provided client unchanged.
+func NewRemoteAudioClientWithClient(baseURL, token string, client *http.Client) *RemoteAudioClientImpl {
+	return NewRemoteAudioClientWithClients(baseURL, token, client, client)
 }
 
 // get builds the GET, sets the auth header, decodes JSON into dst,
@@ -64,7 +81,7 @@ func (r *RemoteAudioClientImpl) get(path string, dst any) error {
 		return fmt.Errorf("remote audio: build %s: %w", path, err)
 	}
 	req.Header.Set("X-Auth-Token", r.token)
-	resp, err := r.client.Do(req)
+	resp, err := r.readClient.Do(req)
 	if err != nil {
 		return fmt.Errorf("remote audio: %s: %w", path, err)
 	}
@@ -74,6 +91,43 @@ func (r *RemoteAudioClientImpl) get(path string, dst any) error {
 	}
 	if err := json.NewDecoder(resp.Body).Decode(dst); err != nil {
 		return fmt.Errorf("remote audio: %s: decode: %w", path, err)
+	}
+	return nil
+}
+
+// post serializes body to JSON, posts to path with X-Auth-Token, and decodes
+// the JSON response into dst. Uses the 30s writeClient so Pi-side operations
+// (e.g. systemctl restart mpd) have room to complete. Errors wrap the path
+// so log lines are greppable. body and dst may be nil.
+func (r *RemoteAudioClientImpl) post(path string, body any, dst any) error {
+	var reqBody io.Reader
+	if body != nil {
+		buf, err := json.Marshal(body)
+		if err != nil {
+			return fmt.Errorf("remote audio: marshal %s: %w", path, err)
+		}
+		reqBody = bytes.NewReader(buf)
+	}
+	req, err := http.NewRequest(http.MethodPost, r.baseURL+path, reqBody)
+	if err != nil {
+		return fmt.Errorf("remote audio: build %s: %w", path, err)
+	}
+	req.Header.Set("X-Auth-Token", r.token)
+	if body != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	resp, err := r.writeClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("remote audio: %s: %w", path, err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("remote audio: %s: HTTP %d", path, resp.StatusCode)
+	}
+	if dst != nil {
+		if err := json.NewDecoder(resp.Body).Decode(dst); err != nil {
+			return fmt.Errorf("remote audio: %s: decode: %w", path, err)
+		}
 	}
 	return nil
 }
