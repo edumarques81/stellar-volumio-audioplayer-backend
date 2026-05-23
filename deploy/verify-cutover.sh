@@ -70,6 +70,16 @@ if [ -n "$MNT_TOK" ] && curl -fsS --max-time 5 "http://$PI_IP:8082/api/mount/sha
 MNT_NOAUTH=$(curl -sS -o /dev/null -w '%{http_code}' --max-time 2 "http://$PI_IP:8082/api/mount/shares?host=$NAS_IP" 2>/dev/null)
 if [ "$MNT_NOAUTH" = "401" ]; then check "G9b Mount without token refused (401)" PASS; else check "G9b Mount without token refused (got $MNT_NOAUTH)" FAIL; fi
 
+# G10 (M1.E): six new read-handler endpoints on mount-control respond + decode correctly.
+# Uses the smoke script in Volumio2-UI/ (cross-repo absolute path; the script is
+# self-contained and accepts PI_HOST, PI_PORT, TOKEN env vars).
+SMOKE_SCRIPT="$HOME/workspace/stellar-streamer/Volumio2-UI/scripts/smoke-mount-control-info.sh"
+if [ -n "$MNT_TOK" ] && [ -x "$SMOKE_SCRIPT" ] && PI_HOST="$PI_IP" PI_PORT=8082 TOKEN="$MNT_TOK" "$SMOKE_SCRIPT" >/dev/null 2>&1; then
+  check "G10 mount-control info endpoints (M1.E) all OK" PASS
+else
+  check "G10 mount-control info endpoints (M1.E) all OK" FAIL
+fi
+
 if [ "${1:-}" = "--done" ]; then
   echo ""
   echo "=== Done-gates (post-cutover) ==="
