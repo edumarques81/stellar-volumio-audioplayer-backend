@@ -270,3 +270,45 @@ func TestServer_setDsdMode_LocalFallback_WhenRemoteNil(t *testing.T) {
 	// Just assert no panic and mode is non-empty or success is reported.
 	_ = got // No crash = pass.
 }
+
+func TestServer_setMixerMode_RemoteSuccess_BroadcastsReadHelperState(t *testing.T) {
+	var setCalled bool
+	stub := &fakeRemoteAudio{
+		setMixerModeFn: func(enabled bool) (MixerModeResponse, error) {
+			setCalled = true
+			if !enabled {
+				t.Errorf("enabled = false, want true")
+			}
+			return MixerModeResponse{Enabled: true, Success: true}, nil
+		},
+		mixerModeFn: func() (MixerModeResponse, error) {
+			return MixerModeResponse{Enabled: true, Success: true}, nil
+		},
+	}
+	s := &Server{}
+	s.UseRemoteAudio(stub)
+	if _, err := s.remoteAudio.SetMixerMode(true); err != nil {
+		t.Fatalf("err: %v", err)
+	}
+	if !setCalled {
+		t.Errorf("SetMixerMode not called")
+	}
+	truth := s.mixerMode()
+	if !truth.Enabled {
+		t.Errorf("truth.Enabled = false, want true")
+	}
+}
+
+func TestServer_setMixerMode_RemoteError_SurfacesError(t *testing.T) {
+	stub := &fakeRemoteAudio{
+		setMixerModeFn: func(enabled bool) (MixerModeResponse, error) {
+			return MixerModeResponse{}, errStub
+		},
+	}
+	s := &Server{}
+	s.UseRemoteAudio(stub)
+	_, err := s.remoteAudio.SetMixerMode(true)
+	if err == nil {
+		t.Fatalf("want error")
+	}
+}

@@ -787,17 +787,37 @@ func (s *Server) setupHandlers() {
 
 		client.On("setMixerMode", func(args ...any) {
 			log.Info().Str("id", clientID).Interface("args", args).Msg("setMixerMode requested")
-			if len(args) > 0 {
-				if m, ok := args[0].(map[string]interface{}); ok {
-					if enabled, ok := m["enabled"].(bool); ok {
-						result := SetMixerMode(enabled)
-						log.Info().Bool("success", result.Success).Bool("enabled", result.Enabled).Msg("pushMixerMode")
-						client.Emit("pushMixerMode", result)
-						// Broadcast to all clients
-						s.io.Emit("pushMixerMode", result)
-					}
-				}
+			if len(args) == 0 {
+				return
 			}
+			m, ok := args[0].(map[string]interface{})
+			if !ok {
+				return
+			}
+			enabled, ok := m["enabled"].(bool)
+			if !ok {
+				return
+			}
+
+			// M1.E.1: route through Pi when wired; broadcast Pi-truth on success.
+			if s.remoteAudio != nil {
+				result, err := s.remoteAudio.SetMixerMode(enabled)
+				if err != nil {
+					log.Warn().Err(err).Bool("enabled", enabled).Msg("remote SetMixerMode failed; unicast error to caller")
+					client.Emit("pushMixerMode", MixerModeResponse{Enabled: enabled, Success: false, Error: err.Error()})
+					return
+				}
+				log.Info().Bool("success", result.Success).Bool("enabled", result.Enabled).Msg("setMixerMode remote ack")
+				truth := s.mixerMode()
+				s.io.Emit("pushMixerMode", truth)
+				return
+			}
+
+			// Local path (Linux Pi-resident build).
+			result := SetMixerMode(enabled)
+			log.Info().Bool("success", result.Success).Bool("enabled", result.Enabled).Msg("pushMixerMode")
+			client.Emit("pushMixerMode", result)
+			s.io.Emit("pushMixerMode", result)
 		})
 
 		// Apply all bit-perfect settings
