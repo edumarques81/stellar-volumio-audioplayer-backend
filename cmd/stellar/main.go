@@ -236,6 +236,14 @@ func main() {
 			sysDeps.Shutdown = rsa.Shutdown
 			sysDeps.Reboot = rsa.Reboot
 			log.Info().Str("base_url", mountURL).Msg("System actions routed to Pi via mount-control /api/system/*")
+
+			// M1.E read-handler proxy: route six READ socket handlers
+			// (System/Device/Network info + Audio bit-perfect/DSD/mixer) to the
+			// Pi appliance so the Settings page reflects Pi state instead of
+			// Mac-host state. See internal/transport/socketio/remote_info.go.
+			ric := socketio.NewRemoteInfoClient(mountURL, mountTok)
+			socketServer.UseRemoteInfo(ric)
+			log.Info().Str("base_url", mountURL).Msg("Remote info reader wired (M1.E)")
 		}
 	}
 	systemActionHandlers, err := socketio.NewSystemActionHandlersWithTrusted(sysDeps, trustedRemotes)
