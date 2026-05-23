@@ -243,7 +243,7 @@ func main() {
 			// Mac-host state. See internal/transport/socketio/remote_audio.go.
 			ric := socketio.NewRemoteAudioClient(mountURL, mountTok)
 			socketServer.UseRemoteAudio(ric)
-			log.Info().Str("base_url", mountURL).Msg("Remote audio client wired (M1.E)")
+			log.Info().Str("base_url", mountURL).Msg("Remote audio client wired (M1.E.1)")
 		}
 	}
 	systemActionHandlers, err := socketio.NewSystemActionHandlersWithTrusted(sysDeps, trustedRemotes)
