@@ -688,7 +688,7 @@ func (s *Server) setupHandlers() {
 		// Bit-perfect configuration check event
 		client.On("getBitPerfect", func(args ...any) {
 			log.Info().Str("id", clientID).Msg("getBitPerfect requested")
-			result := GetBitPerfectStatus()
+			result := s.bitPerfect()
 			log.Info().Str("status", result.Status).Int("issues", len(result.Issues)).Int("config", len(result.Config)).Msg("pushBitPerfect")
 			client.Emit("pushBitPerfect", result)
 		})
@@ -735,7 +735,7 @@ func (s *Server) setupHandlers() {
 		// DSD mode events
 		client.On("getDsdMode", func(args ...any) {
 			log.Info().Str("id", clientID).Msg("getDsdMode requested")
-			mode := GetDsdMode()
+			mode := s.dsdMode()
 			log.Info().Str("mode", mode.Mode).Msg("pushDsdMode")
 			client.Emit("pushDsdMode", mode)
 		})
@@ -758,7 +758,7 @@ func (s *Server) setupHandlers() {
 		// Mixer mode events
 		client.On("getMixerMode", func(args ...any) {
 			log.Info().Str("id", clientID).Msg("getMixerMode requested")
-			mode := GetMixerMode()
+			mode := s.mixerMode()
 			log.Info().Bool("enabled", mode.Enabled).Msg("pushMixerMode")
 			client.Emit("pushMixerMode", mode)
 		})
@@ -2006,6 +2006,50 @@ func (s *Server) networkStatus() netinfo.Status {
 		return netinfo.Status{}
 	}
 	return status
+}
+
+// bitPerfect returns BitPerfectStatus to emit. When remoteInfo is wired,
+// proxies to the Pi appliance; on error returns BitPerfectStatus{} so
+// Settings renders an empty state instead of fabricated Mac-local data.
+func (s *Server) bitPerfect() BitPerfectStatus {
+	if s.remoteInfo == nil {
+		return GetBitPerfectStatus()
+	}
+	got, err := s.remoteInfo.BitPerfect()
+	if err != nil {
+		log.Warn().Err(err).Str("path", "/api/audio/bitperfect").Msg("remote BitPerfect failed; emitting zero value")
+		return BitPerfectStatus{}
+	}
+	return got
+}
+
+// dsdMode returns DsdModeResponse to emit. On Pi-unreachable returns a
+// safe fallback ({Mode:"native", Success:false}) so the frontend's
+// 'native' | 'dop' type remains valid.
+func (s *Server) dsdMode() DsdModeResponse {
+	if s.remoteInfo == nil {
+		return GetDsdMode()
+	}
+	got, err := s.remoteInfo.DsdMode()
+	if err != nil {
+		log.Warn().Err(err).Str("path", "/api/audio/dsd").Msg("remote DsdMode failed; emitting safe fallback")
+		return DsdModeResponse{Mode: "native", Success: false}
+	}
+	return got
+}
+
+// mixerMode returns MixerModeResponse. On Pi-unreachable returns a safe
+// fallback ({Enabled:false, Success:false}) so the toggle defaults to off.
+func (s *Server) mixerMode() MixerModeResponse {
+	if s.remoteInfo == nil {
+		return GetMixerMode()
+	}
+	got, err := s.remoteInfo.MixerMode()
+	if err != nil {
+		log.Warn().Err(err).Str("path", "/api/audio/mixer").Msg("remote MixerMode failed; emitting safe fallback")
+		return MixerModeResponse{Enabled: false, Success: false}
+	}
+	return got
 }
 
 // pushState sends current state to a client.

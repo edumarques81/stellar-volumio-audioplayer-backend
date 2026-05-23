@@ -120,3 +120,81 @@ func TestServer_networkStatus_RemoteError_ReturnsZeroValue(t *testing.T) {
 		t.Errorf("IP = %q, want empty on remote error", got.IP)
 	}
 }
+
+func TestServer_bitPerfect_RemoteSuccess(t *testing.T) {
+	stub := &fakeRemoteInfo{
+		bitPerfectFn: func() (BitPerfectStatus, error) {
+			return BitPerfectStatus{Status: "ok", Config: []string{"good"}}, nil
+		},
+	}
+	s := &Server{}
+	s.UseRemoteInfo(stub)
+	got := s.bitPerfect()
+	if got.Status != "ok" {
+		t.Errorf("Status = %q, want ok", got.Status)
+	}
+}
+
+func TestServer_bitPerfect_RemoteError_ReturnsZeroValue(t *testing.T) {
+	stub := &fakeRemoteInfo{
+		bitPerfectFn: func() (BitPerfectStatus, error) { return BitPerfectStatus{}, errStub },
+	}
+	s := &Server{}
+	s.UseRemoteInfo(stub)
+	got := s.bitPerfect()
+	if got.Status != "" {
+		t.Errorf("Status = %q, want empty on remote error", got.Status)
+	}
+}
+
+func TestServer_dsdMode_RemoteSuccess(t *testing.T) {
+	stub := &fakeRemoteInfo{
+		dsdModeFn: func() (DsdModeResponse, error) {
+			return DsdModeResponse{Mode: "native", Success: true}, nil
+		},
+	}
+	s := &Server{}
+	s.UseRemoteInfo(stub)
+	got := s.dsdMode()
+	if got.Mode != "native" {
+		t.Errorf("Mode = %q, want native", got.Mode)
+	}
+}
+
+func TestServer_dsdMode_RemoteError_ReturnsSafeFallback(t *testing.T) {
+	stub := &fakeRemoteInfo{
+		dsdModeFn: func() (DsdModeResponse, error) { return DsdModeResponse{}, errStub },
+	}
+	s := &Server{}
+	s.UseRemoteInfo(stub)
+	got := s.dsdMode()
+	if got.Mode != "native" || got.Success {
+		t.Errorf("DsdMode = %+v, want {Mode:native, Success:false}", got)
+	}
+}
+
+func TestServer_mixerMode_RemoteSuccess(t *testing.T) {
+	stub := &fakeRemoteInfo{
+		mixerModeFn: func() (MixerModeResponse, error) {
+			return MixerModeResponse{Enabled: true, Success: true}, nil
+		},
+	}
+	s := &Server{}
+	s.UseRemoteInfo(stub)
+	got := s.mixerMode()
+	if !got.Enabled {
+		t.Errorf("Enabled = false, want true")
+	}
+}
+
+func TestServer_mixerMode_RemoteError_ReturnsSafeFallback(t *testing.T) {
+	stub := &fakeRemoteInfo{
+		mixerModeFn: func() (MixerModeResponse, error) { return MixerModeResponse{}, errStub },
+	}
+	s := &Server{}
+	s.UseRemoteInfo(stub)
+	got := s.mixerMode()
+	if got.Enabled || got.Success {
+		t.Errorf("MixerMode = %+v, want {Enabled:false, Success:false}", got)
+	}
+}
