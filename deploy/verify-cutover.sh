@@ -110,8 +110,12 @@ fi
 if [ "${1:-}" = "--done" ]; then
   echo ""
   echo "=== Done-gates (post-cutover) ==="
-  if ssh "$PI_HOST" 'systemctl is-enabled stellar-backend' 2>/dev/null | grep -q disabled; then check "D1 Pi stellar-backend disabled" PASS; else check "D1 Pi stellar-backend disabled" FAIL; fi
-  if ssh "$PI_HOST" 'systemctl is-enabled stellar-spectrum' 2>/dev/null | grep -q enabled; then check "D2 Pi stellar-spectrum enabled" PASS; else check "D2 Pi stellar-spectrum enabled" FAIL; fi
+  # systemctl is-enabled returns exit 1 for "disabled" state, which under
+  # set -o pipefail poisons the pipeline. Capture-and-compare instead.
+  D1_OUT=$(ssh "$PI_HOST" 'systemctl is-enabled stellar-backend 2>/dev/null' 2>/dev/null || true)
+  if [ "$D1_OUT" = "disabled" ]; then check "D1 Pi stellar-backend disabled" PASS; else check "D1 Pi stellar-backend disabled (got '$D1_OUT')" FAIL; fi
+  D2_OUT=$(ssh "$PI_HOST" 'systemctl is-enabled stellar-spectrum 2>/dev/null' 2>/dev/null || true)
+  if [ "$D2_OUT" = "enabled" ]; then check "D2 Pi stellar-spectrum enabled" PASS; else check "D2 Pi stellar-spectrum enabled (got '$D2_OUT')" FAIL; fi
   if launchctl print-disabled "gui/$(id -u)" 2>/dev/null | grep -q '"com.stellar.backend" => disabled = false'; then check "D3 Mac LaunchAgent autostarts" PASS; else check "D3 Mac LaunchAgent autostarts" FAIL; fi
 fi
 
