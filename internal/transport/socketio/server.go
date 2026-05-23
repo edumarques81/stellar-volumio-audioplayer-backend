@@ -302,7 +302,7 @@ func (s *Server) setupHandlers() {
 			s.pushQueue(client)
 			// Also send network, LCD, system info, and audio status
 			client.Emit("pushNetworkStatus", s.netReporter.GetStatus())
-			client.Emit("pushSystemInfo", GetSystemInfo())
+			client.Emit("pushSystemInfo", s.systemInfo())
 			{
 				status, _ := s.lcdController.Status()
 				client.Emit("pushLcdStatus", status)
@@ -655,7 +655,7 @@ func (s *Server) setupHandlers() {
 		// System info event
 		client.On("getSystemInfo", func(args ...any) {
 			log.Debug().Str("id", clientID).Msg("getSystemInfo")
-			client.Emit("pushSystemInfo", GetSystemInfo())
+			client.Emit("pushSystemInfo", s.systemInfo())
 		})
 
 		// `shutdown` / `reboot` are registered by SystemActionHandlers
@@ -1968,6 +1968,29 @@ func (s *Server) maybeRecordLastPlayed(state map[string]interface{}) {
 	if s.lastPlayedHandlers != nil {
 		s.lastPlayedHandlers.BroadcastTo(s.io)
 	}
+}
+
+// systemInfo returns the SystemInfo to emit. When remoteInfo is wired
+// (M1.E remote mode), proxies to the Pi appliance and returns
+// SystemInfo{} on any error so Settings renders "—". Otherwise returns
+// the host's own SystemInfo (Linux Pi-resident build path).
+//
+// In remote mode the Pi response carries identity (host/hardware/etc)
+// but not the running binary's version+buildtime — those are merged
+// from the Mac binary so the Version display in Settings remains
+// honest about what's actually running.
+func (s *Server) systemInfo() SystemInfo {
+	if s.remoteInfo == nil {
+		return GetSystemInfo()
+	}
+	info, err := s.remoteInfo.SystemInfo()
+	if err != nil {
+		log.Warn().Err(err).Str("path", "/api/system/info").Msg("remote SystemInfo failed; emitting zero value")
+		return SystemInfo{}
+	}
+	info.SystemVersion = version.GetInfo().Version
+	info.BuildDate = version.GetInfo().BuildTime
+	return info
 }
 
 // pushState sends current state to a client.

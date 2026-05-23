@@ -38,3 +38,41 @@ func TestServer_UseRemoteInfo_SetsField(t *testing.T) {
 		t.Fatalf("remoteInfo not set")
 	}
 }
+
+func TestServer_systemInfo_LocalWhenRemoteNil(t *testing.T) {
+	s := &Server{}
+	got := s.systemInfo()
+	// Local impl reads os.Hostname(); just assert Host is non-empty.
+	if got.Host == "" {
+		t.Errorf("Host = %q, want non-empty (local impl)", got.Host)
+	}
+}
+
+func TestServer_systemInfo_RemoteSuccess_MergesVersion(t *testing.T) {
+	stub := &fakeRemoteInfo{
+		systemInfoFn: func() (SystemInfo, error) {
+			return SystemInfo{Host: "stellar.local", Hardware: "Raspberry Pi 5"}, nil
+		},
+	}
+	s := &Server{}
+	s.UseRemoteInfo(stub)
+	got := s.systemInfo()
+	if got.Host != "stellar.local" {
+		t.Errorf("Host = %q, want stellar.local (from Pi)", got.Host)
+	}
+	if got.SystemVersion == "" {
+		t.Errorf("SystemVersion empty, want Mac binary version merged in")
+	}
+}
+
+func TestServer_systemInfo_RemoteError_ReturnsZeroValue(t *testing.T) {
+	stub := &fakeRemoteInfo{
+		systemInfoFn: func() (SystemInfo, error) { return SystemInfo{}, errStub },
+	}
+	s := &Server{}
+	s.UseRemoteInfo(stub)
+	got := s.systemInfo()
+	if got.Host != "" {
+		t.Errorf("Host = %q, want empty on remote error", got.Host)
+	}
+}
