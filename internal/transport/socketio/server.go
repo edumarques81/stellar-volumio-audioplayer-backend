@@ -823,6 +823,30 @@ func (s *Server) setupHandlers() {
 		// Apply all bit-perfect settings
 		client.On("applyBitPerfect", func(args ...any) {
 			log.Info().Str("id", clientID).Msg("applyBitPerfect requested")
+
+			// M1.E.1: route through Pi when wired; broadcast Pi-truth on success.
+			if s.remoteAudio != nil {
+				ack, err := s.remoteAudio.ApplyBitPerfect()
+				if err != nil {
+					log.Warn().Err(err).Str("path", "/api/audio/bitperfect/apply").Msg("remote ApplyBitPerfect failed")
+					// Unicast the write-ack error to the requesting client only (D5).
+					client.Emit("pushApplyBitPerfect", ApplyBitPerfectResponse{
+						Success: false,
+						Applied: []string{},
+						Errors:  []string{err.Error()},
+					})
+					return
+				}
+				log.Info().Bool("success", ack.Success).Strs("applied", ack.Applied).Msg("remote applyBitPerfect ack")
+				// Unicast the write-ack to the requesting client.
+				client.Emit("pushApplyBitPerfect", ack)
+				// Broadcast Pi-truth states via M1.E read helpers (D4).
+				s.io.Emit("pushBitPerfect", s.bitPerfect())
+				s.io.Emit("pushMixerMode", s.mixerMode())
+				return
+			}
+
+			// Local mode (Linux Pi-resident build) — unchanged from pre-M1.E.1.
 			result := ApplyBitPerfect()
 			log.Info().Bool("success", result.Success).Strs("applied", result.Applied).Msg("pushApplyBitPerfect")
 			client.Emit("pushApplyBitPerfect", result)

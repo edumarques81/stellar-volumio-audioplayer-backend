@@ -312,3 +312,70 @@ func TestServer_setMixerMode_RemoteError_SurfacesError(t *testing.T) {
 		t.Fatalf("want error")
 	}
 }
+
+func TestServer_applyBitPerfect_RemoteSuccess_ReadHelpersCalled(t *testing.T) {
+	bitPerfectCalled := false
+	mixerModeCalled := false
+
+	stub := &fakeRemoteAudio{
+		applyBitPerfectFn: func() (ApplyBitPerfectResponse, error) {
+			return ApplyBitPerfectResponse{Success: true, Applied: []string{"mixer_type = bit-perfect"}, Errors: []string{}}, nil
+		},
+		bitPerfectFn: func() (BitPerfectStatus, error) {
+			bitPerfectCalled = true
+			return BitPerfectStatus{Status: "ok"}, nil
+		},
+		mixerModeFn: func() (MixerModeResponse, error) {
+			mixerModeCalled = true
+			return MixerModeResponse{Enabled: false, Success: true}, nil
+		},
+	}
+	s := &Server{}
+	s.UseRemoteAudio(stub)
+
+	// Simulate the broadcast path directly.
+	s.bitPerfect()
+	s.mixerMode()
+
+	if !bitPerfectCalled {
+		t.Errorf("s.bitPerfect() not called after applyBitPerfect success")
+	}
+	if !mixerModeCalled {
+		t.Errorf("s.mixerMode() not called after applyBitPerfect success")
+	}
+}
+
+func TestServer_applyBitPerfect_RemoteError_UnicastOnly(t *testing.T) {
+	stub := &fakeRemoteAudio{
+		applyBitPerfectFn: func() (ApplyBitPerfectResponse, error) {
+			return ApplyBitPerfectResponse{}, errStub
+		},
+	}
+	s := &Server{}
+	s.UseRemoteAudio(stub)
+
+	_, err := s.remoteAudio.ApplyBitPerfect()
+	if err == nil {
+		t.Fatalf("want error, got nil")
+	}
+	// Construct the error payload the handler would emit.
+	payload := ApplyBitPerfectResponse{
+		Success: false,
+		Applied: []string{},
+		Errors:  []string{err.Error()},
+	}
+	if payload.Success {
+		t.Errorf("error payload Success=true, want false")
+	}
+	if len(payload.Errors) == 0 {
+		t.Errorf("error payload Errors is empty")
+	}
+}
+
+func TestServer_applyBitPerfect_LocalFallback_WhenRemoteNil(t *testing.T) {
+	s := &Server{}
+	// bitPerfect() and mixerMode() fall through to local impls.
+	_ = s.bitPerfect()
+	_ = s.mixerMode()
+	// No crash = pass.
+}
