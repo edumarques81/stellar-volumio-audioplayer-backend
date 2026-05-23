@@ -70,14 +70,41 @@ if [ -n "$MNT_TOK" ] && curl -fsS --max-time 5 "http://$PI_IP:8082/api/mount/sha
 MNT_NOAUTH=$(curl -sS -o /dev/null -w '%{http_code}' --max-time 2 "http://$PI_IP:8082/api/mount/shares?host=$NAS_IP" 2>/dev/null)
 if [ "$MNT_NOAUTH" = "401" ]; then check "G9b Mount without token refused (401)" PASS; else check "G9b Mount without token refused (got $MNT_NOAUTH)" FAIL; fi
 
-# G10 (M1.E): six new read-handler endpoints on mount-control respond + decode correctly.
+# G10 (M1.E): six read-handler endpoints on mount-control respond + decode correctly.
 # Uses the smoke script in Volumio2-UI/ (cross-repo absolute path; the script is
 # self-contained and accepts PI_HOST, PI_PORT, TOKEN env vars).
+# Note: the smoke script also runs the 3 M1.E.1 POST probes (G11 below covers them
+# inline for an explicit, self-contained gate).
 SMOKE_SCRIPT="$HOME/workspace/stellar-streamer/Volumio2-UI/scripts/smoke-mount-control-info.sh"
 if [ -n "$MNT_TOK" ] && [ -x "$SMOKE_SCRIPT" ] && PI_HOST="$PI_IP" PI_PORT=8082 TOKEN="$MNT_TOK" "$SMOKE_SCRIPT" >/dev/null 2>&1; then
   check "G10 mount-control info endpoints (M1.E) all OK" PASS
 else
   check "G10 mount-control info endpoints (M1.E) all OK" FAIL
+fi
+
+# G11 (M1.E.1): write endpoint POST smoke (idempotent — MPD not restarted).
+# Sends current value back to each POST endpoint; the handler detects "no change"
+# and returns 200+success=true without touching MPD. Reuses MNT_TOK from G9.
+if [ -n "$MNT_TOK" ]; then
+  G11_FAIL=0
+  for ENDPOINT_BODY in \
+    "/api/audio/dsd|$(curl -fsS -m 5 -H "X-Auth-Token: $MNT_TOK" "http://$PI_IP:8082/api/audio/dsd" 2>/dev/null | python3 -c "import sys,json; d=json.load(sys.stdin); print(json.dumps({'mode':d['mode']}))" 2>/dev/null || echo '{"mode":"native"}')|success" \
+    "/api/audio/mixer|$(curl -fsS -m 5 -H "X-Auth-Token: $MNT_TOK" "http://$PI_IP:8082/api/audio/mixer" 2>/dev/null | python3 -c "import sys,json; d=json.load(sys.stdin); print(json.dumps({'enabled':d['enabled']}))" 2>/dev/null || echo '{"enabled":false}')|success" \
+    "/api/audio/bitperfect/apply|{}|success"; do
+    ENDPOINT="${ENDPOINT_BODY%%|*}"
+    REST="${ENDPOINT_BODY#*|}"
+    BODY="${REST%%|*}"
+    EXPECT_KEY="${REST##*|}"
+    RESP=$(curl -fsS -m 35 -X POST \
+      -H "Content-Type: application/json" \
+      -H "X-Auth-Token: $MNT_TOK" \
+      -d "$BODY" \
+      "http://$PI_IP:8082$ENDPOINT" 2>/dev/null) || { G11_FAIL=1; break; }
+    echo "$RESP" | python3 -c "import sys,json; d=json.load(sys.stdin); assert '$EXPECT_KEY' in d, f'missing $EXPECT_KEY: {d}'" 2>/dev/null || { G11_FAIL=1; break; }
+  done
+  if [ "$G11_FAIL" -eq 0 ]; then check "G11 mount-control write endpoints (M1.E.1) all OK" PASS; else check "G11 mount-control write endpoints (M1.E.1) all OK" FAIL; fi
+else
+  check "G11 mount-control write endpoints (M1.E.1) all OK" FAIL
 fi
 
 if [ "${1:-}" = "--done" ]; then
