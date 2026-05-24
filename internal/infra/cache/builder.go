@@ -289,6 +289,28 @@ func (b *Builder) buildArtists() error {
 		}
 	}
 
+	// Re-link artists to their existing artwork rows. Clear() preserves the
+	// artwork table by design, but the artists row is wiped + re-inserted
+	// from MPD which has no knowledge of pre-existing enrichment. Artwork
+	// row IDs follow a deterministic pattern (`<artist_id>_artwork`), so a
+	// single batched UPDATE restores the FK without re-downloading anything.
+	now := time.Now().Format(time.RFC3339)
+	if relinkResult, err := tx.Exec(`
+		UPDATE artists
+		SET artwork_id = artists.id || '_artwork',
+		    updated_at = ?
+		WHERE (artwork_id IS NULL OR artwork_id = '')
+		  AND EXISTS (
+		      SELECT 1 FROM artwork
+		      WHERE artwork.id   = artists.id || '_artwork'
+		        AND artwork.type = 'artist'
+		  )
+	`, now); err != nil {
+		log.Warn().Err(err).Msg("Failed to relink artist artwork; continuing")
+	} else if relinked, _ := relinkResult.RowsAffected(); relinked > 0 {
+		log.Info().Int64("count", relinked).Msg("Relinked artists to preserved artwork rows")
+	}
+
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("failed to commit artists: %w", err)
 	}
