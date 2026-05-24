@@ -60,8 +60,9 @@ type Server struct {
 	audirvanaService    *audirvana.Service
 	deviceService       *device.Service    // Volumio device identity
 	volumioHandlers     *VolumioHandlers   // Volumio Connect compatibility
-	remoteAudio         RemoteAudioClient  // nil on Linux/Pi-resident build; set via UseRemoteAudio
-	connLimiter         *ConnectionLimiter // Limits concurrent external connections
+	remoteAudio         RemoteAudioClient   // nil on Linux/Pi-resident build; set via UseRemoteAudio (M1.E)
+	remoteSources       RemoteSourcesClient // nil on Linux/Pi-resident build; set via UseRemoteSources (M1.E.2)
+	connLimiter         *ConnectionLimiter  // Limits concurrent external connections
 	mu                  sync.RWMutex
 	clients             map[string]*socket.Socket
 	lastBroadcastMu     sync.Mutex
@@ -105,6 +106,13 @@ func (s *Server) SetNetReporter(r netinfo.Reporter) { s.netReporter = r }
 // handlers fall through to local implementations.
 func (s *Server) UseRemoteAudio(r RemoteAudioClient) {
 	s.remoteAudio = r
+}
+
+// UseRemoteSources wires a RemoteSourcesClient that returns the
+// authoritative NAS share list from the Pi mount-control service. M1.E.2.
+// When nil, getListNasShares falls through to the local sourcesService.
+func (s *Server) UseRemoteSources(r RemoteSourcesClient) {
+	s.remoteSources = r
 }
 
 // NewServer creates a new Socket.io server.
@@ -860,9 +868,25 @@ func (s *Server) setupHandlers() {
 		// Music Sources (NAS) Events
 		// ============================================================
 
-		// List all configured NAS shares
+		// List all configured NAS shares.
+		// M1.E.2: when wired (off-appliance backend with mount-control
+		// reachable), route through the Pi which is the source of truth for
+		// credentials + mount state. The local sourcesService is the
+		// fallback for the Pi-resident build and for the Mac when the Pi
+		// is unreachable mid-request.
 		client.On("getListNasShares", func(args ...any) {
 			log.Info().Str("id", clientID).Msg("getListNasShares requested")
+
+			if s.remoteSources != nil {
+				if shares, err := s.remoteSources.ListShares(); err == nil {
+					log.Info().Int("count", len(shares)).Msg("pushListNasShares (remote)")
+					client.Emit("pushListNasShares", shares)
+					return
+				} else {
+					log.Warn().Err(err).Msg("remote sources unreachable; falling back to local")
+				}
+			}
+
 			if s.sourcesService == nil {
 				client.Emit("pushListNasShares", []sources.NasShare{})
 				return
@@ -873,7 +897,7 @@ func (s *Server) setupHandlers() {
 				client.Emit("pushListNasShares", []sources.NasShare{})
 				return
 			}
-			log.Info().Int("count", len(shares)).Msg("pushListNasShares")
+			log.Info().Int("count", len(shares)).Msg("pushListNasShares (local)")
 			client.Emit("pushListNasShares", shares)
 		})
 

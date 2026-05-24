@@ -244,6 +244,15 @@ func main() {
 			ric := socketio.NewRemoteAudioClient(mountURL, mountTok)
 			socketServer.UseRemoteAudio(ric)
 			log.Info().Str("base_url", mountURL).Msg("Remote audio client wired (M1.E.1)")
+
+			// M1.E.2 read-handler proxy: branch `getListNasShares` through
+			// the Pi mount-control's /api/sources/list. Without this, Mac
+			// stellar reports an empty share list on first run because its
+			// local sources.json is empty post-cutover. Pi remains source
+			// of truth for credentials + mount state.
+			rsc := socketio.NewRemoteSourcesClient(mountURL, mountTok)
+			socketServer.UseRemoteSources(rsc)
+			log.Info().Str("base_url", mountURL).Msg("Remote sources client wired (M1.E.2)")
 		}
 	}
 	systemActionHandlers, err := socketio.NewSystemActionHandlersWithTrusted(sysDeps, trustedRemotes)
