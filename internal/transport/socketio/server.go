@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -115,6 +116,23 @@ func (s *Server) UseRemoteSources(r RemoteSourcesClient) {
 	s.remoteSources = r
 }
 
+// maxExternalClientsFromEnv parses STELLAR_MAX_EXTERNAL_CLIENTS as a positive
+// integer. Returns `fallback` if the env is empty, unparseable, or non-positive.
+// Centralized so the env-var name appears in only one place.
+func maxExternalClientsFromEnv(fallback int) int {
+	raw := os.Getenv("STELLAR_MAX_EXTERNAL_CLIENTS")
+	if raw == "" {
+		return fallback
+	}
+	n, err := strconv.Atoi(raw)
+	if err != nil || n <= 0 {
+		log.Warn().Str("value", raw).Int("fallback", fallback).
+			Msg("STELLAR_MAX_EXTERNAL_CLIENTS is not a positive integer; using fallback")
+		return fallback
+	}
+	return n
+}
+
 // NewServer creates a new Socket.io server.
 // bitPerfect indicates whether the system is configured for bit-perfect audio output.
 func NewServer(playerService *player.Service, mpdClient *mpdclient.Client, sourcesService *sources.Service, localMusicSvc *localmusic.Service, bitPerfect bool) (*Server, error) {
@@ -189,7 +207,15 @@ func NewServer(playerService *player.Service, mpdClient *mpdclient.Client, sourc
 		cacheDAO:          cacheDAO,
 		audirvanaService:  audirvana.NewService(),
 		deviceService:     deviceSvc,
-		connLimiter:       NewConnectionLimiter(100), // Connection limit disabled for development (was 1)
+		// External-client cap.
+		// Originally 1 to match the appliance use case (one user at a time).
+		// Post-M1.C the same backend serves multiple clients simultaneously:
+		// the Pi kiosk Chromium, the stellar-ios remote, optional Volumio
+		// Connect 2.x phone apps. 1 is too low; we currently default to a
+		// generous 100 to keep the limiter as a runaway-defense rather than
+		// a user-facing cap. Override via STELLAR_MAX_EXTERNAL_CLIENTS when
+		// the deployment topology calls for stricter limits.
+		connLimiter:       NewConnectionLimiter(maxExternalClientsFromEnv(100)),
 		clients:           make(map[string]*socket.Socket),
 	}
 
