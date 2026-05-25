@@ -5,6 +5,8 @@ go 1.25.5
 require (
 	github.com/fhs/gompd/v2 v2.3.0
 	github.com/google/uuid v1.6.0
+	github.com/grandcat/zeroconf v1.0.0
+	github.com/madelynnblue/go-dsp v1.0.0
 	github.com/markhc/gobuz v0.1.7
 	github.com/rs/zerolog v1.31.0
 	github.com/zishang520/socket.io/servers/socket/v3 v3.0.0-rc.11
@@ -15,14 +17,15 @@ require (
 
 require (
 	github.com/andybalholm/brotli v1.2.0 // indirect
+	github.com/cenkalti/backoff v2.2.1+incompatible // indirect
 	github.com/dunglas/httpsfv v1.1.0 // indirect
 	github.com/dustin/go-humanize v1.0.1 // indirect
 	github.com/gookit/color v1.6.0 // indirect
 	github.com/gorilla/websocket v1.5.3 // indirect
 	github.com/klauspost/compress v1.18.2 // indirect
-	github.com/madelynnblue/go-dsp v1.0.0 // indirect
 	github.com/mattn/go-colorable v0.1.13 // indirect
 	github.com/mattn/go-isatty v0.0.20 // indirect
+	github.com/miekg/dns v1.1.27 // indirect
 	github.com/ncruces/go-strftime v1.0.0 // indirect
 	github.com/quic-go/qpack v0.6.0 // indirect
 	github.com/quic-go/quic-go v0.59.0 // indirect
