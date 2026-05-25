@@ -273,6 +273,10 @@ NAS discovery and browse use a layered timeout chain so the deepest layer is alw
 - **Per-tool exec timeout for discovery** (`nmblookup`, `avahi-browse`): 6s via `context.WithTimeout` in `internal/domain/sources/linux_discoverer.go`.
 - **`smbclient` (browse):** 5s via its own `--timeout=5` flag — no extra context wrapper, since smbclient enforces it natively.
 
+### Service Discovery (Bonjour / mDNS)
+
+The backend advertises itself on the LAN via Bonjour/mDNS so iOS clients (`NWBrowser`) and other LAN controllers can auto-connect without hardcoded IPs. Advertised service type is `_stellar._tcp` on whatever port the HTTP server bound (default `3001`, overridable via `--port`). TXT records are `path=/socket.io` and `version=1` — the path lets clients reach the Socket.IO endpoint directly without guessing, and the version field lets the client gate on protocol revisions. The instance name defaults to `os.Hostname()` (falling back to `Stellar`) so multiple backends on the same network — e.g. the Mac dev host and the Pi rollback target — don't collide. Implementation lives in `internal/transport/mdns/`; the advertiser is started after the HTTP listener binds and stopped on SIGINT/SIGTERM, so clients see a clean Bonjour goodbye on shutdown. mDNS failures are non-fatal: the backend keeps serving clients that already know its address.
+
 ---
 
 ## Bit-Perfect Audio Configuration
