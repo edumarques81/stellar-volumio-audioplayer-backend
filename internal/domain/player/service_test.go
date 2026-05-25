@@ -113,6 +113,166 @@ func (m *MockMPDClient) ListInfo(uri string) ([]map[string]string, error) {
 // The isAudioFile helper is tested thoroughly above.
 // Integration testing is done on the Raspberry Pi with real MPD.
 
+// TestIsAppleDouble pins the basename-only `._` prefix matcher used to skip
+// macOS resource-fork ghost files that MPD indexes alongside real audio
+// files on NAS shares. These ghosts fail to decode and cause Play(0) to
+// stall briefly while MPD errors out and auto-skips.
+func TestIsAppleDouble(t *testing.T) {
+	tests := []struct {
+		name     string
+		uri      string
+		expected bool
+	}{
+		// AppleDouble ghosts at various path depths
+		{"deep path with ._01.flac", "/some/path/._01.flac", true},
+		{"root-level ghost", "/._something.flac", true},
+		{"bare basename ghost", "._01.flac", true},
+		{"NAS path with ghost", "NAS/MusicLibrary/Album/._01-Track.flac", true},
+
+		// Real files (not AppleDouble)
+		{"regular numbered track", "/some/path/01.flac", false},
+		{"deep path no prefix", "Music/Album/01-Track.flac", false},
+		{"bare basename non-ghost", "01.flac", false},
+
+		// Disambiguation: `__` prefix (Python dunder etc.) must NOT match
+		{"double underscore prefix", "/dir/__init__.py", false},
+		{"single dot file", "/.hidden", false},
+		{"single dot in basename", "/dir/.gitignore", false},
+
+		// Edge cases
+		{"empty string", "", false},
+		{"just the prefix", "._", true},
+		{"trailing slash with ghost basename", "/dir/._foo.flac", true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := isAppleDouble(tt.uri); got != tt.expected {
+				t.Errorf("isAppleDouble(%q) = %v, want %v", tt.uri, got, tt.expected)
+			}
+		})
+	}
+}
+
+// TestFirstPlayableIndex verifies the queue-scan helper that the
+// directory-branch of ReplaceAndPlay uses to skip past leading AppleDouble
+// ghost entries before calling Play. This is the unit-level proof for
+// task B: Play(2) instead of Play(0) when the queue starts ._01, ._02, 01,
+// 02 — without this, MPD stalls trying to decode the first ghost.
+func TestFirstPlayableIndex(t *testing.T) {
+	t.Run("skips two leading ghosts then returns 2", func(t *testing.T) {
+		queue := []map[string]string{
+			{"file": "/x/._01.flac"},
+			{"file": "/x/._02.flac"},
+			{"file": "/x/01.flac"},
+			{"file": "/x/02.flac"},
+		}
+		idx, skipped := firstPlayableIndex(queue)
+		if idx != 2 {
+			t.Errorf("firstPlayableIndex idx = %d, want 2", idx)
+		}
+		if skipped != 2 {
+			t.Errorf("firstPlayableIndex skipped = %d, want 2", skipped)
+		}
+	})
+
+	t.Run("no ghosts returns 0,0", func(t *testing.T) {
+		queue := []map[string]string{
+			{"file": "/x/01.flac"},
+			{"file": "/x/02.flac"},
+		}
+		idx, skipped := firstPlayableIndex(queue)
+		if idx != 0 || skipped != 0 {
+			t.Errorf("firstPlayableIndex = (%d, %d), want (0, 0)", idx, skipped)
+		}
+	})
+
+	t.Run("all ghosts returns -1 and full count", func(t *testing.T) {
+		queue := []map[string]string{
+			{"file": "/x/._01.flac"},
+			{"file": "/x/._02.flac"},
+		}
+		idx, skipped := firstPlayableIndex(queue)
+		if idx != -1 {
+			t.Errorf("firstPlayableIndex idx = %d, want -1", idx)
+		}
+		if skipped != 2 {
+			t.Errorf("firstPlayableIndex skipped = %d, want 2", skipped)
+		}
+	})
+
+	t.Run("empty queue returns -1,0", func(t *testing.T) {
+		idx, skipped := firstPlayableIndex(nil)
+		if idx != -1 || skipped != 0 {
+			t.Errorf("firstPlayableIndex(nil) = (%d, %d), want (-1, 0)", idx, skipped)
+		}
+	})
+
+	t.Run("entry without file key is treated as playable", func(t *testing.T) {
+		// Defensive: shouldn't happen in practice, but skipping a row we can't
+		// identify would silently change playback position.
+		queue := []map[string]string{
+			{"file": "/x/._01.flac"},
+			{"directory": "/x/sub"}, // no "file" key
+			{"file": "/x/01.flac"},
+		}
+		idx, skipped := firstPlayableIndex(queue)
+		if idx != 1 {
+			t.Errorf("firstPlayableIndex idx = %d, want 1", idx)
+		}
+		if skipped != 1 {
+			t.Errorf("firstPlayableIndex skipped = %d, want 1", skipped)
+		}
+	})
+}
+
+// TestAudioFileFilterExcludesAppleDouble checks the per-file filter logic
+// that the audio-file branch of ReplaceAndPlay uses to assemble the
+// audioFiles slice. Ghost files like `._01.flac` pass isAudioFile (the
+// extension is `.flac`) so we need the explicit isAppleDouble exclusion
+// to keep them out of the queue. This test simulates the filter inline to
+// keep this checked in the same place as the real one.
+func TestAudioFileFilterExcludesAppleDouble(t *testing.T) {
+	siblings := []map[string]string{
+		{"file": "/album/._01.flac"},
+		{"file": "/album/._02.flac"},
+		{"file": "/album/01.flac"},
+		{"file": "/album/02.flac"},
+		{"file": "/album/cover.jpg"}, // not audio
+		{"file": "/album/._cover.jpg"}, // ghost but also not audio
+	}
+
+	var audioFiles []string
+	ghostsFiltered := 0
+	for _, item := range siblings {
+		file, ok := item["file"]
+		if !ok {
+			continue
+		}
+		if !isAudioFile(file) {
+			continue
+		}
+		if isAppleDouble(file) {
+			ghostsFiltered++
+			continue
+		}
+		audioFiles = append(audioFiles, file)
+	}
+
+	wantFiles := []string{"/album/01.flac", "/album/02.flac"}
+	if len(audioFiles) != len(wantFiles) {
+		t.Fatalf("audioFiles len = %d, want %d (got %v)", len(audioFiles), len(wantFiles), audioFiles)
+	}
+	for i, f := range wantFiles {
+		if audioFiles[i] != f {
+			t.Errorf("audioFiles[%d] = %q, want %q", i, audioFiles[i], f)
+		}
+	}
+	if ghostsFiltered != 2 {
+		t.Errorf("ghostsFiltered = %d, want 2", ghostsFiltered)
+	}
+}
+
 // ============================================================
 // Tests for Volumio integration methods
 // These use extended mock to test the new queue manipulation methods

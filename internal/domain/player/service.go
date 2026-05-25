@@ -6,6 +6,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/edumarques81/stellar-volumio-audioplayer-backend/internal/infra/mpd"
 	"github.com/rs/zerolog/log"
@@ -421,45 +422,90 @@ func getBaseName(path string) string {
 // ReplaceAndPlay clears the queue, adds the item and its siblings, and starts playing.
 // When a single track is selected, all tracks from the same folder are added to the queue,
 // with the selected track playing first. This enables proper next/prev navigation.
+//
+// All MPD calls in this function emit per-step timing telemetry so the slow hop
+// of an album-switch round-trip can be attributed (see album-switch latency
+// investigation: MPD's Play(0) can stall for seconds when the first queue entry
+// is an AppleDouble ghost `._*` file that MPD attempts to decode before
+// auto-skipping). The function also filters AppleDouble ghosts out of both
+// the per-file `Add` loop (audio-file branch) and the post-Add queue scan
+// (directory branch) so playback starts on a real track immediately.
 func (s *Service) ReplaceAndPlay(uri string) error {
+	overallStart := time.Now()
 	log.Info().Str("uri", uri).Msg("ReplaceAndPlay")
 
+	defer func() {
+		log.Info().
+			Int64("totalElapsedMs", time.Since(overallStart).Milliseconds()).
+			Str("uri", uri).
+			Msg("ReplaceAndPlay done")
+	}()
+
 	// Clear current queue
+	clearStart := time.Now()
 	if err := s.mpd.Clear(); err != nil {
 		return err
 	}
+	log.Info().Int64("elapsedMs", time.Since(clearStart).Milliseconds()).Msg("mpd: cleared queue")
 
 	// Check if this is a file (has a known audio extension) vs a directory
 	if isAudioFile(uri) {
 		// Get parent directory using path.Dir for URI-style forward slashes
 		parentDir := path.Dir(uri)
+		listStart := time.Now()
 		siblings, err := s.mpd.ListInfo(parentDir)
 		if err != nil {
 			log.Warn().Err(err).Str("dir", parentDir).Msg("Failed to list parent directory, falling back to single track")
 			// Fall back to single track
+			addStart := time.Now()
 			if err := s.mpd.Add(uri); err != nil {
 				return err
 			}
-			return s.mpd.Play(0)
+			log.Info().Int64("elapsedMs", time.Since(addStart).Milliseconds()).Msg("mpd: added directory")
+			playStart := time.Now()
+			err := s.mpd.Play(0)
+			log.Info().Int64("elapsedMs", time.Since(playStart).Milliseconds()).Int("position", 0).Msg("mpd: started playback")
+			return err
 		}
+		log.Info().
+			Int64("elapsedMs", time.Since(listStart).Milliseconds()).
+			Int("count", len(siblings)).
+			Str("dir", parentDir).
+			Msg("mpd: listed parent dir")
 
-		// Collect all audio files from the directory
+		// Collect all audio files from the directory, skipping AppleDouble
+		// ghost files (`._*`) — macOS NAS shares pepper these alongside real
+		// `.flac` files and MPD will index them as decode-failing tracks.
 		var audioFiles []string
+		ghostsFiltered := 0
 		for _, item := range siblings {
 			if file, ok := item["file"]; ok {
-				if isAudioFile(file) {
-					audioFiles = append(audioFiles, file)
+				if !isAudioFile(file) {
+					continue
 				}
+				if isAppleDouble(file) {
+					ghostsFiltered++
+					continue
+				}
+				audioFiles = append(audioFiles, file)
 			}
+		}
+		if ghostsFiltered > 0 {
+			log.Info().Int("ghostsFiltered", ghostsFiltered).Str("dir", parentDir).Msg("AppleDouble ghosts filtered from queue")
 		}
 
 		// Handle edge case: no audio files found in directory
 		if len(audioFiles) == 0 {
 			log.Warn().Str("dir", parentDir).Msg("No audio files found in directory, adding single track")
+			addStart := time.Now()
 			if err := s.mpd.Add(uri); err != nil {
 				return err
 			}
-			return s.mpd.Play(0)
+			log.Info().Int64("elapsedMs", time.Since(addStart).Milliseconds()).Msg("mpd: added directory")
+			playStart := time.Now()
+			err := s.mpd.Play(0)
+			log.Info().Int64("elapsedMs", time.Since(playStart).Milliseconds()).Int("position", 0).Msg("mpd: started playback")
+			return err
 		}
 
 		// Sort files alphabetically for consistent track order
@@ -475,18 +521,24 @@ func (s *Service) ReplaceAndPlay(uri string) error {
 			}
 		}
 
-		// Handle edge case: selected track not found (could happen if file was deleted)
+		// Handle edge case: selected track not found (could happen if file was deleted
+		// or the user explicitly tapped an AppleDouble ghost that we just filtered)
 		if selectedPos < 0 {
 			log.Warn().Str("uri", uri).Msg("Selected track not found in directory, playing from start")
 			selectedPos = 0
 		}
 
 		// Add all files to the queue
+		addLoopStart := time.Now()
 		for _, file := range audioFiles {
 			if err := s.mpd.Add(file); err != nil {
 				log.Warn().Err(err).Str("file", file).Msg("Failed to add file to queue")
 			}
 		}
+		log.Info().
+			Int64("elapsedMs", time.Since(addLoopStart).Milliseconds()).
+			Int("tracks", len(audioFiles)).
+			Msg("mpd: added N tracks")
 
 		log.Info().
 			Int("totalTracks", len(audioFiles)).
@@ -495,21 +547,100 @@ func (s *Service) ReplaceAndPlay(uri string) error {
 			Msg("Queued album tracks")
 
 		// Start playing from the selected track
-		return s.mpd.Play(selectedPos)
-	}
-
-	// For directories, just add the directory (MPD will add all contents)
-	if err := s.mpd.Add(uri); err != nil {
+		playStart := time.Now()
+		err = s.mpd.Play(selectedPos)
+		log.Info().
+			Int64("elapsedMs", time.Since(playStart).Milliseconds()).
+			Int("position", selectedPos).
+			Msg("mpd: started playback")
 		return err
 	}
 
-	return s.mpd.Play(0)
+	// For directories, add the directory (MPD expands it internally — much
+	// faster than listing siblings + N×Add) then peek at the resulting queue
+	// to skip past any leading AppleDouble ghost entries before Play.
+	addStart := time.Now()
+	if err := s.mpd.Add(uri); err != nil {
+		return err
+	}
+	log.Info().Int64("elapsedMs", time.Since(addStart).Milliseconds()).Str("dir", uri).Msg("mpd: added directory")
+
+	// Scan the new queue to find the first non-ghost entry. If the wrapper
+	// fails or the queue is empty, fall back to Play(0) — better to attempt
+	// playback than to silently stall.
+	playPos := 0
+	queueStart := time.Now()
+	queue, err := s.mpd.PlaylistInfo()
+	if err != nil {
+		log.Warn().Err(err).Msg("Failed to read queue after directory add, falling back to Play(0)")
+	} else {
+		log.Info().
+			Int64("elapsedMs", time.Since(queueStart).Milliseconds()).
+			Int("queueLen", len(queue)).
+			Msg("mpd: read queue for ghost-skip")
+		// Convert []mpd.Attrs (= []map[string]string) to a form the helper accepts.
+		entries := make([]map[string]string, len(queue))
+		for i, e := range queue {
+			entries[i] = e
+		}
+		idx, skipped := firstPlayableIndex(entries)
+		if idx < 0 {
+			log.Warn().Msg("No playable track in queue after directory add, falling back to Play(0)")
+		} else {
+			if skipped > 0 {
+				log.Info().Int("ghostsSkipped", skipped).Str("dir", uri).Msg("AppleDouble ghosts skipped before first playable")
+			}
+			playPos = idx
+		}
+	}
+
+	playStart := time.Now()
+	err = s.mpd.Play(playPos)
+	log.Info().
+		Int64("elapsedMs", time.Since(playStart).Milliseconds()).
+		Int("position", playPos).
+		Msg("mpd: started playback")
+	return err
 }
 
 // isAudioFile checks if a URI appears to be an audio file based on extension.
 func isAudioFile(uri string) bool {
 	ext := strings.ToLower(path.Ext(uri))
 	return audioExtensions[ext]
+}
+
+// isAppleDouble reports whether uri is a macOS AppleDouble ghost file —
+// the `._*` companion files that macOS writes alongside real files on NAS
+// shares to carry resource forks and extended attributes. MPD indexes them
+// because they pass the extension check, but they fail to decode and cause
+// MPD's Play(0) to stall while it errors out and auto-skips to the next
+// entry. Pattern: basename starts with `._`. Matches at any path depth,
+// including a bare basename with no leading slash.
+func isAppleDouble(uri string) bool {
+	base := path.Base(uri)
+	return strings.HasPrefix(base, "._")
+}
+
+// firstPlayableIndex returns the index of the first non-AppleDouble entry
+// in a queue listing (each entry being an mpd.Attrs / map[string]string with
+// a "file" key), and the count of ghost entries skipped before it. Returns
+// (-1, n) if no playable entry exists. Entries without a "file" key are
+// treated as playable (defensive: they shouldn't appear, but skipping them
+// would be wrong).
+func firstPlayableIndex(queue []map[string]string) (int, int) {
+	skipped := 0
+	for i, entry := range queue {
+		file, ok := entry["file"]
+		if !ok {
+			return i, skipped
+		}
+		if isAppleDouble(file) {
+			skipped++
+			continue
+		}
+		return i, skipped
+	}
+	return -1, skipped
 }
 
 // ============================================================
