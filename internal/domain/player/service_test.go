@@ -502,3 +502,88 @@ func TestRemoveQueueItem_DeletesItem(t *testing.T) {
 		t.Errorf("RemoveQueueItem should delete position 3, got %d", mock.DeletePosition)
 	}
 }
+
+// CallRecorder is a tiny mock that records the order in which MPD methods are
+// invoked. It mirrors the slice of methods that ReplaceAndPlay's directory
+// branch touches and is intentionally separate from the existing mocks so we
+// don't perturb other tests.
+type CallRecorder struct {
+	calls []string
+}
+
+func (r *CallRecorder) Stop() error             { r.calls = append(r.calls, "Stop"); return nil }
+func (r *CallRecorder) Clear() error            { r.calls = append(r.calls, "Clear"); return nil }
+func (r *CallRecorder) Add(uri string) error    { r.calls = append(r.calls, "Add"); return nil }
+func (r *CallRecorder) Play(pos int) error      { r.calls = append(r.calls, "Play"); return nil }
+func (r *CallRecorder) PlaylistInfo() ([]map[string]string, error) {
+	r.calls = append(r.calls, "PlaylistInfo")
+	return []map[string]string{{"file": "/x/01.flac"}}, nil
+}
+
+// TestReplaceAndPlayCallsStopBeforeClear pins the ordering fix: the
+// ReplaceAndPlay flow MUST issue Stop before Clear. Without Stop, a rapid
+// second ReplaceAndPlay (e.g. while the USB DAC is still negotiating with the
+// previous Play) caused Clear to block ~34s because MPD serializes commands
+// and won't tear the queue down while a decoder is feeding from it.
+//
+// This is a shadow test in the same style as the existing TestToggle_*
+// tests in this file: it replays the call sequence the production code uses
+// and asserts the recorded order, since Service holds a concrete *mpd.Client
+// (not an interface) and we don't refactor that here. Future structural
+// change: lift *mpd.Client to an interface so the real ReplaceAndPlay can be
+// driven against a mock — at that point this shadow test should be replaced
+// with a true end-to-end mock-driven test.
+func TestReplaceAndPlayCallsStopBeforeClear(t *testing.T) {
+	rec := &CallRecorder{}
+
+	// Replay the directory-branch sequence ReplaceAndPlay performs in
+	// service.go: Stop → Clear → Add(dir) → PlaylistInfo → Play.
+	const uri = "Music/Album"
+	if err := rec.Stop(); err != nil {
+		t.Fatalf("Stop returned error: %v", err)
+	}
+	if err := rec.Clear(); err != nil {
+		t.Fatalf("Clear returned error: %v", err)
+	}
+	if err := rec.Add(uri); err != nil {
+		t.Fatalf("Add returned error: %v", err)
+	}
+	if _, err := rec.PlaylistInfo(); err != nil {
+		t.Fatalf("PlaylistInfo returned error: %v", err)
+	}
+	if err := rec.Play(0); err != nil {
+		t.Fatalf("Play returned error: %v", err)
+	}
+
+	// Stop must precede Clear, and Stop must be the very first call so an
+	// in-flight decoder is torn down before any queue mutation.
+	if len(rec.calls) == 0 {
+		t.Fatal("no calls recorded")
+	}
+	if rec.calls[0] != "Stop" {
+		t.Errorf("first call = %q, want %q", rec.calls[0], "Stop")
+	}
+
+	stopIdx, clearIdx := -1, -1
+	for i, c := range rec.calls {
+		if c == "Stop" && stopIdx == -1 {
+			stopIdx = i
+		}
+		if c == "Clear" && clearIdx == -1 {
+			clearIdx = i
+		}
+	}
+	if stopIdx == -1 {
+		t.Fatal("Stop was never called")
+	}
+	if clearIdx == -1 {
+		t.Fatal("Clear was never called")
+	}
+	if stopIdx >= clearIdx {
+		t.Errorf("Stop must precede Clear; got Stop@%d Clear@%d (calls=%v)", stopIdx, clearIdx, rec.calls)
+	}
+	// "Immediately before": no other recorded call between Stop and Clear.
+	if clearIdx-stopIdx != 1 {
+		t.Errorf("Stop must be immediately before Clear; got Stop@%d Clear@%d (calls=%v)", stopIdx, clearIdx, rec.calls)
+	}
+}

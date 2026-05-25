@@ -430,6 +430,15 @@ func getBaseName(path string) string {
 // auto-skipping). The function also filters AppleDouble ghosts out of both
 // the per-file `Add` loop (audio-file branch) and the post-Add queue scan
 // (directory branch) so playback starts on a real track immediately.
+//
+// We Stop() before Clear() because a rapid second ReplaceAndPlay (e.g. tap 2
+// arriving while tap 1 is still negotiating with the USB DAC) caused Clear()
+// to block ~34s — MPD serializes commands and won't tear the queue down while
+// an active decoder is feeding from it. Stop() closes the output cleanly so
+// Clear() runs against an idle decoder and returns immediately. Stop errors
+// are logged-and-continued because MPD's Stop can return errors for benign
+// states (e.g. already stopped); the subsequent Clear/Add/Play will surface
+// any real failure.
 func (s *Service) ReplaceAndPlay(uri string) error {
 	overallStart := time.Now()
 	log.Info().Str("uri", uri).Msg("ReplaceAndPlay")
@@ -440,6 +449,15 @@ func (s *Service) ReplaceAndPlay(uri string) error {
 			Str("uri", uri).
 			Msg("ReplaceAndPlay done")
 	}()
+
+	// Stop any in-flight playback before clearing — see function docs above.
+	stopStart := time.Now()
+	if err := s.mpd.Stop(); err != nil {
+		// Don't bail — Stop can fail benignly if MPD is already stopped.
+		log.Warn().Err(err).Int64("elapsedMs", time.Since(stopStart).Milliseconds()).Msg("mpd: stop failed (continuing)")
+	} else {
+		log.Info().Int64("elapsedMs", time.Since(stopStart).Milliseconds()).Msg("mpd: stopped output")
+	}
 
 	// Clear current queue
 	clearStart := time.Now()
