@@ -84,8 +84,9 @@ func TestConfigDefaults_FillsServiceDomainAndInstance(t *testing.T) {
 		t.Error("default instance should be non-empty (hostname or Stellar fallback)")
 	}
 	host, _ := os.Hostname()
-	if host != "" && cfg.Instance != host && cfg.Instance != "Stellar" {
-		t.Errorf("default instance = %q, want hostname %q or fallback Stellar", cfg.Instance, host)
+	wantHost := sanitiseInstance(host)
+	if host != "" && cfg.Instance != wantHost && cfg.Instance != "Stellar" {
+		t.Errorf("default instance = %q, want sanitised hostname %q or fallback Stellar", cfg.Instance, wantHost)
 	}
 }
 
@@ -274,6 +275,42 @@ func TestStart_HostnameFallbackToStellar(t *testing.T) {
 	cfg := Config{Port: 3001}.withDefaults()
 	if cfg.Instance != "Stellar" {
 		t.Errorf("instance = %q, want fallback %q", cfg.Instance, "Stellar")
+	}
+}
+
+// TestSanitiseInstance verifies that hostnames returned by macOS (which
+// include a trailing `.local`) are stripped to a bare label so the resulting
+// PTR record isn't malformed. Without this, mDNSResponder silently drops the
+// announcement and the service is invisible to dns-sd browse.
+func TestSanitiseInstance(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		in, want string
+	}{
+		{"Eduardos-Laptop.local", "Eduardos-Laptop"},
+		{"Eduardos-Laptop.local.", "Eduardos-Laptop"},
+		{"stellar", "stellar"},        // Linux: bare hostname, unchanged
+		{"stellar.", "stellar"},       // trailing dot only
+		{"some-host.local.local", "some-host.local"}, // only one .local suffix stripped
+		{"", ""},                      // empty stays empty so the fallback fires
+	}
+	for _, tc := range cases {
+		if got := sanitiseInstance(tc.in); got != tc.want {
+			t.Errorf("sanitiseInstance(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+}
+
+// TestStart_StripsLocalSuffixFromMacHostname end-to-ends the sanitiser via
+// withDefaults so a regression in either layer surfaces.
+func TestStart_StripsLocalSuffixFromMacHostname(t *testing.T) {
+	origHostname := hostnameFn
+	hostnameFn = func() (string, error) { return "Eduardos-Laptop.local", nil }
+	t.Cleanup(func() { hostnameFn = origHostname })
+
+	cfg := Config{Port: 3001}.withDefaults()
+	if cfg.Instance != "Eduardos-Laptop" {
+		t.Errorf("instance = %q, want %q (stripped of .local)", cfg.Instance, "Eduardos-Laptop")
 	}
 }
 

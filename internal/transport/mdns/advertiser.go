@@ -16,11 +16,68 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"os"
+	"strings"
 	"sync"
 
 	"github.com/grandcat/zeroconf"
 )
+
+// sanitiseInstance trims trailing dots and `.local`/`.local.` suffixes from a
+// hostname so it's safe to use as the first DNS label of an mDNS PTR record.
+// macOS's `os.Hostname()` returns `Foo.local`, which would otherwise produce
+// `Foo.local._stellar._tcp.local.` — two `.local` labels — and mDNSResponder
+// silently drops the announcement.
+func sanitiseInstance(name string) string {
+	name = strings.TrimSuffix(name, ".")
+	name = strings.TrimSuffix(name, ".local")
+	name = strings.TrimSuffix(name, ".")
+	return name
+}
+
+// pickAdvertisementInterfaces returns the interfaces best suited for mDNS
+// advertisement: UP, MULTICAST, non-loopback, non-pointopoint, and bearing a
+// global IPv4 address. This filters out NordVPN/Wireguard utun* tunnels,
+// awdl0, and other interfaces that don't carry LAN multicast on the user's
+// actual subnet. Returning nil from this function tells zeroconf to fall back
+// to its "all multicast interfaces" default — useful when the heuristic finds
+// nothing (e.g. a host with only tunnel interfaces during early boot).
+func pickAdvertisementInterfaces() []net.Interface {
+	ifaces, err := net.Interfaces()
+	if err != nil {
+		return nil
+	}
+	var picked []net.Interface
+	for _, ifi := range ifaces {
+		if ifi.Flags&net.FlagUp == 0 ||
+			ifi.Flags&net.FlagMulticast == 0 ||
+			ifi.Flags&net.FlagLoopback != 0 ||
+			ifi.Flags&net.FlagPointToPoint != 0 {
+			continue
+		}
+		addrs, addrErr := ifi.Addrs()
+		if addrErr != nil {
+			continue
+		}
+		for _, a := range addrs {
+			ip, _, parseErr := net.ParseCIDR(a.String())
+			if parseErr != nil {
+				continue
+			}
+			v4 := ip.To4()
+			if v4 == nil || v4.IsLinkLocalUnicast() || v4.IsLoopback() {
+				continue
+			}
+			picked = append(picked, ifi)
+			break
+		}
+	}
+	if len(picked) == 0 {
+		return nil
+	}
+	return picked
+}
 
 // hostnameFn is a swappable seam so tests can simulate hostname errors.
 var hostnameFn = os.Hostname
@@ -41,7 +98,7 @@ type registerFunc func(instance, service, domain string, port int, text []string
 // defaultRegister wraps zeroconf.Register and returns the *zeroconf.Server
 // as a serverHandle.
 func defaultRegister(instance, service, domain string, port int, text []string, _ interface{}) (serverHandle, error) {
-	srv, err := zeroconf.Register(instance, service, domain, port, text, nil)
+	srv, err := zeroconf.Register(instance, service, domain, port, text, pickAdvertisementInterfaces())
 	if err != nil {
 		return nil, err
 	}
@@ -80,8 +137,9 @@ func (c Config) withDefaults() Config {
 	}
 	if c.Instance == "" {
 		if host, err := hostnameFn(); err == nil && host != "" {
-			c.Instance = host
-		} else {
+			c.Instance = sanitiseInstance(host)
+		}
+		if c.Instance == "" {
 			c.Instance = "Stellar"
 		}
 	}
