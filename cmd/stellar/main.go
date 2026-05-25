@@ -5,10 +5,12 @@ import (
 	"context"
 	"encoding/json"
 	"flag"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -31,6 +33,7 @@ import (
 	"github.com/edumarques81/stellar-volumio-audioplayer-backend/internal/infra/paths"
 	"github.com/edumarques81/stellar-volumio-audioplayer-backend/internal/infra/spectrum"
 	"github.com/edumarques81/stellar-volumio-audioplayer-backend/internal/infra/wikipedia"
+	"github.com/edumarques81/stellar-volumio-audioplayer-backend/internal/transport/mdns"
 	"github.com/edumarques81/stellar-volumio-audioplayer-backend/internal/transport/socketio"
 	"github.com/edumarques81/stellar-volumio-audioplayer-backend/internal/version"
 )
@@ -522,6 +525,38 @@ func main() {
 		WriteTimeout: 30 * time.Second,
 	}
 
+	// Bind the listener up front so we can start the mDNS advertiser only
+	// once we know the port is real. Using net.Listen + server.Serve
+	// instead of ListenAndServe gives us that ordering guarantee.
+	ln, err := net.Listen("tcp", server.Addr)
+	if err != nil {
+		log.Fatal().Err(err).Str("addr", server.Addr).Msg("HTTP listen failed")
+	}
+
+	// Service discovery: advertise _stellar._tcp over Bonjour/mDNS so LAN
+	// clients (iOS app, Volumio2-UI dev kiosks) can auto-connect without
+	// hardcoded IPs. The advertised port matches whatever the HTTP server
+	// bound — if --port was overridden, mDNS reflects that automatically.
+	// Failures are non-fatal: the backend still serves clients that know
+	// its address.
+	var advertiser *mdns.BonjourAdvertiser
+	if portInt, perr := strconv.Atoi(*port); perr == nil && portInt > 0 {
+		adv, aerr := mdns.New(mdns.Config{Port: portInt})
+		if aerr != nil {
+			log.Warn().Err(aerr).Msg("mDNS advertiser construction failed - service discovery disabled")
+		} else if serr := adv.Start(ctx); serr != nil {
+			log.Warn().Err(serr).Msg("mDNS advertiser failed to start - service discovery disabled")
+		} else {
+			advertiser = adv
+			log.Info().
+				Str("service", "_stellar._tcp").
+				Int("port", portInt).
+				Msg("mDNS advertiser started")
+		}
+	} else {
+		log.Warn().Str("port", *port).Msg("non-numeric port; mDNS advertiser disabled")
+	}
+
 	// Graceful shutdown
 	go func() {
 		sigCh := make(chan os.Signal, 1)
@@ -530,6 +565,12 @@ func main() {
 
 		log.Info().Msg("Shutting down...")
 		cancel()
+
+		if advertiser != nil {
+			if err := advertiser.Stop(); err != nil {
+				log.Warn().Err(err).Msg("mDNS advertiser stop error")
+			}
+		}
 
 		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer shutdownCancel()
@@ -540,7 +581,7 @@ func main() {
 	}()
 
 	log.Info().Str("addr", ":"+*port).Msg("HTTP server listening")
-	if err := server.ListenAndServe(); err != http.ErrServerClosed {
+	if err := server.Serve(ln); err != http.ErrServerClosed {
 		log.Fatal().Err(err).Msg("HTTP server error")
 	}
 
