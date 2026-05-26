@@ -249,6 +249,33 @@ func (b *Builder) buildAlbums() error {
 		}
 	}
 
+	// Re-link albums to their existing artwork rows. Clear() preserves the
+	// artwork table by design (enrichment is slow + rate-limited), but the
+	// albums row is wiped + re-inserted from MPD with no artwork_id. Artwork
+	// row IDs follow the deterministic `<album_id>_artwork` convention (set
+	// by the album save path in internal/infra/enrichment/coordinator.go), so
+	// a single batched UPDATE restores the FK without re-fetching.
+	//
+	// Mirrors the buildArtists relinker (lines ~292 below); without it, every
+	// cache rebuild forced enrichment to re-fetch all album art from
+	// MusicBrainz/CAA at 1 req/sec — slow + wasteful (regression 2026-05-27).
+	now := time.Now().Format(time.RFC3339)
+	if relinkResult, err := tx.Exec(`
+		UPDATE albums
+		SET artwork_id = albums.id || '_artwork',
+		    updated_at = ?
+		WHERE (artwork_id IS NULL OR artwork_id = '')
+		  AND EXISTS (
+		      SELECT 1 FROM artwork
+		      WHERE artwork.id   = albums.id || '_artwork'
+		        AND artwork.type = 'album'
+		  )
+	`, now); err != nil {
+		log.Warn().Err(err).Msg("Failed to relink album artwork; continuing")
+	} else if relinked, _ := relinkResult.RowsAffected(); relinked > 0 {
+		log.Info().Int64("count", relinked).Msg("Relinked albums to preserved artwork rows")
+	}
+
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("failed to commit albums: %w", err)
 	}

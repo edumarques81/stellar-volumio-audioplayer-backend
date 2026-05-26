@@ -3,6 +3,7 @@ package cache_test
 import (
 	"crypto/md5"
 	"fmt"
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
@@ -176,5 +177,180 @@ func TestBuilder_FullBuild_RelinksArtistArtwork(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("artist %q not in DB after FullBuild", artistName)
+	}
+}
+
+// TestBuilder_FullBuild_RelinksAlbumArtwork verifies that a FullBuild
+// reconnects a freshly-inserted album row to a preserved artwork row that
+// was previously inserted by enrichment. Mirrors the artist relink, fixes
+// the data-loss-across-rebuild gap surfaced 2026-05-27: today every
+// cache:rebuild wipes the albums table and re-inserts from MPD with
+// artwork_id=NULL, forcing the enrichment worker to re-fetch every album's
+// artwork from MusicBrainz/CAA (rate-limited to 1 req/sec — slow + wasteful).
+//
+// With the fix: enrichment inserts artwork rows with id=`<album_id>_artwork`
+// and album_id=<album_id>, and the album relinker restores the FK in a
+// single batched UPDATE, mirroring the artist relinker semantics exactly.
+func TestBuilder_FullBuild_RelinksAlbumArtwork(t *testing.T) {
+	t.Parallel()
+
+	tmpDir := t.TempDir()
+	db := cache.NewDB(filepath.Join(tmpDir, "library.db"))
+	if err := db.Open(); err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+
+	// Pre-seed an artwork row exactly as the fixed album save path would,
+	// with deterministic id = `<album_id>_artwork`. The album_id mirrors
+	// generateAlbumID(albumArtist, album, uri) so the relinker can find it.
+	albumArtist := "Hollow Tides"
+	album := "Whatever"
+	uri := "NAS/Hollow Tides/Whatever"
+	idData := albumArtist + "\x00" + album + "\x00" + uri
+	albumID := fmt.Sprintf("%x", md5.Sum([]byte(idData)))
+	artworkID := albumID + "_artwork"
+
+	dao := cache.NewDAO(db)
+	if err := dao.InsertArtwork(&cache.CachedArtwork{
+		ID:        artworkID,
+		AlbumID:   albumID,
+		Type:      "album",
+		FilePath:  "/tmp/fake-album.jpg",
+		Source:    "cover_art_archive",
+		MimeType:  "image/jpeg",
+		FetchedAt: time.Now(),
+	}); err != nil {
+		t.Fatalf("InsertArtwork: %v", err)
+	}
+
+	provider := &stubMPDDataProvider{
+		artists: map[string]int{albumArtist: 1},
+		albumsByBase: map[string][]cache.AlbumDetailsData{
+			"NAS": {{
+				Album:       album,
+				AlbumArtist: albumArtist,
+				TrackCount:  1,
+				FirstTrack:  uri + "/01.flac",
+				TotalTime:   100,
+				Format:      "44100:16:2",
+			}},
+		},
+	}
+
+	builder := cache.NewBuilder(db, provider, cache.NewDefaultPathClassifier())
+	builder.SetBasePaths([]string{"NAS"})
+	if err := builder.FullBuild(); err != nil {
+		t.Fatalf("FullBuild: %v", err)
+	}
+
+	cachedAlbum, err := dao.GetAlbum(albumID)
+	if err != nil {
+		t.Fatalf("GetAlbum: %v", err)
+	}
+	if cachedAlbum == nil {
+		t.Fatalf("album %q not in DB after FullBuild", albumID)
+	}
+	if cachedAlbum.ArtworkID != artworkID {
+		t.Errorf("album artwork_id = %q, want %q (album relink failed)", cachedAlbum.ArtworkID, artworkID)
+	}
+}
+
+// TestBackfillAlbumArtwork_RecoversOrphanIDsFromDisk reproduces the live
+// state observed 2026-05-27: 40 albums had `artwork_id` set to a hash
+// that pointed at nothing in the `artwork` table, because the buggy
+// album save path wrote the JPG file but never inserted the row. The
+// JPG file is on disk; we just need to write the missing row.
+//
+// The backfill handler:
+//   1. Scans albums with non-empty artwork_id and no matching artwork row.
+//   2. For each, looks for a JPG/PNG/WEBP/GIF in the album artwork dir
+//      keyed by the album_id (matching the new save path convention).
+//   3. Inserts an artwork row using the deterministic
+//      `<album_id>_artwork` id so the next rebuild's relinker can pick
+//      it up. Updates albums.artwork_id to the new id as a side effect.
+//
+// Idempotent: re-running on a clean state must be a no-op.
+func TestBackfillAlbumArtwork_RecoversOrphanIDsFromDisk(t *testing.T) {
+	t.Parallel()
+
+	tmpDir := t.TempDir()
+	db := cache.NewDB(filepath.Join(tmpDir, "library.db"))
+	if err := db.Open(); err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+
+	dao := cache.NewDAO(db)
+
+	// Seed an album with an orphan artwork_id (the pre-fix bug shape):
+	// the album points at an artwork ID that doesn't exist in the DB,
+	// even though the JPG file is on disk.
+	albumID := "fab051cf038f488e41a1d0001be6a483"
+	orphanID := "b4839643df150b93c6013f97799c5edf"
+	if err := dao.InsertAlbum(&cache.CachedAlbum{
+		ID:          albumID,
+		Title:       "Whatever",
+		AlbumArtist: "Hollow Tides",
+		URI:         "NAS/Hollow Tides/Whatever",
+		Source:      "nas",
+		ArtworkID:   orphanID, // dangling — no artwork row exists yet
+	}); err != nil {
+		t.Fatalf("InsertAlbum: %v", err)
+	}
+
+	// Materialise the on-disk JPG that the buggy save path wrote.
+	artworkDir := filepath.Join(tmpDir, "cache", "artwork", "albums")
+	if err := os.MkdirAll(artworkDir, 0755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	jpgPath := filepath.Join(artworkDir, albumID+".jpg")
+	if err := os.WriteFile(jpgPath, []byte("\xff\xd8\xff stub"), 0644); err != nil {
+		t.Fatalf("write jpg: %v", err)
+	}
+
+	// Run the backfill.
+	count, err := cache.BackfillAlbumArtwork(dao, filepath.Join(tmpDir, "cache"))
+	if err != nil {
+		t.Fatalf("BackfillAlbumArtwork: %v", err)
+	}
+	if count != 1 {
+		t.Errorf("backfill count = %d, want 1", count)
+	}
+
+	// The album's artwork_id must now use the deterministic format so
+	// the rebuild relinker can find it.
+	updated, err := dao.GetAlbum(albumID)
+	if err != nil {
+		t.Fatalf("GetAlbum: %v", err)
+	}
+	wantNewID := albumID + "_artwork"
+	if updated.ArtworkID != wantNewID {
+		t.Errorf("post-backfill artwork_id = %q, want %q", updated.ArtworkID, wantNewID)
+	}
+
+	// The artwork row must exist with type='album', album_id linked, and
+	// file_path pointing at the on-disk JPG.
+	art, err := dao.GetArtwork(wantNewID)
+	if err != nil {
+		t.Fatalf("GetArtwork: %v", err)
+	}
+	if art == nil {
+		t.Fatalf("artwork row %q missing after backfill", wantNewID)
+	}
+	if art.Type != "album" || art.AlbumID != albumID {
+		t.Errorf("artwork row metadata wrong: type=%q album_id=%q", art.Type, art.AlbumID)
+	}
+	if art.FilePath != jpgPath {
+		t.Errorf("artwork file_path = %q, want %q", art.FilePath, jpgPath)
+	}
+
+	// Idempotency: a second run on the same state must be a no-op.
+	again, err := cache.BackfillAlbumArtwork(dao, filepath.Join(tmpDir, "cache"))
+	if err != nil {
+		t.Fatalf("second BackfillAlbumArtwork: %v", err)
+	}
+	if again != 0 {
+		t.Errorf("idempotent re-run count = %d, want 0", again)
 	}
 }

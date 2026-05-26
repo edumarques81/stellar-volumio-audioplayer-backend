@@ -260,6 +260,10 @@ func (p *cacheDAOAlbumProvider) UpdateAlbumArtwork(albumID, artworkID string) er
 	return p.dao.UpdateAlbumArtwork(albumID, artworkID)
 }
 
+func (p *cacheDAOAlbumProvider) UpsertAlbumArtwork(albumID, filePath, source, mimeType string) error {
+	return p.dao.UpsertAlbumArtwork(albumID, filePath, source, mimeType)
+}
+
 // handleQueueArtistImages queues missing artist images for enrichment.
 func (h *EnrichmentHandlers) handleQueueArtistImages(client *socket.Socket) {
 	log.Info().Msg("Received enrichment:artists:queue - queuing missing artist images")

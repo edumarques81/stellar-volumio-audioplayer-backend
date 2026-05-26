@@ -2472,6 +2472,20 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 // InitializeCache checks if the cache is empty and triggers a background rebuild if needed.
 // This should be called after the server is created to ensure the cache is populated.
 func (s *Server) InitializeCache() {
+	// Run the album-artwork backfill before anything else. This recovers
+	// any orphan album.artwork_id rows from a pre-2026-05-27 build, so the
+	// subsequent enrichment worker doesn't re-fetch artwork that's already
+	// on disk. Cheap (<100ms for ~100 albums), idempotent, safe on every
+	// startup.
+	if s.cacheDAO != nil {
+		dataDir := os.ExpandEnv("$HOME/stellar-backend/data")
+		if n, err := cache.BackfillAlbumArtwork(s.cacheDAO, filepath.Join(dataDir, "cache")); err != nil {
+			log.Warn().Err(err).Msg("Album artwork backfill failed; continuing")
+		} else if n > 0 {
+			log.Info().Int("repaired", n).Msg("Album artwork backfill repaired orphan rows on startup")
+		}
+	}
+
 	// Start enrichment worker
 	if s.enrichmentHandlers != nil {
 		s.enrichmentHandlers.Initialize()

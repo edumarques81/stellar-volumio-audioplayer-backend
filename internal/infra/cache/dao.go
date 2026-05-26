@@ -665,6 +665,43 @@ func (dao *DAO) UpdateAlbumArtwork(albumID, artworkID string) error {
 	return err
 }
 
+// UpsertAlbumArtwork inserts (or updates) an artwork row for an album AND
+// links it from the albums row, in one transactional step. This mirrors
+// UpdateArtistArtworkURL — without the artwork row in the DB, the album→
+// artwork FK has nothing to relink to after a cache rebuild, and every
+// rebuild forced enrichment to re-fetch from MusicBrainz/CAA (slow,
+// rate-limited).
+//
+// The artwork ID is deterministically derived as `<album_id>_artwork`, so
+// the rebuild relinker in buildAlbums() can find it via the same pattern
+// the artist relinker uses.
+func (dao *DAO) UpsertAlbumArtwork(albumID, filePath, source, mimeType string) error {
+	db := dao.db.DB()
+	if db == nil {
+		return fmt.Errorf("database not open")
+	}
+
+	now := time.Now().Format(time.RFC3339)
+	artworkID := albumID + "_artwork"
+
+	_, err := db.Exec(`
+		INSERT INTO artwork (id, album_id, type, file_path, source, mime_type, fetched_at, created_at)
+		VALUES (?, ?, 'album', ?, ?, ?, ?, ?)
+		ON CONFLICT(id) DO UPDATE SET
+			file_path = ?, source = ?, mime_type = ?, fetched_at = ?
+	`,
+		artworkID, albumID, filePath, source, mimeType, now, now,
+		filePath, source, mimeType, now,
+	)
+	if err != nil {
+		return fmt.Errorf("insert album artwork: %w", err)
+	}
+
+	// Link artwork to the album row.
+	_, err = db.Exec("UPDATE albums SET artwork_id = ?, updated_at = ? WHERE id = ?", artworkID, now, albumID)
+	return err
+}
+
 // --- Radio Station Operations ---
 
 // InsertRadioStation inserts or updates a radio station.

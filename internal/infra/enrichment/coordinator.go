@@ -26,6 +26,12 @@ type Album struct {
 type AlbumProvider interface {
 	GetAlbumsWithoutArtwork() ([]Album, error)
 	UpdateAlbumArtwork(albumID, artworkID string) error
+	// UpsertAlbumArtwork inserts the artwork row AND links it from the album
+	// row, mirroring the artist path's UpdateArtistArtworkURL. Without the
+	// artwork row in the DB, a cache rebuild can't relink the album→artwork
+	// FK and enrichment has to re-fetch every album's art from scratch
+	// (regression 2026-05-27).
+	UpsertAlbumArtwork(albumID, filePath, source, mimeType string) error
 }
 
 // Coordinator orchestrates artwork enrichment from web sources.
@@ -199,18 +205,24 @@ func (c *Coordinator) CreateSaveFunc() SaveFunc {
 			return fmt.Errorf("create artwork dir: %w", err)
 		}
 
-		// Save file
+		// Save file. We deliberately use albumID (not the random
+		// generateArtworkID hash) as the filename so that filesystem rescue
+		// is possible: even if the artwork DB row is somehow lost, the file
+		// is locatable from just the album_id.
 		filename := albumID + ext
 		filePath := filepath.Join(artworkDir, filename)
 		if err := os.WriteFile(filePath, result.Data, 0644); err != nil {
 			return fmt.Errorf("write artwork file: %w", err)
 		}
 
-		// Generate artwork ID and update album
-		artworkID := generateArtworkID(albumID, "album")
+		// Upsert the artwork row AND link it from the album row in one
+		// step. The deterministic id pattern (`<album_id>_artwork`) lets
+		// the cache rebuild's relinker restore the FK without needing the
+		// enrichment worker to re-fetch — see buildAlbums() in
+		// internal/infra/cache/builder.go.
 		if c.albumProvider != nil {
-			if err := c.albumProvider.UpdateAlbumArtwork(albumID, artworkID); err != nil {
-				log.Warn().Err(err).Str("albumID", albumID).Msg("Failed to update album artwork")
+			if err := c.albumProvider.UpsertAlbumArtwork(albumID, filePath, string(result.Source), result.MimeType); err != nil {
+				log.Warn().Err(err).Str("albumID", albumID).Msg("Failed to upsert album artwork")
 			}
 		}
 
