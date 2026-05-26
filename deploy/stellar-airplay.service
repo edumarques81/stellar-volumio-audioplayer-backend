@@ -1,0 +1,21 @@
+[Unit]
+Description=Stellar AirPlay Metadata Forwarder (Pi-side)
+Documentation=https://github.com/edumarques81/stellar-volumio-audioplayer-backend
+After=shairport-sync.service network.target
+Wants=shairport-sync.service
+
+[Service]
+Type=simple
+User=eduardo
+Group=audio
+WorkingDirectory=/home/eduardo/stellar-backend
+EnvironmentFile=/etc/stellar-airplay/env
+ExecStart=/home/eduardo/stellar-backend/stellar-airplay
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=stellar-airplay
+
+[Install]
+WantedBy=multi-user.target

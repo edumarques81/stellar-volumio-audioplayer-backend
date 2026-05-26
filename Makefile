@@ -14,6 +14,12 @@ SPECTRUM_BINARY_NAME := stellar-spectrum
 SPECTRUM_CMD_DIR := cmd/stellar-spectrum
 SPECTRUM_PI_BINARY := $(BIN_DIR)/stellar-spectrum-arm64
 
+# stellar-airplay daemon — runs on the Pi alongside shairport-sync,
+# tails the metadata pipe and forwards parsed state to the Mac backend.
+AIRPLAY_BINARY_NAME := stellar-airplay
+AIRPLAY_CMD_DIR := cmd/stellar-airplay
+AIRPLAY_PI_BINARY := $(BIN_DIR)/stellar-airplay-arm64
+
 # Build settings
 GO := go
 GOFLAGS := -v
@@ -29,7 +35,7 @@ PI_BINARY := $(BIN_DIR)/stellar-arm64
 .DEFAULT_GOAL := build
 
 # Phony targets
-.PHONY: all build build-local build-pi build-darwin build-windows build-spectrum build-spectrum-local clean test test-verbose test-race coverage lint fmt vet check deps tidy run help
+.PHONY: all build build-local build-pi build-darwin build-windows build-spectrum build-spectrum-local build-airplay build-airplay-local clean test test-verbose test-race coverage lint fmt vet check deps tidy run help
 
 ## help: Show this help message
 help:
@@ -98,6 +104,22 @@ build-spectrum-local:
 	@mkdir -p $(BIN_DIR)
 	$(GO) build $(GOFLAGS) -ldflags "$(LDFLAGS)" -o $(BIN_DIR)/$(SPECTRUM_BINARY_NAME) ./$(SPECTRUM_CMD_DIR)
 	@echo "Binary built: $(BIN_DIR)/$(SPECTRUM_BINARY_NAME)"
+
+## build-airplay: Cross-compile stellar-airplay daemon for Raspberry Pi 5 (ARM64 Linux)
+build-airplay:
+	@echo "Cross-compiling $(AIRPLAY_BINARY_NAME) for Raspberry Pi 5 (ARM64)..."
+	@mkdir -p $(BIN_DIR)
+	CGO_ENABLED=0 GOOS=$(PI_GOOS) GOARCH=$(PI_GOARCH) \
+		$(GO) build -ldflags "$(LDFLAGS)" \
+		-o $(AIRPLAY_PI_BINARY) ./$(AIRPLAY_CMD_DIR)
+	@echo "Binary built: $(AIRPLAY_PI_BINARY)"
+
+## build-airplay-local: Build stellar-airplay for host (macOS dev / smoke test)
+build-airplay-local:
+	@echo "Building $(AIRPLAY_BINARY_NAME) for local platform..."
+	@mkdir -p $(BIN_DIR)
+	$(GO) build $(GOFLAGS) -ldflags "$(LDFLAGS)" -o $(BIN_DIR)/$(AIRPLAY_BINARY_NAME) ./$(AIRPLAY_CMD_DIR)
+	@echo "Binary built: $(BIN_DIR)/$(AIRPLAY_BINARY_NAME)"
 
 ## clean: Remove build artifacts
 clean:
