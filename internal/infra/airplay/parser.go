@@ -47,6 +47,22 @@ type Chunk struct {
 	Data []byte
 }
 
+// PlayState is the tristate play/pause indicator surfaced by the parser
+// in response to ssnc/pbeg, ssnc/prsm, and ssnc/paus chunks. The session
+// updater consumes this to maintain its IsPlaying flag.
+type PlayState int
+
+const (
+	// PlayStateUnknown is the zero value — the bundle contained no
+	// lifecycle chunk. The session updater preserves its prior
+	// IsPlaying value when it sees this.
+	PlayStateUnknown PlayState = iota
+	// PlayStatePlaying — the bundle contained pbeg or prsm.
+	PlayStatePlaying
+	// PlayStatePaused — the bundle contained paus.
+	PlayStatePaused
+)
+
 // Frame is the coalesced metadata bundle produced from a slice of Chunks
 // (typically the chunks observed between an mdst…mden pair, plus any
 // out-of-band ssnc chunks).
@@ -64,6 +80,8 @@ type Frame struct {
 	DACPID          string
 	SeekSeconds     int
 	DurationSeconds int
+
+	PlayState PlayState
 
 	SessionBegan bool
 	SessionEnded bool
@@ -276,12 +294,15 @@ func BuildFrame(chunks []Chunk) Frame {
 			f.DACPID = strings.TrimSpace(string(c.Data))
 		case "ssnc/pbeg":
 			f.SessionBegan = true
+			f.PlayState = PlayStatePlaying
 		case "ssnc/pend":
 			f.SessionEnded = true
 		case "ssnc/paus":
 			f.Paused = true
+			f.PlayState = PlayStatePaused
 		case "ssnc/prsm":
 			f.Resumed = true
+			f.PlayState = PlayStatePlaying
 		}
 	}
 	return f

@@ -305,6 +305,38 @@ func TestCoalesceFrameLifecycle(t *testing.T) {
 	}
 }
 
+// TestCoalesceFramePlayStateTristate verifies the parser surfaces a
+// tristate PlayState across pbeg/prsm/paus/pend chunks:
+//   - PlayStateUnknown — no lifecycle chunk in the bundle
+//   - PlayStatePlaying — pbeg or prsm present
+//   - PlayStatePaused — paus present
+//
+// pend leaves PlayState alone (the caller switches to SessionEnded flow).
+func TestCoalesceFramePlayStateTristate(t *testing.T) {
+	cases := []struct {
+		name  string
+		chunk string
+		want  PlayState
+	}{
+		{"no lifecycle", "", PlayStateUnknown},
+		{"pbeg", "pbeg", PlayStatePlaying},
+		{"prsm", "prsm", PlayStatePlaying},
+		{"paus", "paus", PlayStatePaused},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var chunks []Chunk
+			if tc.chunk != "" {
+				chunks = []Chunk{{Type: "ssnc", Code: tc.chunk}}
+			}
+			f := BuildFrame(chunks)
+			if f.PlayState != tc.want {
+				t.Errorf("PlayState = %v, want %v", f.PlayState, tc.want)
+			}
+		})
+	}
+}
+
 // TestParseTolerantToWhitespace ensures the parser handles the real-world
 // pipe stream which interleaves leading whitespace + newlines.
 func TestParseTolerantToWhitespace(t *testing.T) {

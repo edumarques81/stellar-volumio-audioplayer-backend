@@ -17,6 +17,21 @@ import (
 	"time"
 )
 
+// PlayState is the tristate play/pause indicator surfaced by the parser
+// package. Mirrored here (rather than imported) to keep this domain
+// package free of an infra dependency.
+type PlayState int
+
+const (
+	// PlayStateUnknown — no lifecycle chunk in the source bundle.
+	// The session updater preserves its prior IsPlaying value.
+	PlayStateUnknown PlayState = iota
+	// PlayStatePlaying — pbeg or prsm was observed.
+	PlayStatePlaying
+	// PlayStatePaused — paus was observed.
+	PlayStatePaused
+)
+
 // Frame is the input shape the parser package's BuildFrame returns. We
 // re-declare a structurally compatible copy here to avoid a leaky
 // import — the session package never needs the lower-level Chunk type.
@@ -33,6 +48,8 @@ type Frame struct {
 	SampleRate      int
 	BitDepth        int
 
+	PlayState PlayState
+
 	SessionBegan bool
 	SessionEnded bool
 	Paused       bool
@@ -44,6 +61,7 @@ type Frame struct {
 // pushAirplayState event payload.
 type Snapshot struct {
 	IsActive        bool   `json:"isActive"`
+	IsPlaying       bool   `json:"isPlaying"`
 	Title           string `json:"title"`
 	Artist          string `json:"artist"`
 	Album           string `json:"album"`
@@ -119,6 +137,18 @@ func (s *Session) Update(f Frame) {
 	if f.SessionBegan || !s.snap.IsActive {
 		s.snap.SessionID = newSessionID()
 		s.snap.IsActive = true
+		// pbeg implies playing. Subsequent Updates may overwrite via
+		// an explicit PlayStatePaused.
+		s.snap.IsPlaying = true
+	}
+
+	switch f.PlayState {
+	case PlayStatePlaying:
+		s.snap.IsPlaying = true
+	case PlayStatePaused:
+		s.snap.IsPlaying = false
+	case PlayStateUnknown:
+		// preserve prior value
 	}
 
 	// Delta-merge: only non-zero fields overwrite.

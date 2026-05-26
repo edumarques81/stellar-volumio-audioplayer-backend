@@ -78,6 +78,7 @@ type Server struct {
 	tickerRecoveredBroadcasts atomic.Int64
 	lcdController             lcd.Controller
 	netReporter               netinfo.Reporter
+	airplay                   *airplayBundle
 }
 
 // serverBroadcaster adapts the Socket.IO server to the lcd.Broadcaster (and
@@ -401,6 +402,10 @@ func (s *Server) setupHandlers() {
 		if s.volumioHandlers != nil {
 			s.volumioHandlers.RegisterHandlers(client)
 		}
+
+		// Register AirPlay command handler (airplay:command) — no-op when
+		// UseAirplay was not called during boot.
+		s.registerAirplayClient(client)
 
 		// Player control events
 		client.On("getState", func(args ...any) {

@@ -16,11 +16,40 @@ func TestSessionUpdateMarksActive(t *testing.T) {
 	if !snap.IsActive {
 		t.Errorf("after Update, IsActive should be true")
 	}
+	if !snap.IsPlaying {
+		t.Errorf("first Update without explicit PlayState should default to IsPlaying=true")
+	}
 	if snap.Title != "One" || snap.Sender != "iPhone" {
 		t.Errorf("snapshot fields wrong: %+v", snap)
 	}
 	if snap.SessionID == "" {
 		t.Errorf("SessionID should be auto-assigned on first Update")
+	}
+}
+
+func TestSessionPlayStateTransitions(t *testing.T) {
+	s := NewSession(SessionConfig{HeartbeatTimeout: time.Second})
+	s.Update(Frame{Title: "A", PlayState: PlayStatePlaying})
+	if !s.Snapshot().IsPlaying {
+		t.Errorf("pbeg should mark IsPlaying=true")
+	}
+
+	s.Update(Frame{PlayState: PlayStatePaused})
+	if s.Snapshot().IsPlaying {
+		t.Errorf("paus should mark IsPlaying=false")
+	}
+
+	s.Update(Frame{PlayState: PlayStatePlaying})
+	if !s.Snapshot().IsPlaying {
+		t.Errorf("prsm should restore IsPlaying=true")
+	}
+
+	// PlayStateUnknown is a no-op — title updates without a lifecycle
+	// chunk must preserve the existing IsPlaying value.
+	s.Update(Frame{PlayState: PlayStatePaused})
+	s.Update(Frame{Title: "Other"})
+	if s.Snapshot().IsPlaying {
+		t.Errorf("unrelated update must preserve IsPlaying=false")
 	}
 }
 
