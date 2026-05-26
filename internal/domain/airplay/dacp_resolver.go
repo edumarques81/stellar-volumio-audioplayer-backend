@@ -1,6 +1,7 @@
 package airplay
 
 import (
+	"bufio"
 	"context"
 	"errors"
 	"fmt"
@@ -103,12 +104,40 @@ func (r *DACPResolver) platformResolve(ctx context.Context, dacpID string) (stri
 
 func resolveViaDNSSD(ctx context.Context, dacpID string) (string, int, bool) {
 	instance := "iTunes_Ctrl_" + dacpID
-	// `dns-sd -L` does not terminate on its own; we read it for a short
-	// window and parse the first "can be reached at" line. The outer
-	// context timeout enforces the cap.
+	// `dns-sd -L` does not self-terminate — it streams "can be reached
+	// at" lines until killed. We MUST stream-parse and kill on first
+	// match; waiting for cmd.CombinedOutput() blocks for the full
+	// context window (typically 3s), which leaves zero budget for the
+	// follow-up HTTP request and surfaces as `context deadline
+	// exceeded` even when the iPhone is reachable in <50ms via curl.
 	cmd := exec.CommandContext(ctx, "dns-sd", "-L", instance, "_dacp._tcp", "local")
-	out, _ := cmd.CombinedOutput() // err is always context-cancel here; output is what matters
-	return ParseDNSSDResolveOutput(string(out))
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return "", 0, false
+	}
+	cmd.Stderr = nil
+	if err := cmd.Start(); err != nil {
+		return "", 0, false
+	}
+	defer func() {
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+	}()
+
+	reader := bufio.NewReader(stdout)
+	for {
+		// ReadString unblocks when ctx-cancel kills the process (Read
+		// returns EOF), so we don't need an explicit deadline check.
+		line, err := reader.ReadString('\n')
+		if line != "" {
+			if host, port, ok := ParseDNSSDResolveOutput(line); ok {
+				return host, port, true
+			}
+		}
+		if err != nil {
+			return "", 0, false
+		}
+	}
 }
 
 func resolveViaAvahi(ctx context.Context, dacpID string) (string, int, bool) {
