@@ -19,6 +19,7 @@ import (
 	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
 
+	"github.com/edumarques81/stellar-volumio-audioplayer-backend/internal/domain/airplay"
 	"github.com/edumarques81/stellar-volumio-audioplayer-backend/internal/domain/artwork"
 	"github.com/edumarques81/stellar-volumio-audioplayer-backend/internal/domain/bios"
 	"github.com/edumarques81/stellar-volumio-audioplayer-backend/internal/domain/lastplayed"
@@ -352,6 +353,42 @@ func main() {
 		log.Info().Str("route", "/internal/spectrum").Msg("Spectrum ingest endpoint enabled")
 	} else {
 		log.Info().Msg("Spectrum ingest endpoint disabled (STELLAR_SPECTRUM_KEY unset)")
+	}
+
+	// AirPlay ingest endpoints:
+	// The Pi-side stellar-airplay daemon tails the shairport-sync metadata
+	// pipe and POSTs delta payloads to /internal/airplay/state and pings
+	// /internal/airplay/heartbeat. Auth via STELLAR_AIRPLAY_KEY; empty key
+	// disables the endpoints with 503.
+	airplayKey := strings.TrimSpace(os.Getenv("STELLAR_AIRPLAY_KEY"))
+	airplayTimeout := 5 * time.Second
+	if v := os.Getenv("STELLAR_AIRPLAY_SESSION_TIMEOUT_MS"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			airplayTimeout = time.Duration(n) * time.Millisecond
+		}
+	}
+	airplaySession := airplay.NewSession(airplay.SessionConfig{HeartbeatTimeout: airplayTimeout})
+	mux.Handle("/internal/airplay/state", socketServer.AirplayIngestHandler(airplayKey, airplaySession))
+	mux.Handle("/internal/airplay/heartbeat", socketServer.AirplayHeartbeatHandler(airplayKey, airplaySession))
+	if airplayKey != "" {
+		log.Info().
+			Str("route", "/internal/airplay/{state,heartbeat}").
+			Dur("session_timeout", airplayTimeout).
+			Msg("AirPlay ingest enabled")
+
+		// Wire the airplay:command socket handler. DACP resolver uses
+		// dns-sd on macOS, avahi-browse on Linux; the DACPClient gets a
+		// 2s timeout-bounded HTTP client.
+		dacpResolver := airplay.NewDACPResolver()
+		dacpClient := airplay.NewDACPClient(&http.Client{Timeout: 2 * time.Second})
+		socketServer.UseAirplay(airplaySession, dacpClient, dacpResolver)
+
+		// Heartbeat watcher: ticks every second, expires sessions whose
+		// last heartbeat is older than airplayTimeout, broadcasts
+		// pushAirplayEnded so clients flip out of AirPlay mode.
+		socketio.StartAirplayHeartbeatWatcher(ctx, airplaySession, socketServer.Broadcaster().Emit, time.Second)
+	} else {
+		log.Info().Msg("AirPlay ingest disabled (STELLAR_AIRPLAY_KEY unset)")
 	}
 
 	// Health check
