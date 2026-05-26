@@ -94,9 +94,10 @@ func (h *AirplayCommandHandler) Handle(ctx context.Context, payload map[string]i
 		// Drop the cached endpoint so a stale host:port doesn't trap us
 		// in repeated failures — next command re-resolves.
 		h.resolver.Invalidate(snap.DACPID)
-		log.Warn().Err(err).Str("cmd", cmd).Msg("dacp dispatch failed")
+		log.Warn().Err(err).Str("cmd", cmd).Str("baseURL", baseURL).Msg("dacp dispatch failed")
 		return AirplayCommandResponse{OK: false, Error: err.Error()}
 	}
+	log.Info().Str("cmd", cmd).Str("baseURL", baseURL).Msg("dacp dispatch ok")
 	return AirplayCommandResponse{OK: true}
 }
 

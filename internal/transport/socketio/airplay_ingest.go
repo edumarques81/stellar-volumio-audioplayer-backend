@@ -7,6 +7,8 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/rs/zerolog/log"
+
 	"github.com/edumarques81/stellar-volumio-audioplayer-backend/internal/domain/airplay"
 )
 
@@ -116,8 +118,19 @@ func (h *AirplayIngestHandler) ServeHTTP(w http.ResponseWriter, r *http.Request)
 		Resumed:         p.Resumed,
 	})
 
+	snap := h.session.Snapshot()
+	log.Info().
+		Int("body_bytes", len(body)).
+		Str("title", snap.Title).
+		Str("artist", snap.Artist).
+		Bool("isActive", snap.IsActive).
+		Bool("hasEmit", h.emit != nil).
+		Bool("hasCover", snap.CoverDataURL != "").
+		Str("sessionID", snap.SessionID).
+		Msg("airplay ingest: about to emit pushAirplayState")
 	if h.emit != nil {
-		h.emit("pushAirplayState", h.session.Snapshot())
+		h.emit("pushAirplayState", snap)
+		log.Info().Str("sessionID", snap.SessionID).Msg("airplay ingest: emit returned")
 	}
 	w.WriteHeader(http.StatusNoContent)
 }
