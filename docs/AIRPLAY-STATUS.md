@@ -1,8 +1,46 @@
-# AirPlay integration — state of play (2026-05-26)
+# AirPlay integration — state of play (2026-05-26 evening update)
 
-End-of-session snapshot. Most of the metadata pipeline works; audio path
-contention with MPD and the AirPlay→MPD round-trip are still broken.
-Next session should pick up from here.
+Most of the metadata pipeline works. The orphan-session race that pinned
+clients on AirPlay across switchback has been fixed (see "Update
+2026-05-26 evening" below). The shairport↔MPD DAC handoff and the
+"weird noise" on switchback are still open.
+
+## Update 2026-05-26 evening
+
+**Root cause of "iOS / LCD stuck in AirPlay after session ends":**
+`Session.Update()` was unconditionally minting a new SessionID whenever
+`IsActive=false`, regardless of whether the incoming Frame carried
+`SessionBegan: true`. Combined with two facts —
+1. the shairport post-hook's `{ended:true}` curl is independent of the
+   daemon's HTTP queue, so it races straggler ingests at the Mac, and
+2. the daemon's heartbeat loop fires every 2s **unconditionally**, so
+   any active session has its `lastHB` refreshed forever
+— this meant a single late metadata POST arriving after `End()` would
+mint an orphan session that the daemon's heartbeats then kept alive
+indefinitely.
+
+Fix: `airplay.SessionConfig.PostEndCooldown` (1s default, overridable
+via `STELLAR_AIRPLAY_POST_END_COOLDOWN_MS`). For one second after an
+explicit `End()`, late non-SessionBegan ingest frames are silently
+dropped. SessionBegan still mints a fresh session (so a fast sender
+reconnect inside the window works). After the cooldown, the legacy
+"first metadata mints a session" path resumes — so the
+acre/daid/snam-before-pbeg case at session start still populates
+ActiveRemote/DACP-ID correctly.
+
+Verified live with parallel curl ingests against the running backend:
+{ended:true} → straggler metadata 100ms later → backend reports
+isActive=false. Same pattern after 1.5s → session reactivates as
+expected.
+
+Files touched:
+- `internal/domain/airplay/session.go` (PostEndCooldown field +
+  guarded Update path + endedAt tracking)
+- `internal/domain/airplay/session_test.go` (4 new tests covering
+  drops within cooldown, SessionBegan-pierces-cooldown, expiry, and
+  zero-cooldown legacy behaviour)
+- `cmd/stellar/main.go` (env-overridable cooldown wired into
+  production constructor + log line update)
 
 ---
 
@@ -43,12 +81,16 @@ to the Pi as `/usr/local/bin/stellar-airplay-pre.sh` and committed at
 Open question: this only fixes the AirPlay-takeover direction. The
 reverse direction (AirPlay → MPD) is unrelated and broken — see below.
 
-### 2. Switch from AirPlay back to normal mode is broken
+### 2. Switch from AirPlay back to normal mode (mostly fixed)
 After the AirPlay session ends and the user wants to resume MPD
-playback (NAS / local files), the user reports:
-- A "weird noise" comes out of the DAC.
-- MPD doesn't resume — UI stays in AirPlay state (control lost).
-- The user has to manually `mpc stop` from the terminal to recover.
+playback (NAS / local files), the user reported:
+- A "weird noise" comes out of the DAC. — STILL OPEN, audio-layer issue
+- MPD doesn't resume — UI stays in AirPlay state (control lost). —
+  FIXED by the orphan-session cooldown above. iOS now receives
+  pushAirplayEnded reliably and AirplayStore clears.
+- The user has to manually `mpc stop` from the terminal to recover. —
+  Should be resolved together with the iOS-stuck issue: once iOS shows
+  MPD controls, the user can press play normally.
 
 Expected behaviour: post-hook ends the AirPlay session cleanly,
 shairport releases the DAC, the iOS / LCD UI returns to MPD mode, and

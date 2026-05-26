@@ -367,13 +367,28 @@ func main() {
 			airplayTimeout = time.Duration(n) * time.Millisecond
 		}
 	}
-	airplaySession := airplay.NewSession(airplay.SessionConfig{HeartbeatTimeout: airplayTimeout})
+	// PostEndCooldown closes the race between the shairport post-hook's
+	// {ended:true} curl and the daemon's straggler ingest POSTs. 1s is
+	// well over the worst-case forwarder queue drain (~200ms) and well
+	// under the time a fresh AirPlay session needs to set up (>2s of
+	// TCP + RTSP).
+	airplayPostEndCooldown := time.Second
+	if v := os.Getenv("STELLAR_AIRPLAY_POST_END_COOLDOWN_MS"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n >= 0 {
+			airplayPostEndCooldown = time.Duration(n) * time.Millisecond
+		}
+	}
+	airplaySession := airplay.NewSession(airplay.SessionConfig{
+		HeartbeatTimeout: airplayTimeout,
+		PostEndCooldown:  airplayPostEndCooldown,
+	})
 	mux.Handle("/internal/airplay/state", socketServer.AirplayIngestHandler(airplayKey, airplaySession))
 	mux.Handle("/internal/airplay/heartbeat", socketServer.AirplayHeartbeatHandler(airplayKey, airplaySession))
 	if airplayKey != "" {
 		log.Info().
 			Str("route", "/internal/airplay/{state,heartbeat}").
 			Dur("session_timeout", airplayTimeout).
+			Dur("post_end_cooldown", airplayPostEndCooldown).
 			Msg("AirPlay ingest enabled")
 
 		// Wire the airplay:command socket handler. DACP resolver uses

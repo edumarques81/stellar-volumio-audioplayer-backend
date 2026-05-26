@@ -86,6 +86,14 @@ type SessionConfig struct {
 	// default; tests inject shorter values.
 	HeartbeatTimeout time.Duration
 
+	// PostEndCooldown is the window after an explicit End() during which
+	// late-arriving non-SessionBegan Updates are dropped (instead of
+	// resurrecting the session with a fresh ID). Closes the race between
+	// the shairport post-hook's {ended:true} curl and the daemon's
+	// straggler ingest POSTs, which arrive at the Mac out of order.
+	// A zero value disables the cooldown (legacy behaviour).
+	PostEndCooldown time.Duration
+
 	// now is a clock override used by tests. nil → time.Now.
 	now func() time.Time
 }
@@ -97,6 +105,7 @@ type Session struct {
 	cfg     SessionConfig
 	snap    Snapshot
 	lastHB  time.Time
+	endedAt time.Time
 	nowFn   func() time.Time
 }
 
@@ -127,12 +136,28 @@ func (s *Session) Update(f Frame) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	s.lastHB = s.nowFn()
-
 	if f.SessionEnded {
+		s.lastHB = s.nowFn()
 		s.endLocked()
 		return
 	}
+
+	// Post-End cooldown: after an explicit End(), drop late-arriving
+	// non-SessionBegan frames for a short window. Without this, the
+	// shairport post-hook's {ended:true} curl races the daemon's
+	// already-in-flight ingest POSTs at the Mac, and any straggler that
+	// arrives after End() resurrects the session with a fresh ID —
+	// which the daemon's unconditional 2s heartbeats then keep alive
+	// forever (orphan session). SessionBegan is the daemon's pbeg
+	// signal; if a real new sender connects inside the cooldown window,
+	// pbeg is allowed through and mints a fresh session.
+	if !s.snap.IsActive && !f.SessionBegan && s.cfg.PostEndCooldown > 0 {
+		if !s.endedAt.IsZero() && s.nowFn().Sub(s.endedAt) < s.cfg.PostEndCooldown {
+			return
+		}
+	}
+
+	s.lastHB = s.nowFn()
 
 	// Mint a new SessionID only when there's no active session. A
 	// `pbeg` (sessionBegan) arrives at EVERY shairport stream start —
@@ -276,6 +301,7 @@ func (s *Session) TickExpire() (bool, string) {
 
 func (s *Session) endLocked() {
 	s.snap = Snapshot{}
+	s.endedAt = s.nowFn()
 }
 
 // newSessionID returns a short, opaque 16-hex-char identifier. We use

@@ -204,6 +204,124 @@ func TestSessionHeartbeatBumpedByUpdate(t *testing.T) {
 	}
 }
 
+// TestSessionEndCooldownDropsLateFrames pins the orphan-session bug fix:
+// after End() (typically called by the shairport post-hook curl), any
+// straggler ingest POSTs from the daemon — which are racing the post-hook
+// at the Mac's HTTP server — must NOT resurrect the just-ended session.
+// Without this, a metadata frame arriving 50ms after the {ended:true}
+// POST would mint a fresh SessionID with isActive=true, and the daemon's
+// unconditional 2s heartbeats would then refresh lastHB forever, leaving
+// an undying orphan that pins the iOS / LCD UI on AirPlay.
+func TestSessionEndCooldownDropsLateFrames(t *testing.T) {
+	base := time.Now()
+	clock := nowFn(base)
+	s := NewSession(SessionConfig{
+		HeartbeatTimeout: time.Second,
+		PostEndCooldown:  500 * time.Millisecond,
+		now:              clock,
+	})
+	s.nowFn = clock
+
+	// Active session with a pbeg.
+	s.Update(Frame{SessionBegan: true, Title: "A"})
+	if !s.Snapshot().IsActive {
+		t.Fatalf("session should be active after pbeg")
+	}
+
+	// Post-hook curl arrives: explicit End().
+	endedID, ok := s.End()
+	if !ok || endedID == "" {
+		t.Fatalf("End() should report the just-ended session")
+	}
+
+	// 50ms later, a straggler metadata frame (no SessionBegan) arrives —
+	// e.g. the cover-art PICT that was in flight when post-hook fired.
+	s.nowFn = nowFn(base.Add(50 * time.Millisecond))
+	s.Update(Frame{CoverDataURL: "data:image/jpeg;base64,..."})
+	if s.Snapshot().IsActive {
+		t.Errorf("straggler frame within cooldown must NOT resurrect session; snap=%+v", s.Snapshot())
+	}
+}
+
+// TestSessionEndCooldownAllowsSessionBegan ensures the cooldown only
+// drops non-SessionBegan frames. A real pbeg arriving inside the
+// cooldown window (rare but possible if the sender reconnects quickly)
+// must still mint a fresh session.
+func TestSessionEndCooldownAllowsSessionBegan(t *testing.T) {
+	base := time.Now()
+	s := NewSession(SessionConfig{
+		HeartbeatTimeout: time.Second,
+		PostEndCooldown:  500 * time.Millisecond,
+		now:              nowFn(base),
+	})
+	s.nowFn = nowFn(base)
+
+	s.Update(Frame{SessionBegan: true, Title: "First"})
+	first := s.Snapshot().SessionID
+	if _, ok := s.End(); !ok {
+		t.Fatalf("End() should succeed")
+	}
+
+	// 100ms into cooldown, a new sender connects and shairport emits pbeg.
+	s.nowFn = nowFn(base.Add(100 * time.Millisecond))
+	s.Update(Frame{SessionBegan: true, Title: "Second"})
+
+	snap := s.Snapshot()
+	if !snap.IsActive {
+		t.Errorf("pbeg inside cooldown should reactivate; snap=%+v", snap)
+	}
+	if snap.SessionID == "" || snap.SessionID == first {
+		t.Errorf("new pbeg should mint a fresh SessionID; got %q (was %q)", snap.SessionID, first)
+	}
+	if snap.Title != "Second" {
+		t.Errorf("title should update; got %q", snap.Title)
+	}
+}
+
+// TestSessionEndCooldownExpires confirms that after the cooldown window
+// elapses, normal "metadata starts a session" behaviour is restored.
+// We keep this path because a fresh daemon process may legitimately
+// emit acre/daid/snam before the first pbeg (shairport's ordering
+// during RTSP setup), and we shouldn't permanently lose those frames.
+func TestSessionEndCooldownExpires(t *testing.T) {
+	base := time.Now()
+	s := NewSession(SessionConfig{
+		HeartbeatTimeout: time.Second,
+		PostEndCooldown:  500 * time.Millisecond,
+		now:              nowFn(base),
+	})
+	s.nowFn = nowFn(base)
+
+	s.Update(Frame{SessionBegan: true, Title: "X"})
+	if _, ok := s.End(); !ok {
+		t.Fatalf("End() should succeed")
+	}
+
+	// 1 second later — well past cooldown.
+	s.nowFn = nowFn(base.Add(time.Second))
+	s.Update(Frame{Title: "Y", ActiveRemote: "abc"})
+	if !s.Snapshot().IsActive {
+		t.Errorf("metadata after cooldown should mint a fresh session; snap=%+v", s.Snapshot())
+	}
+}
+
+// TestSessionEndCooldownZeroDisablesCooldown ensures the feature is opt-in
+// — leaving PostEndCooldown at zero preserves the old behaviour (any
+// frame resurrects). Tests in other packages that construct sessions
+// without setting PostEndCooldown stay green.
+func TestSessionEndCooldownZeroDisablesCooldown(t *testing.T) {
+	s := NewSession(SessionConfig{HeartbeatTimeout: time.Second})
+	s.Update(Frame{SessionBegan: true, Title: "A"})
+	if _, ok := s.End(); !ok {
+		t.Fatalf("End() should succeed")
+	}
+	// No cooldown configured → straggler frame is allowed through.
+	s.Update(Frame{Title: "B"})
+	if !s.Snapshot().IsActive {
+		t.Errorf("with cooldown=0, metadata after End should still mint (legacy behaviour)")
+	}
+}
+
 func nowFn(t time.Time) func() time.Time {
 	return func() time.Time { return t }
 }
