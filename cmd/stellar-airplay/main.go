@@ -44,6 +44,18 @@ import (
 	"github.com/edumarques81/stellar-volumio-audioplayer-backend/internal/infra/airplay"
 )
 
+// (Heartbeat gating was tried via a pipe-activity timeout but proved
+// unreliable: shairport-sync only writes to the metadata pipe at track
+// boundaries and on volume/pause events, not continuously during
+// steady-state playback. A 10-second silence between metadata frames is
+// common during a normal song, which caused the daemon to stop
+// heartbeating and the Mac session to expire mid-track. True
+// session-end is now signalled by shairport's session-control post-hook
+// script (/usr/local/bin/stellar-airplay-post.sh), which curls
+// /internal/airplay/state with {"ended":true} directly to the Mac. The
+// heartbeat loop here just keeps firing every 2s as long as the daemon
+// process is alive.)
+
 func main() {
 	macURL := flag.String("mac-url", envOr("STELLAR_AIRPLAY_MAC_URL", "http://192.168.86.221:3000/internal/airplay"),
 		"URL prefix of the Mac backend's /internal/airplay endpoints")
@@ -154,6 +166,11 @@ func heartbeatLoop(ctx context.Context, fw *forwarder, interval time.Duration) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
+			// Heartbeat unconditionally while the daemon is alive.
+			// True end-of-session is detected by shairport's
+			// session-control post-hook, which POSTs {ended:true}
+			// directly to the Mac. See cmd/stellar-airplay/main.go
+			// comment above.
 			fw.PostHeartbeat()
 		}
 	}

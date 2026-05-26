@@ -65,7 +65,17 @@ func (b *bundler) Feed(c airplay.Chunk) {
 		b.emit(map[string]interface{}{"sessionBegan": true})
 		return
 	case "ssnc/pend":
-		b.emit(map[string]interface{}{"ended": true})
+		// `pend` is shairport's "play stream end" — fires when a single
+		// stream/track ends, NOT when the AirPlay session truly ends.
+		// Mapping it to {ended:true} kills the Mac-side session on every
+		// track change, which makes the iOS app's AirPlay UI flap.
+		// Treat pend as a pause hint instead — the next `pbeg` (next
+		// track begin) will flip isPlaying back to true via the bundler's
+		// existing pbeg handler. True session-end is detected via the
+		// daemon's heartbeat-gated-on-pipe-activity contract: when the
+		// iPhone fully disconnects, shairport stops emitting, the
+		// heartbeat loop falls silent, and Mac's 5s timeout fires.
+		b.emit(map[string]interface{}{"paused": true})
 		return
 	case "ssnc/paus":
 		b.emit(map[string]interface{}{"paused": true})

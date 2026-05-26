@@ -134,11 +134,25 @@ func (s *Session) Update(f Frame) {
 		return
 	}
 
-	if f.SessionBegan || !s.snap.IsActive {
+	// Mint a new SessionID only when there's no active session. A
+	// `pbeg` (sessionBegan) arrives at EVERY shairport stream start —
+	// which means EVERY track change during a single AirPlay session
+	// hits this path. If we minted a new ID per pbeg, the iOS app's
+	// sessionID-matched `pushAirplayEnded` would race with the next
+	// pbeg's pushAirplayState and the UI would flap. Keep the same
+	// sessionID for the lifetime of the underlying TCP/AirPlay session
+	// (which ends when shairport stops emitting metadata and the
+	// heartbeat-based session timeout fires on the Mac side).
+	if !s.snap.IsActive {
 		s.snap.SessionID = newSessionID()
 		s.snap.IsActive = true
-		// pbeg implies playing. Subsequent Updates may overwrite via
-		// an explicit PlayStatePaused.
+		// First update of a fresh session implies playing. Subsequent
+		// updates may overwrite via an explicit PlayStatePaused.
+		s.snap.IsPlaying = true
+	} else if f.SessionBegan {
+		// New track within the same session: shairport's pbeg implies
+		// playback resumed; flip isPlaying back to true if a previous
+		// pend (paused) had cleared it.
 		s.snap.IsPlaying = true
 	}
 

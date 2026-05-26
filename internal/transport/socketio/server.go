@@ -350,6 +350,12 @@ func (s *Server) setupHandlers() {
 			if s.lastPlayedHandlers != nil {
 				s.lastPlayedHandlers.PushTo(client)
 			}
+			// Hydrate AirPlay state too — if a session is active when the
+			// client connects, the LCD/iOS app should immediately swap to
+			// AirPlay mode rather than waiting for the next shairport
+			// metadata frame (which may be tens of seconds away for steady
+			// playback).
+			s.pushAirplayStateTo(client)
 		}()
 
 		// Handle disconnect

@@ -123,6 +123,44 @@ func TestSessionPbegStartsFreshID(t *testing.T) {
 	}
 }
 
+// TestSessionPbegMidSessionKeepsSameID — shairport emits `pbeg` at every
+// track boundary inside a single AirPlay session. Earlier behaviour
+// minted a new SessionID on every pbeg, which made the iOS app's
+// sessionID-matched `pushAirplayEnded` filter race the next track's
+// pushAirplayState and the UI would flap blank between tracks. After
+// the fix, only the FIRST update of a session mints a SessionID; later
+// pbegs (during the same session) keep the same ID and just flip
+// IsPlaying back to true.
+func TestSessionPbegMidSessionKeepsSameID(t *testing.T) {
+	s := NewSession(SessionConfig{HeartbeatTimeout: time.Second})
+
+	// Initial pbeg → mints session ID.
+	s.Update(Frame{SessionBegan: true, Title: "Track 1"})
+	first := s.Snapshot().SessionID
+	if first == "" {
+		t.Fatal("first pbeg should mint a SessionID")
+	}
+
+	// Mid-session pause then resume — IsPlaying flips.
+	s.Update(Frame{PlayState: PlayStatePaused})
+	if s.Snapshot().IsPlaying {
+		t.Errorf("PlayStatePaused should clear IsPlaying")
+	}
+
+	// Next track's pbeg arrives. Session is still active → keep same ID.
+	s.Update(Frame{SessionBegan: true, Title: "Track 2"})
+	second := s.Snapshot().SessionID
+	if second != first {
+		t.Errorf("pbeg during active session should NOT mint a new SessionID; got %q (was %q)", second, first)
+	}
+	if !s.Snapshot().IsPlaying {
+		t.Errorf("pbeg should flip IsPlaying back to true")
+	}
+	if s.Snapshot().Title != "Track 2" {
+		t.Errorf("title should have updated to Track 2; got %q", s.Snapshot().Title)
+	}
+}
+
 func TestSessionHeartbeatExpiresAfterTimeout(t *testing.T) {
 	s := NewSession(SessionConfig{HeartbeatTimeout: 50 * time.Millisecond, now: nowFn(time.Time{})})
 

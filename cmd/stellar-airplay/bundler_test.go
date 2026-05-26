@@ -49,8 +49,15 @@ func TestBundlerEmitsLifecycleImmediately(t *testing.T) {
 	}
 }
 
-// TestBundlerEmitsEndedOnPend — pend specifically maps to {ended: true}.
-func TestBundlerEmitsEndedOnPend(t *testing.T) {
+// TestBundlerMapsPendToPaused — shairport emits `pend` at EVERY track
+// boundary, not when the AirPlay session ends. Mapping it to
+// {ended: true} (the original behaviour) killed the Mac-side session on
+// every track change and made the iOS app's AirPlay UI flap. True
+// session-end is detected via the daemon's heartbeat-gated-on-pipe-
+// activity contract (see main.go's pipeActivityTimeout) — so `pend`
+// here just hints "paused", and the next `pbeg` will flip isPlaying
+// back to true.
+func TestBundlerMapsPendToPaused(t *testing.T) {
 	var emitted []map[string]interface{}
 	b := newBundler(func(p map[string]interface{}) { emitted = append(emitted, p) })
 
@@ -58,8 +65,11 @@ func TestBundlerEmitsEndedOnPend(t *testing.T) {
 	if len(emitted) != 1 {
 		t.Fatalf("pend should flush")
 	}
-	if v, _ := emitted[0]["ended"].(bool); !v {
-		t.Errorf("pend should emit ended=true: %+v", emitted[0])
+	if _, hasEnded := emitted[0]["ended"]; hasEnded {
+		t.Errorf("pend must NOT emit ended (would kill session per track): %+v", emitted[0])
+	}
+	if v, _ := emitted[0]["paused"].(bool); !v {
+		t.Errorf("pend should emit paused=true: %+v", emitted[0])
 	}
 }
 
