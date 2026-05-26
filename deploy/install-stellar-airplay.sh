@@ -23,10 +23,10 @@ if [ ! -f /proc/cpuinfo ] || ! grep -q "Raspberry Pi" /proc/cpuinfo; then
   [[ ! $REPLY =~ ^[Yy]$ ]] && exit 1
 fi
 
-echo "[1/4] Creating /etc/stellar-airplay/..."
+echo "[1/5] Creating /etc/stellar-airplay/..."
 mkdir -p /etc/stellar-airplay
 
-echo "[2/4] Provisioning env file (if absent)..."
+echo "[2/5] Provisioning env file (if absent)..."
 if [ ! -f /etc/stellar-airplay/env ]; then
   KEY=$(openssl rand -hex 32)
   cat > /etc/stellar-airplay/env <<ENV
@@ -44,12 +44,31 @@ else
   echo "  → Env file already exists at /etc/stellar-airplay/env, leaving as-is."
 fi
 
-echo "[3/4] Installing systemd unit..."
+echo "[3/5] Installing systemd unit..."
 install -m 644 "$(dirname "$0")/stellar-airplay.service" \
   /etc/systemd/system/stellar-airplay.service
 systemctl daemon-reload
 
-echo "[4/4] Done. To enable + start:"
+echo "[4/5] Installing shairport-sync session-control hooks..."
+# These run as the shairport-sync user via the daemon's `sessioncontrol`
+# block in /etc/shairport-sync.conf. The pre-hook pauses MPD before
+# AirPlay claims the DAC; the post-hook POSTs {ended:true} to the Mac
+# backend on TRUE session end (sender disconnect) so the Mac clears the
+# AirPlay session immediately rather than waiting for heartbeat timeout
+# to be wrong about per-track `pend` events.
+install -m 755 "$(dirname "$0")/stellar-airplay-pre.sh" \
+  /usr/local/bin/stellar-airplay-pre.sh
+install -m 755 "$(dirname "$0")/stellar-airplay-post.sh" \
+  /usr/local/bin/stellar-airplay-post.sh
+# Ensure the log file the hooks append to is writable by the shairport
+# user. mode 666 is intentional — multiple short-lived hook script
+# invocations append from a sandboxed daemon user.
+if [ ! -f /var/log/stellar-airplay.log ]; then
+  touch /var/log/stellar-airplay.log
+  chmod 666 /var/log/stellar-airplay.log
+fi
+
+echo "[5/5] Done. To enable + start:"
 echo "  sudo systemctl enable --now stellar-airplay"
 echo ""
 echo "To check status:"
