@@ -179,6 +179,19 @@ func (s *Session) Update(f Frame) {
 		// playback resumed; flip isPlaying back to true if a previous
 		// pend (paused) had cleared it.
 		s.snap.IsPlaying = true
+		// Reset SeekSeconds to 0 at the track boundary. The delta-merge
+		// below treats SeekSeconds==0 as "field absent" (so that
+		// metadata-only frames don't clobber the seek between prgr
+		// updates), which means the daemon's at-track-start seekSeconds:0
+		// emission (where shairport's RTP cur == start) is also ignored.
+		// Without this explicit reset, the snap retains the previous
+		// track's last-known seek for 1-3s until the next mid-track prgr
+		// arrives — long enough for an iOS app freshly opening during
+		// that window to render the previous track's elapsed time as
+		// the current. The iOS 1Hz interpolator then ticks from that
+		// stale base, compounding the error. See session_test.go
+		// TestSessionPbegMidSessionResetsSeek.
+		s.snap.SeekSeconds = 0
 	}
 
 	switch f.PlayState {

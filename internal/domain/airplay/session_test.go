@@ -161,6 +161,58 @@ func TestSessionPbegMidSessionKeepsSameID(t *testing.T) {
 	}
 }
 
+// TestSessionPbegMidSessionResetsSeek — track-change pbeg inside an active
+// session must reset SeekSeconds to 0. Without this, the Mac's snap retains
+// the previous track's last-known seek position because the delta-merge
+// inside Update() treats SeekSeconds==0 as "field absent" and ignores it.
+// The Pi daemon's prgr handler emits seekSeconds:0 at every track start
+// (where shairport's RTP `cur == start`), so without an explicit reset the
+// snap carries stale data until the next mid-track prgr arrives 1-3s later.
+// An iOS app opening during that window renders the previous track's
+// elapsed time as the current; the 1Hz local ticker then advances from
+// the wrong base. See 2026-05-28 Phase H investigation for the live capture.
+func TestSessionPbegMidSessionResetsSeek(t *testing.T) {
+	s := NewSession(SessionConfig{HeartbeatTimeout: time.Second})
+
+	// Track 1 starts and accumulates a mid-song seek position.
+	s.Update(Frame{SessionBegan: true, Title: "Track 1"})
+	s.Update(Frame{SeekSeconds: 90, DurationSeconds: 240})
+	if got := s.Snapshot().SeekSeconds; got != 90 {
+		t.Fatalf("setup: SeekSeconds=%d, want 90", got)
+	}
+
+	// Track 2's pbeg arrives during the active session. SeekSeconds must
+	// reset to 0 even though the pbeg frame carries no seek field.
+	s.Update(Frame{SessionBegan: true, Title: "Track 2"})
+	if got := s.Snapshot().SeekSeconds; got != 0 {
+		t.Errorf("after mid-session pbeg, SeekSeconds = %d, want 0 (stale-seek regression)", got)
+	}
+	// Belt-and-braces: title also updated, so the test isn't passing because
+	// the whole Update path no-op'd.
+	if got := s.Snapshot().Title; got != "Track 2" {
+		t.Errorf("title = %q, want Track 2", got)
+	}
+}
+
+// TestSessionPauseResumePreservesSeek — pause/resume during the same
+// track must NOT reset SeekSeconds. Only pbeg-on-active-session triggers
+// the reset; lifecycle-only frames (paus/prsm) leave the position alone.
+func TestSessionPauseResumePreservesSeek(t *testing.T) {
+	s := NewSession(SessionConfig{HeartbeatTimeout: time.Second})
+	s.Update(Frame{SessionBegan: true, Title: "T1"})
+	s.Update(Frame{SeekSeconds: 75})
+
+	s.Update(Frame{PlayState: PlayStatePaused})
+	if got := s.Snapshot().SeekSeconds; got != 75 {
+		t.Errorf("paus must preserve seek: got %d", got)
+	}
+
+	s.Update(Frame{PlayState: PlayStatePlaying})
+	if got := s.Snapshot().SeekSeconds; got != 75 {
+		t.Errorf("prsm must preserve seek: got %d", got)
+	}
+}
+
 func TestSessionHeartbeatExpiresAfterTimeout(t *testing.T) {
 	s := NewSession(SessionConfig{HeartbeatTimeout: 50 * time.Millisecond, now: nowFn(time.Time{})})
 
