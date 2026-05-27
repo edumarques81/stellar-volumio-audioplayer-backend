@@ -25,7 +25,7 @@ if [ ! -f /etc/stellar-spectrum/env ]; then
   KEY=$(openssl rand -hex 32)
   cat > /etc/stellar-spectrum/env <<ENV
 STELLAR_SPECTRUM_KEY=${KEY}
-STELLAR_MAC_URL=http://192.168.86.221:3000/internal/spectrum
+STELLAR_MAC_URL=http://192.168.86.84:3000/internal/spectrum
 STELLAR_SPECTRUM_FPS=20
 STELLAR_SPECTRUM_NUMBINS=64
 ENV

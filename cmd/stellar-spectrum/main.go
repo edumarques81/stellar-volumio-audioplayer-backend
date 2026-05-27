@@ -6,7 +6,10 @@
 // Configuration:
 //
 //	-mac-url   URL of the Mac backend ingest endpoint. Defaults to
-//	           STELLAR_MAC_URL env, then "http://192.168.86.221:3000/internal/spectrum".
+//	           STELLAR_MAC_URL env, then "http://192.168.86.84:3000/internal/spectrum".
+//	           Same DHCP-fragility caveat as cmd/stellar-airplay/main.go
+//	           — pure-Go binary (CGO_ENABLED=0) can't resolve mDNS.
+//	           Phase G tracks Bonjour-based discovery.
 //	-fifo      Path to MPD's spectrum FIFO. Defaults to /tmp/mpd_spectrum.fifo.
 //	-fps       Target frames per second. Defaults to 20 (CAVA reference).
 //	-numbins   Number of log-grouped output bins. Defaults to 64.
@@ -40,7 +43,7 @@ import (
 )
 
 func main() {
-	macURL := flag.String("mac-url", envOr("STELLAR_MAC_URL", "http://192.168.86.221:3000/internal/spectrum"),
+	macURL := flag.String("mac-url", envOr("STELLAR_MAC_URL", "http://192.168.86.84:3000/internal/spectrum"),
 		"URL of the Mac backend's /internal/spectrum endpoint")
 	fifo := flag.String("fifo", envOr("STELLAR_SPECTRUM_FIFO", "/tmp/mpd_spectrum.fifo"),
 		"Path to MPD spectrum FIFO")

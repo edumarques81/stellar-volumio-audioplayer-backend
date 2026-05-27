@@ -31,7 +31,7 @@ if [ ! -f /etc/stellar-airplay/env ]; then
   KEY=$(openssl rand -hex 32)
   cat > /etc/stellar-airplay/env <<ENV
 STELLAR_AIRPLAY_KEY=${KEY}
-STELLAR_AIRPLAY_MAC_URL=http://192.168.86.221:3000/internal/airplay
+STELLAR_AIRPLAY_MAC_URL=http://192.168.86.84:3000/internal/airplay
 STELLAR_AIRPLAY_METADATA_PIPE=/tmp/shairport-sync-metadata
 ENV
   chmod 600 /etc/stellar-airplay/env

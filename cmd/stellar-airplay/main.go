@@ -8,7 +8,17 @@
 //
 //	-mac-url   URL prefix of the Mac backend ingest endpoint. Defaults to
 //	           STELLAR_AIRPLAY_MAC_URL env, then
-//	           "http://192.168.86.221:3000/internal/airplay".
+//	           "http://192.168.86.84:3000/internal/airplay".
+//
+//	           KNOWN FRAGILITY: this is a pinned LAN IP. When the Mac's
+//	           DHCP lease shifts (it did on 2026-05-27: .221 → .84), the
+//	           daemon silently fails every POST until /etc/stellar-airplay/env
+//	           is updated. An mDNS hostname (`Eduardos-Laptop.local`)
+//	           cannot replace this because the daemon binary is built
+//	           with CGO_ENABLED=0, so Go's pure resolver bypasses NSS
+//	           and doesn't speak mDNS. Phase G follow-up: add Bonjour
+//	           discovery via grandcat/zeroconf (browses `_stellar._tcp`,
+//	           which the Mac already advertises).
 //	-pipe      Path to the shairport metadata pipe. Defaults to
 //	           STELLAR_AIRPLAY_METADATA_PIPE env, then
 //	           "/tmp/shairport-sync-metadata".
@@ -57,7 +67,7 @@ import (
 // process is alive.)
 
 func main() {
-	macURL := flag.String("mac-url", envOr("STELLAR_AIRPLAY_MAC_URL", "http://192.168.86.221:3000/internal/airplay"),
+	macURL := flag.String("mac-url", envOr("STELLAR_AIRPLAY_MAC_URL", "http://192.168.86.84:3000/internal/airplay"),
 		"URL prefix of the Mac backend's /internal/airplay endpoints")
 	pipePath := flag.String("pipe", envOr("STELLAR_AIRPLAY_METADATA_PIPE", "/tmp/shairport-sync-metadata"),
 		"Path to the shairport-sync metadata pipe")
