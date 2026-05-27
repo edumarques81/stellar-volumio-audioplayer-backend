@@ -100,13 +100,23 @@ type SessionConfig struct {
 
 // Session is the concurrent-safe in-memory state of the current (or
 // most-recently-active) AirPlay session.
+//
+// `seekAnchoredAt` plus `snap.SeekSeconds` together encode wall-clock
+// advance. The stored SeekSeconds is the value at the time of the most
+// recent prgr/pbeg/resume anchor; `Snapshot()` returns
+// `SeekSeconds + (now - seekAnchoredAt)` while IsPlaying. Without this,
+// shairport's sparse prgr emission cadence leaves the snap frozen and
+// clients re-rehydrating mid-track see a stale elapsed value (see
+// session_test.go TestSessionSnapshotAdvancesSeekWhilePlaying for the
+// regression captured on 2026-05-28).
 type Session struct {
-	mu      sync.RWMutex
-	cfg     SessionConfig
-	snap    Snapshot
-	lastHB  time.Time
-	endedAt time.Time
-	nowFn   func() time.Time
+	mu             sync.RWMutex
+	cfg            SessionConfig
+	snap           Snapshot
+	lastHB         time.Time
+	endedAt        time.Time
+	seekAnchoredAt time.Time
+	nowFn          func() time.Time
 }
 
 // NewSession returns a Session with HeartbeatTimeout enforced by
@@ -174,6 +184,11 @@ func (s *Session) Update(f Frame) {
 		// First update of a fresh session implies playing. Subsequent
 		// updates may overwrite via an explicit PlayStatePaused.
 		s.snap.IsPlaying = true
+		// Anchor the seek clock at session start so Snapshot()'s
+		// wall-clock advance starts from "now" rather than from a
+		// zero time.Time value (which would yield epoch-Unix-seconds
+		// of elapsed advance on the very first Snapshot read).
+		s.seekAnchoredAt = s.nowFn()
 	} else if f.SessionBegan {
 		// New track within the same session: shairport's pbeg implies
 		// playback resumed; flip isPlaying back to true if a previous
@@ -192,12 +207,36 @@ func (s *Session) Update(f Frame) {
 		// stale base, compounding the error. See session_test.go
 		// TestSessionPbegMidSessionResetsSeek.
 		s.snap.SeekSeconds = 0
+		// Re-anchor — otherwise the next Snapshot would advance from
+		// the previous track's anchor and return (prevTrackDuration + 0)
+		// instead of 0. See TestSessionSnapshotPbegResetsAnchor.
+		s.seekAnchoredAt = s.nowFn()
 	}
 
 	switch f.PlayState {
 	case PlayStatePlaying:
+		// Pause→play transition: snap.SeekSeconds was already locked
+		// to the effective value by the Pause branch below, so we just
+		// re-anchor at now and the elapsed counter resumes from that
+		// locked value. Re-computing effectiveSeekLocked() here would
+		// double-count the pause duration (anchor still points at the
+		// pre-pause moment) and the counter would lurch forward by the
+		// pause length. Same-state (already playing) leaves the anchor
+		// alone — a sequence of metadata-only updates inside a playing
+		// track must not accidentally reset the seek clock.
+		if !s.snap.IsPlaying {
+			s.seekAnchoredAt = s.nowFn()
+		}
 		s.snap.IsPlaying = true
 	case PlayStatePaused:
+		// Lock the current effective elapsed into the stored value so
+		// the freeze is exact — without this, the moment we flip
+		// IsPlaying=false the snap would jump back to the last-anchored
+		// value (whatever prgr last said) and clients would see the
+		// elapsed counter snap backwards on pause.
+		if s.snap.IsPlaying {
+			s.snap.SeekSeconds = s.effectiveSeekLocked()
+		}
 		s.snap.IsPlaying = false
 	case PlayStateUnknown:
 		// preserve prior value
@@ -227,6 +266,10 @@ func (s *Session) Update(f Frame) {
 	}
 	if f.SeekSeconds != 0 {
 		s.snap.SeekSeconds = f.SeekSeconds
+		// Fresh prgr means we have a known-good seek anchor at wall-clock
+		// `now` — every subsequent Snapshot will compute elapsed from
+		// here until the next prgr or a lifecycle event re-anchors.
+		s.seekAnchoredAt = s.nowFn()
 	}
 	if f.DurationSeconds != 0 {
 		s.snap.DurationSeconds = f.DurationSeconds
@@ -249,11 +292,39 @@ func (s *Session) Heartbeat() {
 	s.lastHB = s.nowFn()
 }
 
-// Snapshot returns a copy of the current state safe to marshal.
+// Snapshot returns a copy of the current state safe to marshal. The
+// SeekSeconds field is augmented with the wall-clock elapsed since the
+// last seek anchor while IsPlaying — see the Session doc-comment for
+// the contract and TestSessionSnapshotAdvancesSeekWhilePlaying for the
+// regression that motivated it.
 func (s *Session) Snapshot() Snapshot {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	return s.snap
+	snap := s.snap
+	if snap.IsActive && snap.IsPlaying {
+		snap.SeekSeconds = s.effectiveSeekLocked()
+	}
+	return snap
+}
+
+// effectiveSeekLocked returns the wall-clock-advanced seek position.
+// Caller MUST hold s.mu (read or write). Returns the stored SeekSeconds
+// unchanged when the anchor is zero or in the future (clock skew),
+// clamped to DurationSeconds when known to avoid 4:00/3:43 overflow on
+// long-paused sessions.
+func (s *Session) effectiveSeekLocked() int {
+	if s.seekAnchoredAt.IsZero() {
+		return s.snap.SeekSeconds
+	}
+	delta := s.nowFn().Sub(s.seekAnchoredAt)
+	if delta < 0 {
+		return s.snap.SeekSeconds
+	}
+	val := s.snap.SeekSeconds + int(delta.Seconds())
+	if s.snap.DurationSeconds > 0 && val > s.snap.DurationSeconds {
+		return s.snap.DurationSeconds
+	}
+	return val
 }
 
 // CanControl reports whether the session has enough information

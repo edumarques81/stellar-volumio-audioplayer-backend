@@ -213,6 +213,100 @@ func TestSessionPauseResumePreservesSeek(t *testing.T) {
 	}
 }
 
+// TestSessionSnapshotAdvancesSeekWhilePlaying — shairport-sync's `prgr`
+// (progress) chunks are sparse: sometimes only one fires near track start,
+// then nothing for the rest of the track. Without server-side wall-clock
+// advance, the snap's SeekSeconds stays frozen at the last received value,
+// so a client that re-rehydrates mid-track (iOS foreground refresh,
+// LCD page reload) sees the stale value and jumps BACKWARDS. The
+// 2026-05-28 capture caught it cleanly: iOS interpolator at 1:31 →
+// foreground refresh → server snap had SeekSeconds=3 (last prgr) →
+// iOS rendered 0:03. Fix: Snapshot() returns SeekSeconds + (now -
+// lastSeekUpdateAt) while IsPlaying.
+func TestSessionSnapshotAdvancesSeekWhilePlaying(t *testing.T) {
+	base := time.Now()
+	clk := base
+	s := NewSession(SessionConfig{HeartbeatTimeout: time.Minute, now: func() time.Time { return clk }})
+
+	s.Update(Frame{SessionBegan: true, Title: "T1"})
+	s.Update(Frame{SeekSeconds: 10, DurationSeconds: 240})
+	if got := s.Snapshot().SeekSeconds; got != 10 {
+		t.Fatalf("immediate snap = %d, want 10", got)
+	}
+
+	// 5 seconds pass without any further Update. Snapshot must reflect
+	// the wall-clock advance.
+	clk = base.Add(5 * time.Second)
+	if got := s.Snapshot().SeekSeconds; got != 15 {
+		t.Errorf("after 5s, snap.SeekSeconds = %d, want 15 (wall-clock advance)", got)
+	}
+
+	// Another 7 seconds (total 12s since the SeekSeconds=10 update).
+	clk = base.Add(12 * time.Second)
+	if got := s.Snapshot().SeekSeconds; got != 22 {
+		t.Errorf("after 12s, snap.SeekSeconds = %d, want 22", got)
+	}
+}
+
+// TestSessionSnapshotDoesNotAdvanceWhenPaused — wall-clock advance must
+// be gated on IsPlaying. A paused AirPlay session (user paused via Apple
+// Music) must freeze the elapsed counter even though no Update arrives.
+func TestSessionSnapshotDoesNotAdvanceWhenPaused(t *testing.T) {
+	base := time.Now()
+	clk := base
+	s := NewSession(SessionConfig{HeartbeatTimeout: time.Minute, now: func() time.Time { return clk }})
+
+	s.Update(Frame{SessionBegan: true, Title: "T1"})
+	s.Update(Frame{SeekSeconds: 30})
+	s.Update(Frame{PlayState: PlayStatePaused})
+
+	clk = base.Add(10 * time.Second)
+	if got := s.Snapshot().SeekSeconds; got != 30 {
+		t.Errorf("paused snap must NOT advance: got %d, want 30", got)
+	}
+
+	// Resume — anchor advances from the resume moment, not from the
+	// original prgr. Otherwise the elapsed would jump forward by the
+	// duration of the pause.
+	s.Update(Frame{PlayState: PlayStatePlaying})
+	clk = base.Add(15 * time.Second)
+	if got := s.Snapshot().SeekSeconds; got != 35 {
+		t.Errorf("resumed snap must advance from resume moment: got %d, want 35 (30 + 5s post-resume, not 30 + 15s wall-clock)", got)
+	}
+}
+
+// TestSessionSnapshotPbegResetsAnchor — when SeekSeconds resets to 0 on
+// mid-session pbeg, the wall-clock anchor must also reset. Otherwise the
+// reset is paired with an immediate "advance" from the stale anchor and
+// the elapsed counter jumps forward by the duration of the previous track.
+func TestSessionSnapshotPbegResetsAnchor(t *testing.T) {
+	base := time.Now()
+	clk := base
+	s := NewSession(SessionConfig{HeartbeatTimeout: time.Minute, now: func() time.Time { return clk }})
+
+	s.Update(Frame{SessionBegan: true, Title: "T1"})
+	s.Update(Frame{SeekSeconds: 100})
+
+	// 60 seconds pass — snap shows 160.
+	clk = base.Add(60 * time.Second)
+	if got := s.Snapshot().SeekSeconds; got != 160 {
+		t.Fatalf("setup: snap = %d, want 160", got)
+	}
+
+	// Track change. SeekSeconds resets to 0; the anchor must also
+	// reset, otherwise the very next snap returns 60+0=60.
+	s.Update(Frame{SessionBegan: true, Title: "T2"})
+	if got := s.Snapshot().SeekSeconds; got != 0 {
+		t.Errorf("immediately after track-change pbeg, snap = %d, want 0", got)
+	}
+
+	// 3 more seconds — fresh anchor.
+	clk = base.Add(63 * time.Second)
+	if got := s.Snapshot().SeekSeconds; got != 3 {
+		t.Errorf("3s after track change, snap = %d, want 3", got)
+	}
+}
+
 func TestSessionHeartbeatExpiresAfterTimeout(t *testing.T) {
 	s := NewSession(SessionConfig{HeartbeatTimeout: 50 * time.Millisecond, now: nowFn(time.Time{})})
 
