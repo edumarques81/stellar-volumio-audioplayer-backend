@@ -27,6 +27,7 @@ import (
 	"github.com/edumarques81/stellar-volumio-audioplayer-backend/internal/domain/player"
 	"github.com/edumarques81/stellar-volumio-audioplayer-backend/internal/domain/sources"
 	"github.com/edumarques81/stellar-volumio-audioplayer-backend/internal/domain/upnp"
+	"github.com/edumarques81/stellar-volumio-audioplayer-backend/internal/infra/health"
 	"github.com/edumarques81/stellar-volumio-audioplayer-backend/internal/infra/lcd"
 	"github.com/edumarques81/stellar-volumio-audioplayer-backend/internal/infra/llm"
 	"github.com/edumarques81/stellar-volumio-audioplayer-backend/internal/infra/mpd"
@@ -274,6 +275,15 @@ func main() {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
+	// Build the metrics collector and its xrun tailer.
+	// The tailer is always-on: it tails /dev/kmsg for ALSA xrun events and
+	// degrades gracefully (returns -1) if /dev/kmsg is not readable without
+	// CAP_SYSLOG. On Darwin (dev) both are stubs.
+	healthCollector, xrunTailer := health.NewCollector(health.CollectorConfig{
+		DACSoundCardIndex: -1, // auto-detect: skip vc4hdmi cards
+	})
+	xrunTailer.Start(ctx)
+
 	if err := socketServer.StartMPDWatcher(ctx); err != nil {
 		// Watch() no longer returns hard errors for MPD-down at startup, so this
 		// branch is now a last-resort safeguard. Log and continue rather than
@@ -413,16 +423,46 @@ func main() {
 		log.Info().Msg("AirPlay ingest disabled (STELLAR_AIRPLAY_KEY unset)")
 	}
 
-	// Health check
+	// Health check — includes xruns + ALSA state from the health collector.
+	// Returns 503 when MPD is unreachable (existing behaviour preserved).
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
+		mpdStatus := "connected"
+		httpStatus := http.StatusOK
 		if err := mpdClient.Ping(); err != nil {
-			w.WriteHeader(http.StatusServiceUnavailable)
-			w.Write([]byte(`{"status":"error","mpd":"disconnected"}`))
-			return
+			mpdStatus = "disconnected"
+			httpStatus = http.StatusServiceUnavailable
+		}
+		snap := healthCollector.Collect()
+		extra := health.BuildHealthExtra(snap)
+		resp := map[string]interface{}{
+			"status": func() string {
+				if httpStatus == http.StatusOK {
+					return "ok"
+				}
+				return "error"
+			}(),
+			"mpd": mpdStatus,
+		}
+		for k, v := range extra {
+			resp[k] = v
 		}
 		w.Header().Set("Content-Type", "application/json")
-		w.Write([]byte(`{"status":"ok","mpd":"connected"}`))
+		w.WriteHeader(httpStatus)
+		if err := json.NewEncoder(w).Encode(resp); err != nil {
+			log.Warn().Err(err).Msg("/health: encode error")
+		}
 	})
+
+	// Metrics endpoint — full Snapshot as JSON, gated by STELLAR_METRICS=1.
+	// Do not register the route at all when the env var is absent, so the
+	// endpoint is invisible to scanners on production deployments that have
+	// not opted in.
+	if strings.TrimSpace(os.Getenv("STELLAR_METRICS")) == "1" {
+		mux.Handle("/metrics", health.NewMetricsHandler(healthCollector))
+		log.Info().Str("route", "/metrics").Msg("Metrics endpoint enabled (STELLAR_METRICS=1)")
+	} else {
+		log.Info().Msg("Metrics endpoint disabled (set STELLAR_METRICS=1 to enable)")
+	}
 
 	// Version endpoint
 	mux.HandleFunc("/api/v1/version", func(w http.ResponseWriter, r *http.Request) {
