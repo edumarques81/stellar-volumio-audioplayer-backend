@@ -1,129 +1,71 @@
 #!/bin/bash
-# Run all 9 pre-cutover gates (G1-G9) and 3 done-gates. Prints PASS/FAIL
-# per gate and exits non-zero if any gate fails.
+# Post-migration verification for the Pi-hosted topology (Pi migration
+# 2026-07-03). Run ON THE PI — all checks are localhost. Prints PASS/FAIL per
+# gate and exits non-zero if any fails.
 #
-# Pre-cutover usage (after PHASE 2, before flipping config.json):
-#   bash deploy/verify-cutover.sh
-# Done-gate usage (after PHASE 3, post-flip):
-#   bash deploy/verify-cutover.sh --done
+# This REPLACES the old M1.C Mac-cutover script, whose gates were the reverse
+# of what we now want (it asserted stellar-backend *disabled*, expected a Mac
+# LaunchAgent, and probed the retired lcd-control:8081 / mount-control:8082
+# proxies). The migration moved the backend + frontend back onto the Pi, so the
+# gates below assert the Pi-native state.
+#
+# Usage (on the Pi):
+#   bash ~/stellar-backend/deploy/verify-cutover.sh
 set -uo pipefail
 
-PI_HOST="${PI_HOST:-eduardo@192.168.86.25}"
-PI_IP="${PI_IP:-192.168.86.25}"
-NAS_IP="${NAS_IP:-192.168.86.26}"
+BASE="${BASE:-http://localhost:3000}"
 FAILED=0
 
 check() {
   local name="$1" status="$2"
-  if [ "$status" = "PASS" ]; then
-    echo "  ✓ $name"
-  else
-    echo "  ✗ $name"
-    FAILED=$((FAILED + 1))
-  fi
+  if [ "$status" = "PASS" ]; then echo "  ✓ $name"; else echo "  ✗ $name"; FAILED=$((FAILED + 1)); fi
 }
+is_active()  { [ "$(systemctl is-active  "$1" 2>/dev/null)" = "active" ]; }
+is_enabled() { [ "$(systemctl is-enabled "$1" 2>/dev/null)" = "enabled" ]; }
 
-echo "=== Mac-side pre-cutover gates ==="
+echo "=== Backend service (Pi-hosted) ==="
+if is_active stellar-backend.service; then check "S1 stellar-backend active" PASS; else check "S1 stellar-backend active" FAIL; fi
+if is_enabled stellar-backend.service; then check "S2 stellar-backend enabled (boots on power-on)" PASS; else check "S2 stellar-backend enabled" FAIL; fi
+NOTIFY=$(systemctl show stellar-backend.service -p Type --value 2>/dev/null)
+if [ "$NOTIFY" = "notify" ]; then check "S3 Type=notify (sd_notify readiness)" PASS; else check "S3 Type=notify (got '$NOTIFY')" FAIL; fi
+WD=$(systemctl show stellar-backend.service -p WatchdogUSec --value 2>/dev/null)
+if [ -n "$WD" ] && [ "$WD" != "0" ] && [ "$WD" != "infinity" ]; then check "S4 WatchdogSec set ($WD)" PASS; else check "S4 WatchdogSec set" FAIL; fi
 
-# G1: binary cross-compiled clean
-if strings ~/stellar-backend/stellar 2>/dev/null | grep -qE '/(proc|sys|mnt)/'; then check "G1a strings clean" FAIL; else check "G1a strings clean" PASS; fi
-if nm ~/stellar-backend/stellar 2>/dev/null | grep -qE 'wlr_randr|nmcli|mount\.cifs'; then check "G1b nm clean" FAIL; else check "G1b nm clean" PASS; fi
+echo "=== HTTP surface (same-origin on :3000) ==="
+if [ "$(curl -fsS -o /dev/null -w '%{http_code}' -m 5 "$BASE/health" 2>/dev/null)" = "200" ]; then check "H1 /health 200" PASS; else check "H1 /health 200" FAIL; fi
+if [ "$(curl -fsS -o /dev/null -w '%{http_code}' -m 5 "$BASE/ready" 2>/dev/null)" = "200" ]; then check "H2 /ready 200 (MPD+cache ready)" PASS; else check "H2 /ready 200" FAIL; fi
+if curl -fsS -m 5 "$BASE/" 2>/dev/null | grep -qi '<div id="app"'; then check "H3 frontend served same-origin (index.html)" PASS; else check "H3 frontend served same-origin" FAIL; fi
 
-# G2: LaunchAgent loaded
-if launchctl print "gui/$(id -u)/com.stellar.backend" 2>/dev/null | grep -q 'state = running'; then check "G2 LaunchAgent running" PASS; else check "G2 LaunchAgent running" FAIL; fi
+echo "=== MPD localhost + bit-perfect (DO-NOT-TOUCH) ==="
+MPD_HOST_FLAG=$(systemctl show stellar-backend.service -p ExecStart --value 2>/dev/null | grep -o '\-mpd-host [^ ]*' | awk '{print $2}')
+if [ "$MPD_HOST_FLAG" = "127.0.0.1" ] || [ "$MPD_HOST_FLAG" = "localhost" ]; then check "M1 backend -mpd-host localhost" PASS; else check "M1 backend -mpd-host localhost (got '$MPD_HOST_FLAG')" FAIL; fi
+if grep -qE '^\s*mixer_type\s+"none"' /etc/mpd.conf 2>/dev/null; then check "M2 mpd mixer_type none (bit-perfect)" PASS; else check "M2 mpd mixer_type none" FAIL; fi
+# NB: with mixer_type "none" MPD omits/negates the volume line, so key off a
+# field that is always present in `status`.
+if printf 'status\n' | nc -q1 localhost 6600 2>/dev/null | grep -qE '^(repeat|state|playlist):'; then check "M3 MPD reachable on localhost:6600" PASS; else check "M3 MPD reachable" FAIL; fi
+PORT_FLAG=$(systemctl show stellar-backend.service -p ExecStart --value 2>/dev/null | grep -o '\-port [0-9]*' | awk '{print $2}')
+if [ "$PORT_FLAG" = "3000" ]; then check "M4 backend -port 3000 (not default 3001)" PASS; else check "M4 backend -port 3000 (got '$PORT_FLAG')" FAIL; fi
 
-# G3: env file perms tight
-if [ "$(stat -f '%Lp' ~/.config/stellar-backend/env 2>/dev/null)" = "600" ]; then check "G3 env perms 0600" PASS; else check "G3 env perms 0600" FAIL; fi
+echo "=== Daemons repointed to localhost ==="
+# The daemon env files are root-readable only; use sudo -n (passwordless on the
+# appliance). If sudo is unavailable the check reports FAIL with a hint.
+if sudo -n grep -q 'localhost:3000/internal/airplay' /etc/stellar-airplay/env 2>/dev/null; then check "D1 airplay daemon -> localhost" PASS; else check "D1 airplay daemon -> localhost (needs sudo to read env)" FAIL; fi
+if sudo -n grep -q 'localhost:3000/internal/spectrum' /etc/stellar-spectrum/env 2>/dev/null; then check "D2 spectrum daemon -> localhost" PASS; else check "D2 spectrum daemon -> localhost (needs sudo to read env)" FAIL; fi
+if is_active stellar-airplay.service; then check "D3 stellar-airplay active" PASS; else check "D3 stellar-airplay active" FAIL; fi
 
-# G4: backend responding
-if curl -fsS --max-time 2 http://localhost:3000/api/v1/getState 2>/dev/null | grep -q status; then check "G4 backend /getState OK" PASS; else check "G4 backend /getState OK" FAIL; fi
+echo "=== Retired proxies (in-process on Linux) ==="
+if ! is_active lcd-control.service; then check "R1 lcd-control retired (in-process LCD)" PASS; else check "R1 lcd-control retired" FAIL; fi
+if ! is_active stellar-mount-control.service; then check "R2 mount-control retired (in-process mount)" PASS; else check "R2 mount-control retired" FAIL; fi
 
-# G5: MPD reachable
-if nc -z -w 2 "$PI_IP" 6600 2>/dev/null; then check "G5 MPD on Pi reachable" PASS; else check "G5 MPD on Pi reachable" FAIL; fi
-
-# G6: spectrum ingest requires bearer
-SPEC_CODE=$(curl -sS -o /dev/null -w '%{http_code}' --max-time 2 -X POST http://localhost:3000/internal/spectrum 2>/dev/null)
-if [ "$SPEC_CODE" = "401" ]; then check "G6 /internal/spectrum requires bearer" PASS; else check "G6 /internal/spectrum requires bearer (got $SPEC_CODE)" FAIL; fi
-
-echo ""
-echo "=== Pi-side pre-cutover gates ==="
-
-# G7: lcd-control + mount-control active
-G7_OUT=$(ssh "$PI_HOST" 'systemctl is-active lcd-control stellar-mount-control 2>/dev/null' 2>/dev/null)
-G7_SSH_OK=$?
-if [ $G7_SSH_OK -ne 0 ] || [ -z "$G7_OUT" ]; then
-  check "G7 lcd-control + mount-control active" FAIL
-else
-  ACTIVE_NONACTIVE=$(echo "$G7_OUT" | grep -cv '^active$')
-  if [ "$ACTIVE_NONACTIVE" = "0" ]; then check "G7 lcd-control + mount-control active" PASS; else check "G7 lcd-control + mount-control active" FAIL; fi
-fi
-
-# G8: LCD control responds with token, refuses without
-LCD_TOK=$(ssh "$PI_HOST" 'sudo cat /etc/lcd-control/token' 2>/dev/null || echo "")
-if [ -n "$LCD_TOK" ] && curl -fsS --max-time 2 "http://$PI_IP:8081/api/screen/status" -H "X-Auth-Token: $LCD_TOK" 2>/dev/null | grep -q status; then check "G8a LCD with token OK" PASS; else check "G8a LCD with token OK" FAIL; fi
-LCD_NOAUTH=$(curl -sS -o /dev/null -w '%{http_code}' --max-time 2 "http://$PI_IP:8081/api/screen/status" 2>/dev/null)
-if [ "$LCD_NOAUTH" = "401" ]; then check "G8b LCD without token refused (401)" PASS; else check "G8b LCD without token refused (got $LCD_NOAUTH)" FAIL; fi
-
-# G9: Mount control responds with token, refuses without
-MNT_TOK=$(ssh "$PI_HOST" 'sudo cat /etc/stellar-mount-control/token' 2>/dev/null || echo "")
-if [ -n "$MNT_TOK" ] && curl -fsS --max-time 5 "http://$PI_IP:8082/api/mount/shares?host=$NAS_IP" -H "X-Auth-Token: $MNT_TOK" >/dev/null 2>&1; then check "G9a Mount with token OK" PASS; else check "G9a Mount with token OK" FAIL; fi
-MNT_NOAUTH=$(curl -sS -o /dev/null -w '%{http_code}' --max-time 2 "http://$PI_IP:8082/api/mount/shares?host=$NAS_IP" 2>/dev/null)
-if [ "$MNT_NOAUTH" = "401" ]; then check "G9b Mount without token refused (401)" PASS; else check "G9b Mount without token refused (got $MNT_NOAUTH)" FAIL; fi
-
-# G10 (M1.E): six read-handler endpoints on mount-control respond + decode correctly.
-# Uses the smoke script in Volumio2-UI/ (cross-repo absolute path; the script is
-# self-contained and accepts PI_HOST, PI_PORT, TOKEN env vars).
-# Note: the smoke script also runs the 3 M1.E.1 POST probes (G11 below covers them
-# inline for an explicit, self-contained gate).
-SMOKE_SCRIPT="$HOME/workspace/stellar-streamer/Volumio2-UI/scripts/smoke-mount-control-info.sh"
-if [ -n "$MNT_TOK" ] && [ -x "$SMOKE_SCRIPT" ] && PI_HOST="$PI_IP" PI_PORT=8082 TOKEN="$MNT_TOK" "$SMOKE_SCRIPT" >/dev/null 2>&1; then
-  check "G10 mount-control info endpoints (M1.E) all OK" PASS
-else
-  check "G10 mount-control info endpoints (M1.E) all OK" FAIL
-fi
-
-# G11 (M1.E.1): write endpoint POST smoke (idempotent — MPD not restarted).
-# Sends current value back to each POST endpoint; the handler detects "no change"
-# and returns 200+success=true without touching MPD. Reuses MNT_TOK from G9.
-if [ -n "$MNT_TOK" ]; then
-  G11_FAIL=0
-  for ENDPOINT_BODY in \
-    "/api/audio/dsd|$(curl -fsS -m 5 -H "X-Auth-Token: $MNT_TOK" "http://$PI_IP:8082/api/audio/dsd" 2>/dev/null | python3 -c "import sys,json; d=json.load(sys.stdin); print(json.dumps({'mode':d['mode']}))" 2>/dev/null || echo '{"mode":"native"}')|success" \
-    "/api/audio/mixer|$(curl -fsS -m 5 -H "X-Auth-Token: $MNT_TOK" "http://$PI_IP:8082/api/audio/mixer" 2>/dev/null | python3 -c "import sys,json; d=json.load(sys.stdin); print(json.dumps({'enabled':d['enabled']}))" 2>/dev/null || echo '{"enabled":false}')|success" \
-    "/api/audio/bitperfect/apply|{}|success"; do
-    ENDPOINT="${ENDPOINT_BODY%%|*}"
-    REST="${ENDPOINT_BODY#*|}"
-    BODY="${REST%%|*}"
-    EXPECT_KEY="${REST##*|}"
-    RESP=$(curl -fsS -m 35 -X POST \
-      -H "Content-Type: application/json" \
-      -H "X-Auth-Token: $MNT_TOK" \
-      -d "$BODY" \
-      "http://$PI_IP:8082$ENDPOINT" 2>/dev/null) || { G11_FAIL=1; break; }
-    echo "$RESP" | python3 -c "import sys,json; d=json.load(sys.stdin); assert '$EXPECT_KEY' in d, f'missing $EXPECT_KEY: {d}'" 2>/dev/null || { G11_FAIL=1; break; }
-  done
-  if [ "$G11_FAIL" -eq 0 ]; then check "G11 mount-control write endpoints (M1.E.1) all OK" PASS; else check "G11 mount-control write endpoints (M1.E.1) all OK" FAIL; fi
-else
-  check "G11 mount-control write endpoints (M1.E.1) all OK" FAIL
-fi
-
-if [ "${1:-}" = "--done" ]; then
-  echo ""
-  echo "=== Done-gates (post-cutover) ==="
-  # systemctl is-enabled returns exit 1 for "disabled" state, which under
-  # set -o pipefail poisons the pipeline. Capture-and-compare instead.
-  D1_OUT=$(ssh "$PI_HOST" 'systemctl is-enabled stellar-backend 2>/dev/null' 2>/dev/null || true)
-  if [ "$D1_OUT" = "disabled" ]; then check "D1 Pi stellar-backend disabled" PASS; else check "D1 Pi stellar-backend disabled (got '$D1_OUT')" FAIL; fi
-  D2_OUT=$(ssh "$PI_HOST" 'systemctl is-enabled stellar-spectrum 2>/dev/null' 2>/dev/null || true)
-  if [ "$D2_OUT" = "enabled" ]; then check "D2 Pi stellar-spectrum enabled" PASS; else check "D2 Pi stellar-spectrum enabled (got '$D2_OUT')" FAIL; fi
-  if launchctl print-disabled "gui/$(id -u)" 2>/dev/null | grep -q '"com.stellar.backend" => disabled = false'; then check "D3 Mac LaunchAgent autostarts" PASS; else check "D3 Mac LaunchAgent autostarts" FAIL; fi
-fi
+echo "=== Kiosk + self-healing ==="
+if grep -q 'http://localhost:3000' /usr/local/bin/stellar-kiosk.sh 2>/dev/null; then check "K1 kiosk URL -> localhost:3000" PASS; else check "K1 kiosk URL -> localhost:3000" FAIL; fi
+if is_active stellar-kiosk-watchdog.timer; then check "K2 kiosk watchdog timer active" PASS; else check "K2 kiosk watchdog timer active" FAIL; fi
 
 echo ""
 if [ "$FAILED" -eq 0 ]; then
-  echo "ALL GATES PASS"
+  echo "=== ALL GATES PASS — Pi-hosted cutover verified ==="
   exit 0
 else
-  echo "$FAILED GATE(S) FAILED"
+  echo "=== $FAILED gate(s) FAILED ==="
   exit 1
 fi
