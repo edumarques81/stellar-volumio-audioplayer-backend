@@ -37,3 +37,7 @@ Thumbs.db
 config.local.yaml
 .env
 .env.local
+
+# Python bytecode from deploy scripts
+__pycache__/
+*.pyc
