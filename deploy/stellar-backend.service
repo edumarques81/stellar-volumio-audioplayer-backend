@@ -1,0 +1,26 @@
+[Unit]
+Description=Stellar Audio Backend
+After=mpd.service network-online.target
+Wants=network-online.target mpd.service
+
+[Service]
+Type=notify
+NotifyAccess=main
+User=eduardo
+WorkingDirectory=/home/eduardo/stellar-backend
+EnvironmentFile=/etc/stellar-backend/env
+Environment=XDG_RUNTIME_DIR=/run/user/1000
+Environment=WAYLAND_DISPLAY=wayland-0
+ExecStart=/home/eduardo/stellar-backend/stellar -port 3000 -mpd-host 127.0.0.1 -static /home/eduardo/stellar-volumio
+Restart=always
+RestartSec=5
+WatchdogSec=30
+AmbientCapabilities=CAP_SYSLOG
+# resource isolation — audio (mpd) wins; cap the backend
+Nice=5
+CPUWeight=50
+MemoryMax=1500M
+MemoryHigh=1200M
+
+[Install]
+WantedBy=multi-user.target

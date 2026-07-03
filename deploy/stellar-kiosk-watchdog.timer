@@ -1,0 +1,14 @@
+# Fires the kiosk watchdog every 30s (after a 45s startup grace so the kiosk and
+# backend have time to come up). Enable with:
+#   systemctl enable --now stellar-kiosk-watchdog.timer
+[Unit]
+Description=Run the Stellar kiosk watchdog periodically
+
+[Timer]
+OnBootSec=45s
+OnUnitActiveSec=30s
+AccuracySec=5s
+Unit=stellar-kiosk-watchdog.service
+
+[Install]
+WantedBy=timers.target

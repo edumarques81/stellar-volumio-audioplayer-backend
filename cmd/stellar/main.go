@@ -33,6 +33,7 @@ import (
 	"github.com/edumarques81/stellar-volumio-audioplayer-backend/internal/infra/mpd"
 	"github.com/edumarques81/stellar-volumio-audioplayer-backend/internal/infra/netinfo"
 	"github.com/edumarques81/stellar-volumio-audioplayer-backend/internal/infra/paths"
+	"github.com/edumarques81/stellar-volumio-audioplayer-backend/internal/infra/sdnotify"
 	"github.com/edumarques81/stellar-volumio-audioplayer-backend/internal/infra/spectrum"
 	"github.com/edumarques81/stellar-volumio-audioplayer-backend/internal/infra/wikipedia"
 	"github.com/edumarques81/stellar-volumio-audioplayer-backend/internal/transport/mdns"
@@ -423,6 +424,18 @@ func main() {
 		log.Info().Msg("AirPlay ingest disabled (STELLAR_AIRPLAY_KEY unset)")
 	}
 
+	// Readiness probe — distinct from /health. Returns 200 only when BOTH
+	// hard gates pass: MPD reachable AND cache loaded (AlbumCount>0 and not
+	// building). AirPlay state is included in the body as informational only.
+	// Kiosk/systemd consumers should poll /ready, not /health.
+	// When the cache DB is disabled (nil), the cache gate is skipped so the
+	// endpoint does not 503 forever on cache-disabled builds.
+	mux.Handle("/ready", makeReadyHandler(
+		func() error { return mpdClient.Ping() },
+		socketServer.CacheDB(),
+		func() bool { return socketServer.AirplayIsActive() },
+	))
+
 	// Health check — includes xruns + ALSA state from the health collector.
 	// Returns 503 when MPD is unreachable (existing behaviour preserved).
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
@@ -631,6 +644,27 @@ func main() {
 	if err != nil {
 		log.Fatal().Err(err).Str("addr", server.Addr).Msg("HTTP listen failed")
 	}
+
+	// Notify systemd that the HTTP listener is up and the process is ready
+	// to serve requests. Called unconditionally so Type=notify units work
+	// even when MPD is down at startup — systemd readiness = "HTTP listener
+	// bound", which is a weaker (process-level) condition than /ready's
+	// app-level gates (MPD reachable + cache loaded). The distinction is
+	// intentional: /ready gates kiosk/consumer traffic; sd_notify READY=1
+	// gates systemd dependency ordering.
+	if err := sdnotify.Ready(); err != nil {
+		log.Warn().Err(err).Msg("sd_notify READY=1 failed (non-fatal; not running under systemd?)")
+	} else {
+		log.Info().Msg("sd_notify READY=1 sent")
+	}
+
+	// Start the systemd watchdog goroutine. WatchdogSec=30 in the unit; we
+	// ping every 10 s (< WatchdogSec/2 per systemd recommendations).
+	// alive() always returns true here — the watchdog's sole purpose is to
+	// catch a hard deadlock in the main goroutine (which would prevent this
+	// goroutine from being scheduled). Application-level health (MPD
+	// reachable, cache loaded) belongs in /ready, not the watchdog.
+	sdnotify.StartWatchdog(ctx, 10*time.Second, func() bool { return true })
 
 	// Service discovery: advertise _stellar._tcp over Bonjour/mDNS so LAN
 	// clients (iOS app, Volumio2-UI dev kiosks) can auto-connect without

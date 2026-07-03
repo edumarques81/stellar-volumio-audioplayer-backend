@@ -289,6 +289,18 @@ func (s *Server) CacheDB() *cache.DB {
 	return s.cacheDB
 }
 
+// AirplayIsActive reports whether an AirPlay session is currently active.
+// Returns false when UseAirplay was not called (AirPlay key unset) or when
+// no session is in progress. Safe to call from any goroutine. This is an
+// INFORMATIONAL accessor — callers must not use the result to gate hard
+// readiness decisions; AirPlay state should be surfaced as metadata only.
+func (s *Server) AirplayIsActive() bool {
+	if s.airplay == nil || s.airplay.session == nil {
+		return false
+	}
+	return s.airplay.session.Snapshot().IsActive
+}
+
 // setupHandlers registers all Socket.io event handlers.
 func (s *Server) setupHandlers() {
 	s.io.On("connection", func(clients ...any) {

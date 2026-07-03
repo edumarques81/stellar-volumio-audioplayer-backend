@@ -1,0 +1,18 @@
+# Stellar kiosk watchdog — reloads a stuck/white-screened Chromium kiosk via CDP.
+# Oneshot fired by stellar-kiosk-watchdog.timer. Runs as the kiosk user so it
+# can reach the localhost-only CDP port (9222) that stellar-kiosk.sh exposes.
+[Unit]
+Description=Stellar kiosk watchdog (CDP heartbeat check + reload)
+After=stellar-backend.service
+
+[Service]
+Type=oneshot
+User=eduardo
+# The kiosk exposes --remote-debugging-port=9222 bound to localhost.
+ExecStart=/usr/bin/python3 /home/eduardo/stellar-backend/deploy/stellar-kiosk-watchdog.py
+# STALE_MS: how long window.__stellarHeartbeat may go unbumped before we treat
+# the renderer as frozen and reload. The frontend bumps it every animation
+# frame, so 60s of silence is unambiguous.
+Environment=STALE_MS=60000
+Environment=CDP_HOST=127.0.0.1
+Environment=CDP_PORT=9222
