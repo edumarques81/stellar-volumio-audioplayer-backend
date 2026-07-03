@@ -128,6 +128,12 @@ func (a *LibraryMPDAdapter) SearchByBase(basePath string) ([]map[string]string, 
 	return result, nil
 }
 
+// CountAlbums returns the total number of unique albums in the MPD database.
+// Delegates directly to the underlying MPD client.
+func (a *LibraryMPDAdapter) CountAlbums() (int, error) {
+	return a.client.CountAlbums()
+}
+
 // ListPlaylists returns all saved playlists.
 func (a *LibraryMPDAdapter) ListPlaylists() ([]string, error) {
 	return a.client.ListPlaylists()

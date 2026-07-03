@@ -333,7 +333,13 @@ func (c *Client) Add(uri string) error {
 // Watch starts watching for MPD subsystem changes.
 // Returns a channel that receives subsystem names when they change.
 //
-// If the underlying MPD connection dies (e.g. broken-pipe), the goroutine
+// If MPD is unreachable at call time, Watch no longer returns an error.
+// Instead it starts the goroutine immediately with a nil initial watcher so
+// the retry/backoff loop runs and picks up MPD once it becomes available.
+// This enables the backend to boot before MPD is ready (e.g. on the Pi when
+// stellar-backend starts before mpd.service has fully initialised).
+//
+// If the underlying MPD connection dies after startup, the goroutine
 // closes the dead *mpd.Watcher and creates a fresh one with exponential
 // backoff (500ms → 1s → 2s → 4s → 8s → 10s, capped). gompd's *Watcher does
 // NOT auto-reconnect on its own, so this loop is the only thing keeping
@@ -341,18 +347,20 @@ func (c *Client) Add(uri string) error {
 func (c *Client) Watch(subsystems ...string) (<-chan string, error) {
 	addr := fmt.Sprintf("%s:%d", c.host, c.port)
 
-	// Create the initial watcher up front so we can return a hard error
-	// to the caller if MPD is unreachable at startup. Subsequent
-	// reconnects happen inside the goroutine.
+	// Attempt to create the initial watcher. On failure (e.g. MPD not yet
+	// running at boot) log a warning and proceed with nil — the goroutine's
+	// retry loop will establish the connection once MPD is ready.
 	watcher, err := mpd.NewWatcher("tcp", addr, c.password, subsystems...)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create watcher: %w", err)
+		log.Warn().Err(err).Str("addr", addr).
+			Msg("MPD watcher initial dial failed; will retry in background")
+		watcher = nil
 	}
 
 	stop := make(chan struct{})
 
 	c.mu.Lock()
-	c.watcher = watcher
+	c.watcher = watcher // may be nil; the goroutine owns closing it
 	c.stopWatch = stop
 	c.mu.Unlock()
 
@@ -545,13 +553,13 @@ type CapabilityFlags struct {
 
 // DatabaseStats represents MPD database statistics.
 type DatabaseStats struct {
-	Artists     int    // Number of unique artists
-	Albums      int    // Number of unique albums
-	Songs       int    // Number of songs
-	Uptime      int    // MPD uptime in seconds
-	DbPlaytime  int    // Total playtime of all songs
-	DbUpdate    int    // Last database update timestamp
-	PlayTime    int    // Total play time
+	Artists    int // Number of unique artists
+	Albums     int // Number of unique albums
+	Songs      int // Number of songs
+	Uptime     int // MPD uptime in seconds
+	DbPlaytime int // Total playtime of all songs
+	DbUpdate   int // Last database update timestamp
+	PlayTime   int // Total play time
 }
 
 // AlbumInfo represents an album with its metadata from MPD database.

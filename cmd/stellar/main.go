@@ -81,18 +81,22 @@ func main() {
 		Bool("password_set", *mpdPassword != "").
 		Msg("Configuration")
 
-	// Create MPD client
+	// Create MPD client. Connection failures at startup are non-fatal: the
+	// watcher and command paths have their own lazy ensureConnected() and
+	// backoff logic, so the HTTP listener can come up regardless of MPD state.
+	// This handles the Pi boot race where stellar-backend starts before mpd.service.
 	mpdClient := mpd.NewClient(*mpdHost, *mpdPort, *mpdPassword)
 	if err := mpdClient.Connect(); err != nil {
-		log.Fatal().Err(err).Msg("Failed to connect to MPD")
+		log.Error().Err(err).Msg("MPD connect failed at startup; will retry on demand via ensureConnected()")
+	} else {
+		// Only ping when connect succeeded; failure is still non-fatal.
+		if err := mpdClient.Ping(); err != nil {
+			log.Warn().Err(err).Msg("MPD ping failed; continuing — ensureConnected() will reconnect")
+		} else {
+			log.Info().Msg("MPD connection verified")
+		}
 	}
 	defer mpdClient.Close()
-
-	// Verify MPD connection
-	if err := mpdClient.Ping(); err != nil {
-		log.Fatal().Err(err).Msg("MPD ping failed")
-	}
-	log.Info().Msg("MPD connection verified")
 
 	// Create services
 	playerService := player.NewService(mpdClient)
@@ -271,7 +275,10 @@ func main() {
 	defer cancel()
 
 	if err := socketServer.StartMPDWatcher(ctx); err != nil {
-		log.Fatal().Err(err).Msg("Failed to start MPD watcher")
+		// Watch() no longer returns hard errors for MPD-down at startup, so this
+		// branch is now a last-resort safeguard. Log and continue rather than
+		// crashing — the HTTP listener must come up for /health and /ready.
+		log.Error().Err(err).Msg("Failed to start MPD watcher; continuing without watcher")
 	}
 
 	// Start network watcher for Socket.IO push notifications.

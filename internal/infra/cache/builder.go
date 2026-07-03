@@ -24,6 +24,10 @@ type MPDDataProvider interface {
 	ListPlaylists() ([]string, error)
 	// ListPlaylistInfo returns playlist contents
 	ListPlaylistInfo(name string) ([]TrackData, error)
+	// CountAlbums returns the total number of unique albums known to MPD.
+	// Used as a pre-count guard in FullBuild to avoid wiping the cache when
+	// MPD has not yet scanned its music directory (e.g. boot-before-MPD-ready).
+	CountAlbums() (int, error)
 }
 
 // AlbumDetailsData represents album data from MPD.
@@ -124,9 +128,24 @@ func (b *Builder) SetBasePaths(paths []string) {
 }
 
 // FullBuild performs a complete cache rebuild from MPD.
+// Before clearing the existing cache it probes MPD with CountAlbums. If MPD
+// returns 0 albums — or returns an error (e.g. MPD not yet ready after reboot)
+// — the rebuild is skipped entirely and the existing cache is preserved. This
+// prevents the boot-before-MPD-ready race from wiping a valid library cache.
 func (b *Builder) FullBuild() error {
 	startTime := time.Now()
 	log.Info().Msg("Starting full cache build from MPD")
+
+	// Pre-count guard: probe MPD before touching the cache.
+	count, err := b.provider.CountAlbums()
+	if err != nil {
+		log.Warn().Err(err).Msg("MPD CountAlbums failed; skipping rebuild to preserve existing cache")
+		return nil
+	}
+	if count == 0 {
+		log.Warn().Msg("MPD reports 0 albums; skipping rebuild to preserve existing cache")
+		return nil
+	}
 
 	b.db.SetBuildingState(true, 0)
 	defer b.db.SetBuildingState(false, 100)
@@ -346,68 +365,6 @@ func (b *Builder) buildArtists() error {
 	return nil
 }
 
-// buildRadioStations builds the radio stations cache from MPD playlists.
-func (b *Builder) buildRadioStations() error {
-	playlists, err := b.provider.ListPlaylists()
-	if err != nil {
-		return fmt.Errorf("failed to list playlists: %w", err)
-	}
-
-	tx, err := b.db.BeginTx()
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback()
-
-	radioCount := 0
-
-	for _, playlist := range playlists {
-		// Only process playlists that look like radio stations
-		if !strings.HasPrefix(playlist, "Radio/") && !strings.HasPrefix(strings.ToLower(playlist), "radio") {
-			continue
-		}
-
-		info, err := b.provider.ListPlaylistInfo(playlist)
-		if err != nil {
-			log.Warn().Err(err).Str("playlist", playlist).Msg("Failed to get playlist info")
-			continue
-		}
-
-		if len(info) == 0 {
-			continue
-		}
-
-		// Use first track as the stream URL
-		uri := info[0].File
-		name := strings.TrimPrefix(playlist, "Radio/")
-		if name == "" {
-			name = playlist
-		}
-
-		stationID := generateRadioID(name, uri)
-
-		station := &CachedRadioStation{
-			ID:   stationID,
-			Name: name,
-			URI:  uri,
-		}
-
-		if err := b.dao.InsertRadioStation(station); err != nil {
-			log.Warn().Err(err).Str("station", name).Msg("Failed to insert radio station")
-			continue
-		}
-
-		radioCount++
-	}
-
-	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("failed to commit radio stations: %w", err)
-	}
-
-	log.Debug().Int("count", radioCount).Msg("Radio stations cached")
-	return nil
-}
-
 // BuildAlbumTracks builds the track cache for a specific album.
 // This is called on-demand when tracks are requested.
 func (b *Builder) BuildAlbumTracks(albumID, album, albumArtist string) error {
@@ -479,9 +436,4 @@ func generateArtistID(name string) string {
 
 func generateTrackID(uri string) string {
 	return fmt.Sprintf("%x", md5.Sum([]byte(uri)))
-}
-
-func generateRadioID(name, uri string) string {
-	data := name + "\x00" + uri
-	return fmt.Sprintf("%x", md5.Sum([]byte(data)))
 }

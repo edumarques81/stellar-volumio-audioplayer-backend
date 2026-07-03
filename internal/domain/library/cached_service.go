@@ -98,9 +98,12 @@ func (s *CachedService) GetAlbums(req GetAlbumsRequest) AlbumsResponse {
 		return s.Service.GetAlbums(req)
 	}
 
-	// Check cache stats - if empty, fall back to MPD
+	// Check cache stats. Fall back to MPD only when the cache is genuinely
+	// empty (AlbumCount==0) AND a build is not currently in progress.
+	// While IsBuilding==true, AlbumCount transiently reads 0 between Clear()
+	// and the first album insert, so we must not hammer MPD during that window.
 	stats, err := s.cacheDB.GetStats()
-	if err != nil || stats.AlbumCount == 0 {
+	if err != nil || (stats.AlbumCount == 0 && !stats.IsBuilding) {
 		log.Debug().Msg("Cache empty, falling back to MPD")
 		return s.Service.GetAlbums(req)
 	}
@@ -192,9 +195,9 @@ func (s *CachedService) GetArtists(req GetArtistsRequest) ArtistsResponse {
 		return s.Service.GetArtists(req)
 	}
 
-	// Check cache stats
+	// Check cache stats. Same IsBuilding guard as GetAlbums.
 	stats, err := s.cacheDB.GetStats()
-	if err != nil || stats.ArtistCount == 0 {
+	if err != nil || (stats.ArtistCount == 0 && !stats.IsBuilding) {
 		log.Debug().Msg("Cache empty, falling back to MPD")
 		return s.Service.GetArtists(req)
 	}
@@ -257,9 +260,9 @@ func (s *CachedService) GetRadioStations(req GetRadioRequest) RadioResponse {
 		return s.Service.GetRadioStations(req)
 	}
 
-	// Check cache stats
+	// Check cache stats. Same IsBuilding guard as GetAlbums/GetArtists.
 	stats, err := s.cacheDB.GetStats()
-	if err != nil || stats.RadioCount == 0 {
+	if err != nil || (stats.RadioCount == 0 && !stats.IsBuilding) {
 		log.Debug().Msg("Radio cache empty, falling back to MPD")
 		return s.Service.GetRadioStations(req)
 	}
@@ -410,4 +413,8 @@ func (a *mpdDataProviderAdapter) ListPlaylistInfo(name string) ([]cache.TrackDat
 		})
 	}
 	return result, nil
+}
+
+func (a *mpdDataProviderAdapter) CountAlbums() (int, error) {
+	return a.mpd.CountAlbums()
 }

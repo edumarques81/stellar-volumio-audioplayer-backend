@@ -34,6 +34,9 @@ type MPDClient interface {
 	ListAlbums() ([]AlbumInfo, error)
 	ListAlbumsInBase(basePath string) ([]AlbumInfo, error)
 	GetAlbumDetails(basePath string) ([]AlbumDetails, error)
+	// CountAlbums returns the total number of unique albums in MPD.
+	// Used as a pre-count guard in cache builder to detect an empty/unready MPD.
+	CountAlbums() (int, error)
 
 	// Artist queries
 	ListArtists() ([]string, error)

@@ -158,11 +158,27 @@ func TestClientDetectCapabilitiesWithoutConnect(t *testing.T) {
 }
 
 func TestClientWatchDatabaseWithoutConnect(t *testing.T) {
+	// Watch() no longer returns an error when MPD is unreachable at call time;
+	// instead it enters the retry backoff loop. WatchDatabase delegates to Watch,
+	// so it too must succeed and return a valid channel.
 	client := mpd.NewClient("localhost", 6600, "")
 
-	_, err := client.WatchDatabase()
-	if err == nil {
-		t.Error("WatchDatabase should fail when not connected")
+	ch, err := client.WatchDatabase()
+	if err != nil {
+		t.Errorf("WatchDatabase returned error when MPD is down: %v — want nil (should retry internally)", err)
+	}
+	if ch == nil {
+		t.Error("WatchDatabase returned nil channel; want a valid channel for later event delivery")
+	}
+	// Close immediately so the goroutine exits and the channel drains.
+	if cerr := client.Close(); cerr != nil {
+		t.Errorf("Close returned error: %v", cerr)
+	}
+	// Wait for the channel to close (goroutine has exited).
+	select {
+	case <-ch:
+	case <-time.After(2 * time.Second):
+		t.Error("channel did not close after Client.Close")
 	}
 }
 
@@ -592,5 +608,126 @@ func TestWatchCloseDuringReconnectBackoff(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Error("watch channel did not close after Client.Close")
+	}
+}
+
+// TestWatch_NonFatalOnInitialDialFailure verifies that Watch() does NOT return
+// an error when MPD is unreachable at startup. Instead it should return a
+// valid channel and enter its retry backoff loop, so the caller (StartMPDWatcher
+// / main.go) can continue booting regardless of whether MPD is up.
+//
+// This is the boot-before-MPD-ready scenario on the Pi where stellar-backend
+// starts before the mpd.service has fully initialised.
+func TestWatch_NonFatalOnInitialDialFailure(t *testing.T) {
+	// Point the client at a port nothing is listening on.
+	client := mpd.NewClient("127.0.0.1", 19876, "")
+	defer client.Close()
+
+	ch, err := client.Watch("player", "mixer")
+	if err != nil {
+		t.Fatalf("Watch returned error on initial dial failure: %v — want nil (should retry internally)", err)
+	}
+	if ch == nil {
+		t.Fatal("Watch returned nil channel; want a valid channel")
+	}
+
+	// The channel should remain open (retrying). We close the client to
+	// trigger the goroutine to exit and the channel to close.
+	if closeErr := client.Close(); closeErr != nil {
+		t.Errorf("Close returned error: %v", closeErr)
+	}
+
+	// Drain and wait for the channel to close.
+	select {
+	case _, ok := <-ch:
+		if ok {
+			for range ch {
+			}
+		}
+	case <-time.After(2 * time.Second):
+		t.Error("watch channel did not close after Client.Close")
+	}
+}
+
+// TestWatch_RetriesAfterInitialFailure verifies that after a failed initial
+// dial, Watch's goroutine reconnects once MPD becomes available and delivers
+// events through the returned channel.
+//
+// Approach: reserve a port by listening, immediately close the listener (so
+// Watch's initial dial fails), then re-open a fake MPD server on the SAME
+// port (OS typically makes a just-released port available again on loopback).
+// The retry backoff will eventually reach the fake server and deliver an event.
+func TestWatch_RetriesAfterInitialFailure(t *testing.T) {
+	// Reserve a port then immediately close — the initial Watch dial will fail.
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	addr := ln.Addr().(*net.TCPAddr)
+	host := addr.IP.String()
+	port := addr.Port
+	ln.Close()
+
+	client := mpd.NewClient(host, port, "")
+	defer client.Close()
+
+	ch, err := client.Watch("player")
+	if err != nil {
+		t.Fatalf("Watch returned error on initial dial failure: %v", err)
+	}
+
+	// Bring up a fake MPD server on the same address.  The retry goroutine
+	// will find it on its next backoff cycle (~500ms after startup).
+	serverLn, listenErr := net.Listen("tcp", addr.String())
+	if listenErr != nil {
+		// Port unavailable — skip rather than fail (port-reuse is best-effort).
+		t.Skipf("could not re-bind port %d: %v (port-reuse test skipped)", port, listenErr)
+	}
+
+	deliveredEvent := make(chan struct{}, 1)
+	go func() {
+		conn, aerr := serverLn.Accept()
+		if aerr != nil {
+			return
+		}
+		defer conn.Close()
+		// Send greeting.
+		if _, werr := conn.Write([]byte("OK MPD 0.21.0\n")); werr != nil {
+			return
+		}
+		r := bufio.NewReader(conn)
+		for {
+			cmd, rerr := readCommand(t, r)
+			if rerr != nil {
+				return
+			}
+			switch {
+			case strings.HasPrefix(cmd, "idle"):
+				if _, werr := conn.Write([]byte("changed: player\nOK\n")); werr != nil {
+					return
+				}
+				select {
+				case deliveredEvent <- struct{}{}:
+				default:
+				}
+			case strings.HasPrefix(cmd, "noidle"):
+				_, _ = conn.Write([]byte("OK\n"))
+			default:
+				_, _ = conn.Write([]byte("OK\n"))
+			}
+		}
+	}()
+	defer serverLn.Close()
+
+	select {
+	case sub, ok := <-ch:
+		if !ok {
+			t.Fatal("watch channel closed before event arrived")
+		}
+		if sub != "player" {
+			t.Errorf("got subsystem %q, want %q", sub, "player")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("event did not arrive within 5s after delayed MPD startup")
 	}
 }

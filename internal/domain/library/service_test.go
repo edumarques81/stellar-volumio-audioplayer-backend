@@ -8,12 +8,14 @@ import (
 // MockMPDClient implements the MPDClient interface for testing.
 type MockMPDClient struct {
 	// Album queries
-	ListAlbumsResponse      []AlbumInfo
-	ListAlbumsError         error
-	ListAlbumsInBaseResp    map[string][]AlbumInfo
-	ListAlbumsInBaseError   error
-	GetAlbumDetailsResp     map[string][]AlbumDetails
-	GetAlbumDetailsError    error
+	ListAlbumsResponse    []AlbumInfo
+	ListAlbumsError       error
+	ListAlbumsInBaseResp  map[string][]AlbumInfo
+	ListAlbumsInBaseError error
+	GetAlbumDetailsResp   map[string][]AlbumDetails
+	GetAlbumDetailsError  error
+	CountAlbumsResult     int
+	CountAlbumsError      error
 
 	// Artist queries
 	ListArtistsResponse     []string
@@ -22,16 +24,16 @@ type MockMPDClient struct {
 	FindAlbumsByArtistError error
 
 	// Track queries
-	FindAlbumTracksResp     map[string][]map[string]string
-	FindAlbumTracksError    error
-	SearchByBaseResp        map[string][]map[string]string
-	SearchByBaseError       error
+	FindAlbumTracksResp  map[string][]map[string]string
+	FindAlbumTracksError error
+	SearchByBaseResp     map[string][]map[string]string
+	SearchByBaseError    error
 
 	// Playlist/radio queries
-	ListPlaylistsResponse   []string
-	ListPlaylistsError      error
-	ListPlaylistInfoResp    map[string][]map[string]string
-	ListPlaylistInfoError   error
+	ListPlaylistsResponse []string
+	ListPlaylistsError    error
+	ListPlaylistInfoResp  map[string][]map[string]string
+	ListPlaylistInfoError error
 }
 
 func (m *MockMPDClient) ListAlbums() ([]AlbumInfo, error) {
@@ -59,6 +61,10 @@ func (m *MockMPDClient) GetAlbumDetails(basePath string) ([]AlbumDetails, error)
 		return resp, nil
 	}
 	return []AlbumDetails{}, nil
+}
+
+func (m *MockMPDClient) CountAlbums() (int, error) {
+	return m.CountAlbumsResult, m.CountAlbumsError
 }
 
 func (m *MockMPDClient) ListArtists() ([]string, error) {

@@ -2,6 +2,7 @@ package cache_test
 
 import (
 	"crypto/md5"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -14,11 +15,13 @@ import (
 // stubMPDDataProvider is a minimal MPDDataProvider used to drive the cache
 // builder in tests without requiring a live MPD connection.
 type stubMPDDataProvider struct {
-	albumsByBase map[string][]cache.AlbumDetailsData
-	artists      map[string]int
-	tracks       map[string][]cache.TrackData
-	playlists    []string
-	playlistInfo map[string][]cache.TrackData
+	albumsByBase      map[string][]cache.AlbumDetailsData
+	artists           map[string]int
+	tracks            map[string][]cache.TrackData
+	playlists         []string
+	playlistInfo      map[string][]cache.TrackData
+	countAlbumsResult int
+	countAlbumsErr    error
 }
 
 func (s *stubMPDDataProvider) GetAlbumDetails(basePath string) ([]cache.AlbumDetailsData, error) {
@@ -38,6 +41,135 @@ func (s *stubMPDDataProvider) ListPlaylists() ([]string, error) { return s.playl
 func (s *stubMPDDataProvider) ListPlaylistInfo(name string) ([]cache.TrackData, error) {
 	return s.playlistInfo[name], nil
 }
+func (s *stubMPDDataProvider) CountAlbums() (int, error) {
+	return s.countAlbumsResult, s.countAlbumsErr
+}
+
+// TestFullBuild_PreservesCache_WhenMPDEmpty verifies that FullBuild does NOT
+// call Clear and returns nil when CountAlbums returns 0, preserving any
+// albums already in the cache.
+func TestFullBuild_PreservesCache_WhenMPDEmpty(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name   string
+		count  int
+		err    error
+		wantOK bool // true = no error returned, false = error expected
+	}{
+		{
+			name:   "mpd returns zero albums",
+			count:  0,
+			err:    nil,
+			wantOK: true,
+		},
+		{
+			name:   "mpd returns error",
+			count:  0,
+			err:    errors.New("connection refused"),
+			wantOK: true,
+		},
+	}
+
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			tmpDir := t.TempDir()
+			db := cache.NewDB(filepath.Join(tmpDir, "library.db"))
+			if err := db.Open(); err != nil {
+				t.Fatalf("open db: %v", err)
+			}
+			t.Cleanup(func() { _ = db.Close() })
+
+			// Pre-populate the cache with one album so we can verify it is
+			// preserved after the skipped rebuild.
+			dao := cache.NewDAO(db)
+			if err := dao.InsertAlbum(&cache.CachedAlbum{
+				ID:          "preserved-album-id",
+				Title:       "Should Stay",
+				AlbumArtist: "Artist",
+				URI:         "NAS/Artist/Should Stay",
+				Source:      "nas",
+			}); err != nil {
+				t.Fatalf("InsertAlbum: %v", err)
+			}
+
+			provider := &stubMPDDataProvider{
+				countAlbumsResult: tc.count,
+				countAlbumsErr:    tc.err,
+			}
+
+			builder := cache.NewBuilder(db, provider, cache.NewDefaultPathClassifier())
+
+			if err := builder.FullBuild(); err != nil {
+				t.Fatalf("FullBuild returned error: %v (want nil)", err)
+			}
+
+			// The album must still be present — Clear must NOT have been called.
+			albums, total, err := dao.QueryAlbums(cache.AlbumFilter{}, cache.SortAlphabetical, cache.NewPagination(1, 50))
+			if err != nil {
+				t.Fatalf("QueryAlbums: %v", err)
+			}
+			if total == 0 || len(albums) == 0 {
+				t.Fatalf("cache was cleared (total=%d) but should have been preserved", total)
+			}
+			if albums[0].ID != "preserved-album-id" {
+				t.Errorf("unexpected album id %q; cache was not preserved", albums[0].ID)
+			}
+		})
+	}
+}
+
+// TestFullBuild_ProceedsNormally_WhenMPDHasAlbums verifies that FullBuild
+// performs the normal rebuild when CountAlbums returns > 0.
+func TestFullBuild_ProceedsNormally_WhenMPDHasAlbums(t *testing.T) {
+	t.Parallel()
+
+	tmpDir := t.TempDir()
+	db := cache.NewDB(filepath.Join(tmpDir, "library.db"))
+	if err := db.Open(); err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+
+	provider := &stubMPDDataProvider{
+		countAlbumsResult: 2, // MPD has albums → rebuild should proceed
+		albumsByBase: map[string][]cache.AlbumDetailsData{
+			"NAS": {
+				{
+					Album:       "New Album",
+					AlbumArtist: "New Artist",
+					TrackCount:  5,
+					FirstTrack:  "NAS/New Artist/New Album/01.flac",
+					TotalTime:   1200,
+					Format:      "44100:16:2",
+				},
+			},
+		},
+		artists: map[string]int{"New Artist": 1},
+	}
+
+	builder := cache.NewBuilder(db, provider, cache.NewDefaultPathClassifier())
+	builder.SetBasePaths([]string{"NAS"})
+
+	if err := builder.FullBuild(); err != nil {
+		t.Fatalf("FullBuild: %v", err)
+	}
+
+	dao := cache.NewDAO(db)
+	albums, total, err := dao.QueryAlbums(cache.AlbumFilter{}, cache.SortAlphabetical, cache.NewPagination(1, 50))
+	if err != nil {
+		t.Fatalf("QueryAlbums: %v", err)
+	}
+	if total == 0 || len(albums) == 0 {
+		t.Fatal("rebuild did not populate albums")
+	}
+	if albums[0].Title != "New Album" {
+		t.Errorf("got album %q, want %q", albums[0].Title, "New Album")
+	}
+}
 
 // TestBuilder_FullBuild_PersistsGenre verifies that the cache builder
 // forwards MPD's per-album Genre into CachedAlbum.Genre so the column
@@ -53,6 +185,7 @@ func TestBuilder_FullBuild_PersistsGenre(t *testing.T) {
 	t.Cleanup(func() { _ = db.Close() })
 
 	provider := &stubMPDDataProvider{
+		countAlbumsResult: 2, // non-zero so FullBuild proceeds normally
 		albumsByBase: map[string][]cache.AlbumDetailsData{
 			"NAS": {
 				{
@@ -141,7 +274,8 @@ func TestBuilder_FullBuild_RelinksArtistArtwork(t *testing.T) {
 	}
 
 	provider := &stubMPDDataProvider{
-		artists: map[string]int{artistName: 1},
+		countAlbumsResult: 1, // non-zero so FullBuild proceeds normally
+		artists:           map[string]int{artistName: 1},
 		albumsByBase: map[string][]cache.AlbumDetailsData{
 			"NAS": {{
 				Album:       "Whatever",
@@ -225,7 +359,8 @@ func TestBuilder_FullBuild_RelinksAlbumArtwork(t *testing.T) {
 	}
 
 	provider := &stubMPDDataProvider{
-		artists: map[string]int{albumArtist: 1},
+		countAlbumsResult: 1, // non-zero so FullBuild proceeds normally
+		artists:           map[string]int{albumArtist: 1},
 		albumsByBase: map[string][]cache.AlbumDetailsData{
 			"NAS": {{
 				Album:       album,
@@ -263,12 +398,12 @@ func TestBuilder_FullBuild_RelinksAlbumArtwork(t *testing.T) {
 // JPG file is on disk; we just need to write the missing row.
 //
 // The backfill handler:
-//   1. Scans albums with non-empty artwork_id and no matching artwork row.
-//   2. For each, looks for a JPG/PNG/WEBP/GIF in the album artwork dir
-//      keyed by the album_id (matching the new save path convention).
-//   3. Inserts an artwork row using the deterministic
-//      `<album_id>_artwork` id so the next rebuild's relinker can pick
-//      it up. Updates albums.artwork_id to the new id as a side effect.
+//  1. Scans albums with non-empty artwork_id and no matching artwork row.
+//  2. For each, looks for a JPG/PNG/WEBP/GIF in the album artwork dir
+//     keyed by the album_id (matching the new save path convention).
+//  3. Inserts an artwork row using the deterministic
+//     `<album_id>_artwork` id so the next rebuild's relinker can pick
+//     it up. Updates albums.artwork_id to the new id as a side effect.
 //
 // Idempotent: re-running on a clean state must be a no-op.
 func TestBackfillAlbumArtwork_RecoversOrphanIDsFromDisk(t *testing.T) {
