@@ -84,6 +84,13 @@ func (h *AirplayIngestHandler) ServeHTTP(w http.ResponseWriter, r *http.Request)
 		id, ended := h.session.End()
 		if ended && h.emit != nil {
 			h.emit("pushAirplayEnded", map[string]string{"sessionID": id})
+			// Belt-and-suspenders: also emit a terminal state snapshot
+			// (isActive:false now that End() has cleared the session). If a
+			// client misses the sessionID-matched pushAirplayEnded on a flaky
+			// or reconnecting socket, this authoritative snapshot still flips
+			// it out of AirPlay — the frontend mirrors isActive faithfully.
+			// Idempotent for clients that already processed pushAirplayEnded.
+			h.emit("pushAirplayState", h.session.Snapshot())
 		}
 		w.WriteHeader(http.StatusNoContent)
 		return
@@ -193,4 +200,3 @@ func (s *Server) AirplayIngestHandler(key string, session *airplay.Session) *Air
 func (s *Server) AirplayHeartbeatHandler(key string, session *airplay.Session) *AirplayHeartbeatHandler {
 	return NewAirplayHeartbeatHandler(key, session)
 }
-

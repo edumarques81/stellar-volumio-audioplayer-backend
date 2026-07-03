@@ -139,11 +139,24 @@ func TestAirplayIngestEndsSessionOnEnded(t *testing.T) {
 	if rec.Code != http.StatusNoContent {
 		t.Fatalf("expected 204, got %d", rec.Code)
 	}
-	if emitter.count() != 1 {
-		t.Fatalf("expected 1 emit (pushAirplayEnded), got %d", emitter.count())
+	// Two emits: the canonical sessionID-matched pushAirplayEnded, plus a
+	// terminal pushAirplayState{isActive:false} so a client that missed the
+	// ended event still flips out of AirPlay on the next snapshot.
+	if emitter.count() != 2 {
+		t.Fatalf("expected 2 emits (pushAirplayEnded + pushAirplayState), got %d", emitter.count())
 	}
 	if emitter.events[0].event != "pushAirplayEnded" {
-		t.Errorf("event = %q, want pushAirplayEnded", emitter.events[0].event)
+		t.Errorf("event[0] = %q, want pushAirplayEnded", emitter.events[0].event)
+	}
+	if emitter.events[1].event != "pushAirplayState" {
+		t.Errorf("event[1] = %q, want pushAirplayState", emitter.events[1].event)
+	}
+	termSnap, ok := emitter.events[1].data.(airplay.Snapshot)
+	if !ok {
+		t.Fatalf("event[1] data type = %T, want airplay.Snapshot", emitter.events[1].data)
+	}
+	if termSnap.IsActive {
+		t.Errorf("terminal pushAirplayState should carry isActive=false")
 	}
 	if session.Snapshot().IsActive {
 		t.Errorf("session should be inactive after Ended")

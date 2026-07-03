@@ -31,19 +31,20 @@ func (s *Server) UseAirplay(session *airplay.Session, commander DACPCommander, r
 }
 
 // pushAirplayStateTo emits the current AirPlay session snapshot to a
-// freshly-connected client. No-op when UseAirplay wasn't called or no
-// session is currently active. Called by the connection handler so
-// reconnecting clients don't need to wait for the next shairport
-// metadata frame to discover that AirPlay is playing.
+// freshly-connected (or re-connected) client. No-op only when UseAirplay
+// wasn't called. Called by the connection handler so reconnecting clients
+// resync from the source of truth.
+//
+// It emits the snapshot EVEN WHEN INACTIVE. This is the switchback fix: a
+// client that missed a pushAirplayEnded on a flaky socket is stuck showing
+// AirPlay; the authoritative isActive:false snapshot on reconnect flips it
+// back to MPD. The frontend mirrors isActive faithfully, so an inactive
+// snapshot is a safe, idempotent resync for clients that were already clear.
 func (s *Server) pushAirplayStateTo(client *socket.Socket) {
 	if s.airplay == nil || s.airplay.session == nil {
 		return
 	}
-	snap := s.airplay.session.Snapshot()
-	if !snap.IsActive {
-		return
-	}
-	_ = client.Emit("pushAirplayState", snap)
+	_ = client.Emit("pushAirplayState", s.airplay.session.Snapshot())
 }
 
 // registerAirplayClient is called by setupHandlers' connection callback
