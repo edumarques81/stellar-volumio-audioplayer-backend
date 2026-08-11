@@ -70,7 +70,7 @@ Plans:
 
 Plans:
 
-- [ ] 02-01-PLAN.md — TDD: pure Collapse() artist-name rule, proven against the real 124-value corpus (ARTIST-01, ARTIST-02, ARTIST-03)
+- [x] 02-01-PLAN.md — TDD: pure Collapse() artist-name rule, proven against the real 124-value corpus (ARTIST-01, ARTIST-02, ARTIST-03)
 - [ ] 02-02-PLAN.md — Wire Collapse() into the cache builder + the MPD-direct fallback, merging album counts across collapsed variants (ARTIST-01, ARTIST-02, ARTIST-03)
 - [ ] 02-03-PLAN.md — Deterministic artist-artwork rekey (auto-runs on boot) + album-artwork orphan rekey helper, unit-tested, zero live Pi contact (ART-01, ART-02, ART-03)
 - [ ] 02-04-PLAN.md — Deploy collapse + migration together, human-confirmed album-artwork matching, live verification (autonomous: false) (ARTIST-01, ARTIST-02, ARTIST-03, ART-01, ART-02, ART-03)
@@ -100,15 +100,18 @@ Plans:
 change here is a three-repo change — update `docs/SOCKET-CONTRACT.md` and ship all three together.
 
 ### Phase 4: Tail Cleanup — DSD Test File Conversion
+
 **Goal**: The last untagged file in the library becomes visible, taking `skippedCount` from 1 to 0 and closing the data-integrity story opened in Phase 1.
 **Mode:** mvp
 **Depends on**: Phase 3 (runs last, after all feature work)
 **Requirements**: DATA-05
 **Success Criteria** (what must be TRUE):
+
   1. `USB/Sigxer SU-6 test/DSD-测试文件 ANNOUNCEMENT FOR BASIC CHECKS (Voice).dff` is replaced by a `.dsf` equivalent that MPD indexes with `Album = "Singxer SU-6 Test"` and `AlbumArtist = "Test Signals"` — verified live via `mpc search`.
   2. The backend's `skippedCount` reads **0** after a cache rebuild (was 16 pre-Phase-1, 1 after Phase 1).
   3. The DSD audio survives the container change bit-perfectly — the decoded stream MD5 of the `.dsf` matches the original `.dff` (`ffmpeg -nostdin -i <f> -map 0:a -f md5 -`). A DSD→PCM conversion is a FAILURE, not an acceptable outcome, on a bit-perfect appliance.
   4. `deploy/verify-data-integrity.sh` still passes all gates, `/mnt/ssd` ends mounted `ro`, and no `._` files are created.
+
 **Plans**: TBD
 
 > **⚠ Feasibility investigated 2026-08-12 — this is NOT a one-liner.** The tooling to do it is not
@@ -145,6 +148,7 @@ change here is a three-repo change — update `docs/SOCKET-CONTRACT.md` and ship
 > "conversion" fails this phase rather than completing it.
 
 Plans:
+
 - [ ] 04-01: TBD
 
 ## Backlog
@@ -152,6 +156,7 @@ Plans:
 Unsequenced items. Not part of the v1.0 milestone phases; promote with `/gsd:review-backlog`.
 
 ### Phase 999.2: Ship files to the Pi — upload, unzip, land on the SSD, index in MPD (BACKLOG)
+
 **Captured:** 2026-08-12 (user: *"I need a way to send files to the pi so it can unzip and add those files to the ssd drive and to mpd"*)
 
 **Status: deliberately un-designed.** The user asked to capture this and explicitly deferred all
@@ -163,16 +168,21 @@ place the contents on the SSD music drive, and get them into MPD's database.
 
 **Already-established facts that any future design must respect** (recorded so they are not
 re-derived, not as design decisions):
+
 - `/mnt/ssd` is mounted **read-only** (`ro,nofail,uid=mpd,gid=audio`). Any write needs a
   `remount,rw` → work → `remount,ro` round-trip, trap-guarded.
+
 - **macOS recreates `._` AppleDouble junk** on this exFAT volume. Phase 1 deleted 934 of them. An
   upload path that routes through a macOS mount reintroduces the problem; copying over the network
   (scp/rsync from Linux side) does not.
+
 - MPD needs an explicit `mpc update` plus a backend cache rebuild before new music appears.
 - Files land under `/mnt/ssd/Music`, exposed to MPD as `USB/` via
   `/var/lib/mpd/music/USB -> /mnt/ssd/Music`.
+
 - New albums require `Album` and `AlbumArtist` tags or they are invisible (Phase 1, DATA-01/02);
   `skippedCount` on `pushLibraryCacheStatus` will report untagged arrivals.
+
 - The music library holds irreplaceable masters — any ingest path needs care around overwrite.
 
 **Open questions for the future discuss phase** (listed, not answered): transport (web upload in the
@@ -181,6 +191,7 @@ name collisions and partial uploads, whether tagging is validated at ingest, and
 belongs in the backend or as a separate small service.
 
 ### Phase 999.1: Miles Ahead — cover art not displaying + booklet in metadata (BACKLOG)
+
 **Captured:** 2026-08-12 (user: *"Miles Ahead album from Miles Davis cover art and booklet … I can't see a cover art for it now"*)
 
 **Album:** `Miles Ahead - Miles Davis + 19`
@@ -189,23 +200,29 @@ belongs in the backend or as a separate small service.
 **Cache row:** `e8280b866030e11f2ae8b81fc6f236da` — **`artwork_id` is NULL**
 
 **⚠ Investigated 2026-08-12 — the naive framing is wrong. The art is NOT missing.**
+
 - The `.dsf` files **already carry embedded cover art**: `ffprobe` shows a second stream,
   `codec_name=mjpeg codec_type=video`, alongside `dsd_lsbf_planar` audio.
+
 - The backend **already serves it successfully**:
   `GET /albumart?path=USB/Miles Ahead - Miles Davis + 19-DSF-11289k-1b/01-Springsville.dsf`
   → **HTTP 200, 440,399 bytes**.
+
 - The **booklet PDF is already on the SSD** too:
   `Miles Davis + 19 - Miles Ahead  Booklet.pdf` (note the double space in the filename). The user also
   uploaded a copy (5,194,438 bytes, 3 pages, 2 embedded images).
 
 So this is **not** "fetch missing artwork". The real question is why a cover the backend returns with
 HTTP 200 does not reach the screen. Investigate in this order:
+
 1. Which URL the LCD/iOS actually requests for this album, and whether it 200s (the album row's
    `first_track` may differ from the file that works, or URL-encoding of `+` / double-space may break).
    Note `+` in a URL query decodes to a space — this album's path contains a literal `+`.
+
 2. Whether the empty `artwork_id` matters on the path the client takes. Per
    `reference_stellar_albumart_bypasses_artwork_table`, `/albumart?path=` bypasses the artwork table
    entirely while `/artistart` requires it — so a NULL `artwork_id` should NOT block the cover.
+
 3. Whether DSD/`.dsf` embedded art is handled differently from FLAC anywhere in the resolution chain.
 
 **Second, separate ask:** surface the booklet PDF in album metadata. No mechanism exists today — the
@@ -216,7 +233,6 @@ album payload + a client affordance to open it) before it is plannable.
 contains ` - `, so Phase 2's collapse rule will render it as `Miles Davis`. Worth confirming that does
 not further disturb this album's artwork linkage.
 
-
 ## Progress
 
 **Execution Order:**
@@ -225,6 +241,6 @@ Phases execute in numeric order: 1 → 2 → 3 → 4
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
 | 1. Data Integrity Foundation | 5/7 | In Progress|  |
-| 2. Artist Identity & Artwork Migration | 0/4 | Not started | - |
+| 2. Artist Identity & Artwork Migration | 1/4 | In Progress|  |
 | 3. Browse Experience — Duplicate Badges & Empty States | 0/TBD | Not started | - |
 | 4. Tail Cleanup — DSD Test File Conversion | 0/TBD | Not started | - |

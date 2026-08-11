@@ -39,7 +39,7 @@ browse surface is honest about what it's showing.
   as `Herbert von Karajan` and every `Luciano Pavarotti, <label>` variant lands under
   `Luciano Pavarotti`.
 
-- [ ] **ARTIST-02**: The collapse rule handles all four join conventions observed in the real
+- [x] **ARTIST-02**: The collapse rule handles all four join conventions observed in the real
   library — comma (`Duke Ellington, John Coltrane`), spaced hyphen
   (`Adderley - Coltrane - Chambers - Cobb - Kelly`), role suffix
   (`Ella Fitzgerald - vocals  Paul Smith - piano`), and the `with`/`and his orchestra` form
@@ -133,9 +133,9 @@ Which phases cover which requirements. Filled during roadmap creation.
 | DATA-02 | Phase 1 | In Progress (01-02 mechanism done; blocked on 01-07 user retag for D-09's "count == 0") |
 | DATA-03 | Phase 1 | Complete |
 | DATA-04 | Phase 1 | In Progress (01-01, 01-02 done; 01-05 pending) |
-| ARTIST-01 | Phase 2 | Pending |
-| ARTIST-02 | Phase 2 | Pending |
-| ARTIST-03 | Phase 2 | Pending |
+| ARTIST-01 | Phase 2 | In Progress (02-01 Collapse() rule implemented + corpus-tested; 02-02 must wire it into the cache builder + MPD-direct fallback before the artist list actually shows one row per performer) |
+| ARTIST-02 | Phase 2 | Complete |
+| ARTIST-03 | Phase 2 | In Progress (02-01 Collapse("") returns "" without panicking; 02-02 must wire this into the read paths so the empty value never reaches either client as a blank row) |
 | ARTIST-04 | Phase 3 | Pending |
 | ART-01 | Phase 2 | Pending |
 | ART-02 | Phase 2 | Pending |
