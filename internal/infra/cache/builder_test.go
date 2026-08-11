@@ -22,6 +22,7 @@ type stubMPDDataProvider struct {
 	playlistInfo      map[string][]cache.TrackData
 	countAlbumsResult int
 	countAlbumsErr    error
+	untaggedByBase    map[string]int
 }
 
 func (s *stubMPDDataProvider) GetAlbumDetails(basePath string) ([]cache.AlbumDetailsData, error) {
@@ -43,6 +44,9 @@ func (s *stubMPDDataProvider) ListPlaylistInfo(name string) ([]cache.TrackData, 
 }
 func (s *stubMPDDataProvider) CountAlbums() (int, error) {
 	return s.countAlbumsResult, s.countAlbumsErr
+}
+func (s *stubMPDDataProvider) CountUntagged(basePath string) (int, error) {
+	return s.untaggedByBase[basePath], nil
 }
 
 // TestFullBuild_PreservesCache_WhenMPDEmpty verifies that FullBuild does NOT
@@ -487,5 +491,73 @@ func TestBackfillAlbumArtwork_RecoversOrphanIDsFromDisk(t *testing.T) {
 	}
 	if again != 0 {
 		t.Errorf("idempotent re-run count = %d, want 0", again)
+	}
+}
+
+// TestFullBuild_PersistsSkippedCount verifies that FullBuild sums
+// CountUntagged across every configured basePath and persists the total via
+// cache_meta, readable back from GetStats().SkippedCount (DATA-02).
+func TestFullBuild_PersistsSkippedCount(t *testing.T) {
+	t.Parallel()
+
+	tmpDir := t.TempDir()
+	db := cache.NewDB(filepath.Join(tmpDir, "library.db"))
+	if err := db.Open(); err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+
+	provider := &stubMPDDataProvider{
+		countAlbumsResult: 1, // MPD has albums -> rebuild should proceed
+		albumsByBase: map[string][]cache.AlbumDetailsData{
+			"USB": {
+				{
+					Album:       "Some Album",
+					AlbumArtist: "Some Artist",
+					TrackCount:  1,
+					FirstTrack:  "USB/Some Artist/Some Album/01.flac",
+					TotalTime:   200,
+				},
+			},
+		},
+		artists:        map[string]int{"Some Artist": 1},
+		untaggedByBase: map[string]int{"INTERNAL": 3, "USB": 13, "NAS": 0},
+	}
+
+	builder := cache.NewBuilder(db, provider, cache.NewDefaultPathClassifier())
+	builder.SetBasePaths([]string{"INTERNAL", "USB", "NAS"})
+
+	if err := builder.FullBuild(); err != nil {
+		t.Fatalf("FullBuild: %v", err)
+	}
+
+	stats, err := db.GetStats()
+	if err != nil {
+		t.Fatalf("GetStats: %v", err)
+	}
+	if stats.SkippedCount != 16 {
+		t.Errorf("SkippedCount = %d, want 16 (3 INTERNAL + 13 USB + 0 NAS)", stats.SkippedCount)
+	}
+}
+
+// TestGetStats_SkippedCountDefaultsToZero_WhenNoMetaRow verifies that a
+// fresh DB with no skipped_count meta row (e.g. before any FullBuild ever
+// ran) reports SkippedCount == 0, not an error.
+func TestGetStats_SkippedCountDefaultsToZero_WhenNoMetaRow(t *testing.T) {
+	t.Parallel()
+
+	tmpDir := t.TempDir()
+	db := cache.NewDB(filepath.Join(tmpDir, "library.db"))
+	if err := db.Open(); err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+
+	stats, err := db.GetStats()
+	if err != nil {
+		t.Fatalf("GetStats: %v", err)
+	}
+	if stats.SkippedCount != 0 {
+		t.Errorf("SkippedCount = %d, want 0 on a fresh DB", stats.SkippedCount)
 	}
 }

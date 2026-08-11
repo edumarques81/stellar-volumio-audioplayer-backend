@@ -1,6 +1,7 @@
 package library
 
 import (
+	"fmt"
 	"path/filepath"
 	"testing"
 
@@ -202,4 +203,45 @@ func (s *mpdCallSpy) ListArtists() ([]string, error) {
 func (s *mpdCallSpy) FindAlbumsByArtist(artist string) ([]AlbumInfo, error) {
 	*s.called = true
 	return s.MockMPDClient.FindAlbumsByArtist(artist)
+}
+
+// TestMPDDataProviderAdapter_CountUntagged proves mpdDataProviderAdapter's
+// CountUntagged is wired to SearchByBase + musicfile.CountUntagged (DATA-02),
+// and that a SearchByBase error propagates rather than being swallowed.
+func TestMPDDataProviderAdapter_CountUntagged(t *testing.T) {
+	t.Parallel()
+
+	t.Run("counts real untagged songs, excludes resource-fork junk", func(t *testing.T) {
+		t.Parallel()
+		mockMPD := &MockMPDClient{
+			SearchByBaseResp: map[string][]map[string]string{
+				"USB": {
+					{"file": "USB/a/01.flac", "Album": "A"},
+					{"file": "USB/a/02.flac", "Album": ""},
+					{"file": "USB/a/._02.flac", "Album": ""},
+				},
+			},
+		}
+		adapter := &mpdDataProviderAdapter{mpd: mockMPD}
+
+		got, err := adapter.CountUntagged("USB")
+		if err != nil {
+			t.Fatalf("CountUntagged: %v", err)
+		}
+		if got != 1 {
+			t.Errorf("CountUntagged = %d, want 1", got)
+		}
+	})
+
+	t.Run("propagates SearchByBase error", func(t *testing.T) {
+		t.Parallel()
+		wantErr := fmt.Errorf("mpd unavailable")
+		mockMPD := &MockMPDClient{SearchByBaseError: wantErr}
+		adapter := &mpdDataProviderAdapter{mpd: mockMPD}
+
+		_, err := adapter.CountUntagged("USB")
+		if err == nil {
+			t.Fatal("expected error, got nil")
+		}
+	})
 }
