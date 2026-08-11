@@ -591,6 +591,20 @@ func (s *Service) GetAlbumTracks(req GetAlbumTracksRequest) AlbumTracksResponse 
 			}
 		}
 
+		// Parse disc number (BROWSE-07: a grouped multi-disc album's combined
+		// SearchByBase result must sort disc-1 tracks before disc-2's).
+		// Empty/absent/unparseable Disc yields 0, matching the TrackNumber/
+		// Duration convention -- omitempty drops it from JSON.
+		discNum := 0
+		if dn := track["Disc"]; dn != "" {
+			if idx := strings.Index(dn, "/"); idx > 0 {
+				dn = dn[:idx]
+			}
+			if n, err := strconv.Atoi(dn); err == nil {
+				discNum = n
+			}
+		}
+
 		// Parse duration
 		duration := 0
 		if d := track["Time"]; d != "" {
@@ -624,6 +638,7 @@ func (s *Service) GetAlbumTracks(req GetAlbumTracksRequest) AlbumTracksResponse 
 			Album:       track["Album"],
 			URI:         file,
 			TrackNumber: trackNum,
+			Disc:        discNum,
 			Duration:    duration,
 			AlbumArt:    "/albumart?path=" + file,
 			Source:      sourceType,
@@ -632,8 +647,16 @@ func (s *Service) GetAlbumTracks(req GetAlbumTracksRequest) AlbumTracksResponse 
 		resultTracks = append(resultTracks, resultTrack)
 	}
 
-	// Sort by track number
+	// Sort by (disc, track number, title) -- a grouped multi-disc album's
+	// combined SearchByBase result interleaves discs in MPD's raw response
+	// order; disc must sort first so discs never interleave in the result.
+	// A single-disc album's tracks all share the same Disc value (0 or 1),
+	// making this a no-op relative to the pre-existing (TrackNumber, Title)
+	// order.
 	sort.Slice(resultTracks, func(i, j int) bool {
+		if resultTracks[i].Disc != resultTracks[j].Disc {
+			return resultTracks[i].Disc < resultTracks[j].Disc
+		}
 		if resultTracks[i].TrackNumber != resultTracks[j].TrackNumber {
 			return resultTracks[i].TrackNumber < resultTracks[j].TrackNumber
 		}
