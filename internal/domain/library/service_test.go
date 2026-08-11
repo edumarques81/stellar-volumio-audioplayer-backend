@@ -2,6 +2,7 @@ package library
 
 import (
 	"fmt"
+	"strings"
 	"testing"
 )
 
@@ -722,6 +723,64 @@ func TestService_GetAlbumTracks_WithTracks(t *testing.T) {
 		}
 		if resp.Tracks[1].TrackNumber != 2 {
 			t.Errorf("Second track should be track 2, got %d", resp.Tracks[1].TrackNumber)
+		}
+	}
+}
+
+// TestService_GetAlbumTracks_ExcludesResourceForkFiles pins the DATA-04
+// behavior that GetAlbumTracks must never return macOS resource-fork
+// sidecar entries. Written against the pre-refactor inline
+// strings.HasPrefix(base, "._") check (it already passes before Plan 01-01
+// Task 2's refactor to musicfile.IsResourceFork) so a regression during the
+// refactor is caught immediately.
+func TestService_GetAlbumTracks_ExcludesResourceForkFiles(t *testing.T) {
+	mockMPD := &MockMPDClient{
+		FindAlbumTracksResp: map[string][]map[string]string{
+			"Ghost Album\x00Ghost Artist": {
+				{
+					"file":   "INTERNAL/Album/01-Track1.flac",
+					"Title":  "Track One",
+					"Artist": "Ghost Artist",
+					"Album":  "Ghost Album",
+					"Track":  "1",
+					"Time":   "240",
+				},
+				{
+					"file":   "INTERNAL/Album/._01-Track1.flac",
+					"Title":  "Track One",
+					"Artist": "Ghost Artist",
+					"Album":  "Ghost Album",
+					"Track":  "1",
+					"Time":   "240",
+				},
+				{
+					"file":   "INTERNAL/Album/02-Track2.flac",
+					"Title":  "Track Two",
+					"Artist": "Ghost Artist",
+					"Album":  "Ghost Album",
+					"Track":  "2",
+					"Time":   "180",
+				},
+			},
+		},
+	}
+
+	service := NewService(mockMPD, &MockPathClassifier{})
+
+	resp := service.GetAlbumTracks(GetAlbumTracksRequest{
+		Album:       "Ghost Album",
+		AlbumArtist: "Ghost Artist",
+	})
+
+	if resp.Error != "" {
+		t.Errorf("Unexpected error: %s", resp.Error)
+	}
+	if len(resp.Tracks) != 2 {
+		t.Fatalf("Expected 2 tracks (resource-fork entry excluded), got %d", len(resp.Tracks))
+	}
+	for _, track := range resp.Tracks {
+		if strings.Contains(track.URI, "._01") {
+			t.Errorf("Resource-fork entry leaked into Tracks: %+v", track)
 		}
 	}
 }
