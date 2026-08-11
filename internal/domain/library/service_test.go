@@ -1141,6 +1141,101 @@ func TestService_GetAlbumTracks_ExcludesResourceForkFiles(t *testing.T) {
 	}
 }
 
+// TestService_GetAlbumTracks_SortsByDiscThenTrackNumber pins 03-03-PLAN.md
+// Task 3: a grouped multi-disc album's combined SearchByBase result (discs
+// interleaved in MPD's raw response order) must sort disc 1's tracks (by
+// track number) before disc 2's, never interleaved -- proven here with a
+// higher-track-number disc-1 track that must still sort ahead of a
+// lower-track-number disc-2 track.
+func TestService_GetAlbumTracks_SortsByDiscThenTrackNumber(t *testing.T) {
+	mockMPD := &MockMPDClient{
+		SearchByBaseResp: map[string][]map[string]string{
+			"USB/Mahler The Symphonies": {
+				// Raw MPD order interleaves discs; disc 2 track 1 appears
+				// before disc 1 track 2 in the raw response.
+				{
+					"file": "USB/Mahler The Symphonies/CD 02/01.flac", "Title": "Symphony No. 2 - I",
+					"Artist": "Gustav Mahler", "Album": "Mahler: The Symphonies", "Track": "1", "Disc": "2", "Time": "300",
+				},
+				{
+					"file": "USB/Mahler The Symphonies/CD 01/02.flac", "Title": "Symphony No. 1 - II",
+					"Artist": "Gustav Mahler", "Album": "Mahler: The Symphonies", "Track": "2", "Disc": "1", "Time": "280",
+				},
+				{
+					"file": "USB/Mahler The Symphonies/CD 01/01.flac", "Title": "Symphony No. 1 - I",
+					"Artist": "Gustav Mahler", "Album": "Mahler: The Symphonies", "Track": "1", "Disc": "1", "Time": "260",
+				},
+			},
+		},
+	}
+
+	service := NewService(mockMPD, &MockPathClassifier{})
+
+	resp := service.GetAlbumTracks(GetAlbumTracksRequest{
+		Album: "Mahler: The Symphonies",
+		URI:   "USB/Mahler The Symphonies",
+	})
+
+	if resp.Error != "" {
+		t.Fatalf("Unexpected error: %s", resp.Error)
+	}
+	if len(resp.Tracks) != 3 {
+		t.Fatalf("Expected 3 tracks, got %d", len(resp.Tracks))
+	}
+
+	// Expect: disc 1 track 1, disc 1 track 2, disc 2 track 1 -- never
+	// interleaved despite disc 2's track appearing first in raw MPD order.
+	wantOrder := []struct {
+		disc  int
+		track int
+	}{
+		{1, 1},
+		{1, 2},
+		{2, 1},
+	}
+	for i, want := range wantOrder {
+		got := resp.Tracks[i]
+		if got.Disc != want.disc || got.TrackNumber != want.track {
+			t.Errorf("Tracks[%d] = (Disc:%d, TrackNumber:%d), want (Disc:%d, TrackNumber:%d): %+v",
+				i, got.Disc, got.TrackNumber, want.disc, want.track, resp.Tracks)
+		}
+	}
+}
+
+// TestService_GetAlbumTracks_DiscZeroWhenAbsent verifies Track.Disc follows
+// the existing TrackNumber/Duration convention: absent or empty MPD "Disc"
+// tag produces the zero value (0), which `omitempty` drops from JSON.
+func TestService_GetAlbumTracks_DiscZeroWhenAbsent(t *testing.T) {
+	mockMPD := &MockMPDClient{
+		FindAlbumTracksResp: map[string][]map[string]string{
+			"No Disc Tag Album\x00Some Artist": {
+				{
+					"file": "INTERNAL/Album/01.flac", "Title": "Track One",
+					"Artist": "Some Artist", "Album": "No Disc Tag Album", "Track": "1", "Time": "200",
+					// No "Disc" key at all.
+				},
+			},
+		},
+	}
+
+	service := NewService(mockMPD, &MockPathClassifier{})
+
+	resp := service.GetAlbumTracks(GetAlbumTracksRequest{
+		Album:       "No Disc Tag Album",
+		AlbumArtist: "Some Artist",
+	})
+
+	if resp.Error != "" {
+		t.Fatalf("Unexpected error: %s", resp.Error)
+	}
+	if len(resp.Tracks) != 1 {
+		t.Fatalf("Expected 1 track, got %d", len(resp.Tracks))
+	}
+	if resp.Tracks[0].Disc != 0 {
+		t.Errorf("Disc = %d, want 0 (absent Disc tag)", resp.Tracks[0].Disc)
+	}
+}
+
 // --- GetRadioStations Tests ---
 
 func TestService_GetRadioStations_Empty(t *testing.T) {
