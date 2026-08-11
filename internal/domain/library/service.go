@@ -10,6 +10,7 @@ import (
 
 	"github.com/rs/zerolog/log"
 
+	"github.com/edumarques81/stellar-volumio-audioplayer-backend/internal/infra/artistidentity"
 	"github.com/edumarques81/stellar-volumio-audioplayer-backend/internal/infra/musicfile"
 )
 
@@ -264,6 +265,17 @@ func (s *Service) sortAlbums(albums []Album, sortOrder SortOrder) {
 }
 
 // GetArtists returns all artists from the MPD database.
+//
+// This is the MPD-direct fallback path (used when the SQLite cache is empty
+// or a cache query fails; see internal/infra/cache.Builder.buildArtists for
+// the cache-primary path). Raw MPD Artist tag values are collapsed via
+// artistidentity.Collapse (ARTIST-01/ARTIST-02) before being surfaced:
+// multiple raw variants that collapse to the same canonical performer name
+// are merged into one Artist row with summed album counts, and the empty
+// raw value MPD's real `list artist` output contains collapses to "" and is
+// skipped, producing no row (ARTIST-03). D-06 resolves to collapsing on
+// both paths so ARTIST-01/02/03 hold regardless of which one answers a
+// given request.
 func (s *Service) GetArtists(req GetArtistsRequest) ArtistsResponse {
 	var artists []Artist
 
@@ -278,29 +290,40 @@ func (s *Service) GetArtists(req GetArtistsRequest) ArtistsResponse {
 
 	queryLower := strings.ToLower(req.Query)
 
+	// First pass: collapse each raw name to its canonical form and merge
+	// album counts across raw variants that collapse to the same canonical
+	// name (sum on collision -- distinct raw variants represent distinct
+	// albums' raw tags, not overlapping counts).
+	merged := make(map[string]int, len(artistNames))
 	for _, name := range artistNames {
-		// Skip empty artist names
-		if name == "" {
+		canonical := artistidentity.Collapse(name)
+		if canonical == "" {
 			continue
 		}
 
-		// Apply query filter if provided
-		if req.Query != "" && !strings.Contains(strings.ToLower(name), queryLower) {
-			continue
-		}
-
-		// Get album count for this artist
+		// FindAlbumsByArtist is queried with the RAW name, not the
+		// canonical one -- unchanged pre-existing behavior; see this
+		// plan's <interfaces> block for the documented, out-of-scope
+		// AlbumArtist-vs-Artist tag quirk this does not fix.
 		albumCount := 0
 		if albumInfos, err := s.mpd.FindAlbumsByArtist(name); err == nil {
 			albumCount = len(albumInfos)
 		}
 
-		artist := Artist{
-			Name:       name,
-			AlbumCount: albumCount,
+		merged[canonical] += albumCount
+	}
+
+	// Second pass: apply the query filter against the CANONICAL name and
+	// build the response slice.
+	for canonical, albumCount := range merged {
+		if req.Query != "" && !strings.Contains(strings.ToLower(canonical), queryLower) {
+			continue
 		}
 
-		artists = append(artists, artist)
+		artists = append(artists, Artist{
+			Name:       canonical,
+			AlbumCount: albumCount,
+		})
 	}
 
 	// Sort artists alphabetically
