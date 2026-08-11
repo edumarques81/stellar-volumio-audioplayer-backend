@@ -76,6 +76,91 @@ func TestCachedService_GetAlbums_MapsGenre(t *testing.T) {
 	}
 }
 
+// TestCachedService_GetAlbums_MapsBadgeAndDiscCount proves that
+// CachedAlbum.Badge/DiscCount (Schema v6, populated at cache-build time by
+// Builder.buildAlbums) are mapped onto the Library Album payload returned to
+// socket clients -- the cache-served path (the one the deployed Pi actually
+// uses) must carry the same BROWSE-01/02/03/07 fields the MPD-direct path
+// (03-03) already returns.
+func TestCachedService_GetAlbums_MapsBadgeAndDiscCount(t *testing.T) {
+	t.Parallel()
+
+	db := openTestDB(t)
+	dao := cache.NewDAO(db)
+
+	badged := &cache.CachedAlbum{
+		ID:          "badged-album",
+		Title:       "Kind Of Blue",
+		AlbumArtist: "Miles Davis",
+		URI:         "USB/Miles Davis/Kind Of Blue (DSD64)",
+		Source:      "usb",
+		Badge:       "DSD64",
+	}
+	grouped := &cache.CachedAlbum{
+		ID:          "grouped-album",
+		Title:       "Mahler: The Symphonies",
+		AlbumArtist: "Gustav Mahler",
+		URI:         "USB/Mahler The Symphonies",
+		Source:      "usb",
+		DiscCount:   11,
+	}
+	if err := dao.InsertAlbum(badged); err != nil {
+		t.Fatalf("insert badged: %v", err)
+	}
+	if err := dao.InsertAlbum(grouped); err != nil {
+		t.Fatalf("insert grouped: %v", err)
+	}
+
+	svc := NewCachedService(&MockMPDClient{}, &MockPathClassifier{}, db)
+	resp := svc.GetAlbums(GetAlbumsRequest{Scope: ScopeAll, Sort: SortAlphabetical})
+
+	got := map[string]Album{}
+	for _, a := range resp.Albums {
+		got[a.ID] = a
+	}
+
+	if got["badged-album"].Badge != "DSD64" {
+		t.Errorf("badged-album.Badge = %q, want %q", got["badged-album"].Badge, "DSD64")
+	}
+	if got["badged-album"].DiscCount != 0 {
+		t.Errorf("badged-album.DiscCount = %d, want 0", got["badged-album"].DiscCount)
+	}
+	if got["grouped-album"].DiscCount != 11 {
+		t.Errorf("grouped-album.DiscCount = %d, want 11", got["grouped-album"].DiscCount)
+	}
+	if got["grouped-album"].Badge != "" {
+		t.Errorf("grouped-album.Badge = %q, want empty string", got["grouped-album"].Badge)
+	}
+}
+
+// TestMPDDataProviderAdapter_GetAlbumDetails_ThreadsDisc proves the cache
+// adapter forwards library.AlbumDetails.Disc (03-03's MPD Disc tag capture)
+// into cache.AlbumDetailsData.Disc, so Builder.buildAlbums can group
+// multi-disc box sets the same way Service.GetAlbums does.
+func TestMPDDataProviderAdapter_GetAlbumDetails_ThreadsDisc(t *testing.T) {
+	t.Parallel()
+
+	mockMPD := &MockMPDClient{
+		GetAlbumDetailsResp: map[string][]AlbumDetails{
+			"USB": {
+				{Album: "Mahler: The Symphonies", AlbumArtist: "Gustav Mahler", Disc: "3"},
+			},
+		},
+	}
+	adapter := &mpdDataProviderAdapter{mpd: mockMPD}
+
+	got, err := adapter.GetAlbumDetails("USB")
+	if err != nil {
+		t.Fatalf("GetAlbumDetails: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("len(got) = %d, want 1", len(got))
+	}
+	if got[0].Disc != "3" {
+		t.Errorf("Disc = %q, want %q", got[0].Disc, "3")
+	}
+}
+
 // TestCachedService_GetAlbums_IsBuilding_DoesNotFallbackToMPD proves that
 // GetAlbums does NOT call the MPD fallback when AlbumCount is 0 but the cache
 // is currently building. During a rebuild AlbumCount transiently reads 0 and

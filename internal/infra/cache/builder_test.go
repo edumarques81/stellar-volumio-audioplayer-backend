@@ -742,6 +742,252 @@ func TestBuildArtists_NonCollapsibleNamesPassThroughUnchanged(t *testing.T) {
 	}
 }
 
+// TestBuilder_FullBuild_MahlerShaped_GroupsToOneAlbumWithDiscCount pins the
+// cache-build-time analog of service_test.go's
+// TestService_GetAlbums_MahlerShaped_GroupsToOneAlbumWithDiscCount (03-03):
+// 11 raw per-basePath AlbumDetailsData entries (one per CD-NN folder,
+// distinct Disc tags 1..11, all sharing one common parent directory) must
+// collapse to exactly ONE albums row with disc_count=11 and uri equal to
+// the box set's common parent directory -- NOT a CD-NN subfolder path.
+func TestBuilder_FullBuild_MahlerShaped_GroupsToOneAlbumWithDiscCount(t *testing.T) {
+	t.Parallel()
+
+	tmpDir := t.TempDir()
+	db := cache.NewDB(filepath.Join(tmpDir, "library.db"))
+	if err := db.Open(); err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+
+	details := make([]cache.AlbumDetailsData, 11)
+	wantTrackCount := 0
+	for i := 0; i < 11; i++ {
+		discNum := i + 1
+		trackCount := 5 + i
+		wantTrackCount += trackCount
+		details[i] = cache.AlbumDetailsData{
+			Album:       "Mahler: The Symphonies",
+			AlbumArtist: "Gustav Mahler",
+			TrackCount:  trackCount,
+			FirstTrack:  fmt.Sprintf("USB/Mahler The Symphonies/CD %02d/01 - track.flac", discNum),
+			Format:      "44100:16:2",
+			Disc:        fmt.Sprintf("%d", discNum),
+		}
+	}
+
+	provider := &stubMPDDataProvider{
+		countAlbumsResult: 11,
+		albumsByBase: map[string][]cache.AlbumDetailsData{
+			"USB": details,
+		},
+	}
+
+	builder := cache.NewBuilder(db, provider, cache.NewDefaultPathClassifier())
+	builder.SetBasePaths([]string{"USB"})
+
+	if err := builder.FullBuild(); err != nil {
+		t.Fatalf("FullBuild: %v", err)
+	}
+
+	dao := cache.NewDAO(db)
+	albums, total, err := dao.QueryAlbums(cache.AlbumFilter{}, cache.SortAlphabetical, cache.NewPagination(1, 50))
+	if err != nil {
+		t.Fatalf("QueryAlbums: %v", err)
+	}
+
+	if total != 1 || len(albums) != 1 {
+		t.Fatalf("Expected 1 grouped Mahler album row, got total=%d len=%d: %+v", total, len(albums), albums)
+	}
+
+	album := albums[0]
+	if album.DiscCount != 11 {
+		t.Errorf("DiscCount = %d, want 11", album.DiscCount)
+	}
+	if album.URI != "USB/Mahler The Symphonies" {
+		t.Errorf("URI = %q, want the common parent %q (not a CD subfolder)", album.URI, "USB/Mahler The Symphonies")
+	}
+	if album.TrackCount != wantTrackCount {
+		t.Errorf("TrackCount = %d, want %d (summed across all 11 discs)", album.TrackCount, wantTrackCount)
+	}
+	if album.Badge != "" {
+		t.Errorf("Badge = %q, want empty (Mahler collapses to a single album, no duplicate cluster)", album.Badge)
+	}
+}
+
+// TestBuilder_FullBuild_KindOfBlueShaped_StaysSeparateWithQualityBadges pins
+// the cache-build-time analog of service_test.go's
+// TestService_GetAlbums_KindOfBlueShaped_StaysSeparateWithQualityBadges
+// (03-03) / D-06: 3 raw AlbumDetailsData entries sharing title+artist, all
+// carrying IDENTICAL Disc:"1" and none matching the CD path marker, must NOT
+// be grouped by discgroup (Kind Of Blue is 3 distinct releases, not a box
+// set). Since their quality differs, dupebadge's tier-1 precedence fires:
+// each row's badge is its own quality string verbatim.
+func TestBuilder_FullBuild_KindOfBlueShaped_StaysSeparateWithQualityBadges(t *testing.T) {
+	t.Parallel()
+
+	tmpDir := t.TempDir()
+	db := cache.NewDB(filepath.Join(tmpDir, "library.db"))
+	if err := db.Open(); err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+
+	provider := &stubMPDDataProvider{
+		countAlbumsResult: 3,
+		albumsByBase: map[string][]cache.AlbumDetailsData{
+			"USB": {
+				{
+					Album: "Kind Of Blue", AlbumArtist: "Miles Davis", TrackCount: 5,
+					FirstTrack: "USB/Miles Davis/Kind Of Blue (DSD64)/01.dsf",
+					Format:     "2822400:f:2", Disc: "1",
+				},
+				{
+					Album: "Kind Of Blue", AlbumArtist: "Miles Davis", TrackCount: 5,
+					FirstTrack: "USB/Miles Davis/Kind Of Blue (DSD128)/01.dsf",
+					Format:     "5644800:f:2", Disc: "1",
+				},
+				{
+					Album: "Kind Of Blue", AlbumArtist: "Miles Davis", TrackCount: 5,
+					FirstTrack: "USB/Miles Davis/Kind Of Blue (FLAC)/01.flac",
+					Format:     "352800:24:2", Disc: "1",
+				},
+			},
+		},
+	}
+
+	builder := cache.NewBuilder(db, provider, cache.NewDefaultPathClassifier())
+	builder.SetBasePaths([]string{"USB"})
+
+	if err := builder.FullBuild(); err != nil {
+		t.Fatalf("FullBuild: %v", err)
+	}
+
+	dao := cache.NewDAO(db)
+	albums, total, err := dao.QueryAlbums(cache.AlbumFilter{}, cache.SortAlphabetical, cache.NewPagination(1, 50))
+	if err != nil {
+		t.Fatalf("QueryAlbums: %v", err)
+	}
+
+	if total != 3 || len(albums) != 3 {
+		t.Fatalf("Expected 3 separate Kind Of Blue rows (D-06 negative case), got total=%d len=%d: %+v", total, len(albums), albums)
+	}
+
+	seen := map[string]bool{}
+	for _, album := range albums {
+		if album.DiscCount != 0 {
+			t.Errorf("DiscCount = %d, want 0 (not a box set) for %q", album.DiscCount, album.URI)
+		}
+		if album.Badge == "" {
+			t.Errorf("Badge is empty, want each row's own quality string for %q", album.URI)
+		}
+		seen[album.Badge] = true
+	}
+	if len(seen) < 2 {
+		t.Errorf("Expected at least 2 distinct badge values among the 3 Kind Of Blue versions, got %v", seen)
+	}
+}
+
+// TestBuilder_FullBuild_Twice_BadgeAndDiscCountAreIdempotent verifies that
+// calling FullBuild() twice against identical stub data (Mahler-shaped +
+// Kind-Of-Blue-shaped combined) is a byte-for-byte no-op on badge/disc_count
+// values -- the must_haves truth "A cache rebuild is idempotent: re-running
+// FullBuild twice produces the same badge/discCount values both times."
+func TestBuilder_FullBuild_Twice_BadgeAndDiscCountAreIdempotent(t *testing.T) {
+	t.Parallel()
+
+	tmpDir := t.TempDir()
+	db := cache.NewDB(filepath.Join(tmpDir, "library.db"))
+	if err := db.Open(); err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+
+	mahler := make([]cache.AlbumDetailsData, 11)
+	for i := 0; i < 11; i++ {
+		discNum := i + 1
+		mahler[i] = cache.AlbumDetailsData{
+			Album:       "Mahler: The Symphonies",
+			AlbumArtist: "Gustav Mahler",
+			TrackCount:  5,
+			FirstTrack:  fmt.Sprintf("USB/Mahler The Symphonies/CD %02d/01 - track.flac", discNum),
+			Format:      "44100:16:2",
+			Disc:        fmt.Sprintf("%d", discNum),
+		}
+	}
+	kindOfBlue := []cache.AlbumDetailsData{
+		{
+			Album: "Kind Of Blue", AlbumArtist: "Miles Davis", TrackCount: 5,
+			FirstTrack: "USB/Miles Davis/Kind Of Blue (DSD64)/01.dsf",
+			Format:     "2822400:f:2", Disc: "1",
+		},
+		{
+			Album: "Kind Of Blue", AlbumArtist: "Miles Davis", TrackCount: 5,
+			FirstTrack: "USB/Miles Davis/Kind Of Blue (DSD128)/01.dsf",
+			Format:     "5644800:f:2", Disc: "1",
+		},
+		{
+			Album: "Kind Of Blue", AlbumArtist: "Miles Davis", TrackCount: 5,
+			FirstTrack: "USB/Miles Davis/Kind Of Blue (FLAC)/01.flac",
+			Format:     "352800:24:2", Disc: "1",
+		},
+	}
+
+	provider := &stubMPDDataProvider{
+		countAlbumsResult: 14,
+		albumsByBase: map[string][]cache.AlbumDetailsData{
+			"USB": append(append([]cache.AlbumDetailsData{}, mahler...), kindOfBlue...),
+		},
+	}
+
+	builder := cache.NewBuilder(db, provider, cache.NewDefaultPathClassifier())
+	builder.SetBasePaths([]string{"USB"})
+
+	if err := builder.FullBuild(); err != nil {
+		t.Fatalf("first FullBuild: %v", err)
+	}
+
+	dao := cache.NewDAO(db)
+	firstRun, _, err := dao.QueryAlbums(cache.AlbumFilter{}, cache.SortAlphabetical, cache.NewPagination(1, 50))
+	if err != nil {
+		t.Fatalf("QueryAlbums after first build: %v", err)
+	}
+	firstByTitleURI := map[string]struct {
+		badge     string
+		discCount int
+	}{}
+	for _, a := range firstRun {
+		firstByTitleURI[a.Title+"|"+a.URI] = struct {
+			badge     string
+			discCount int
+		}{a.Badge, a.DiscCount}
+	}
+
+	if err := builder.FullBuild(); err != nil {
+		t.Fatalf("second FullBuild: %v", err)
+	}
+
+	secondRun, _, err := dao.QueryAlbums(cache.AlbumFilter{}, cache.SortAlphabetical, cache.NewPagination(1, 50))
+	if err != nil {
+		t.Fatalf("QueryAlbums after second build: %v", err)
+	}
+	if len(secondRun) != len(firstRun) {
+		t.Fatalf("row count changed across rebuilds: first=%d second=%d", len(firstRun), len(secondRun))
+	}
+	for _, a := range secondRun {
+		want, ok := firstByTitleURI[a.Title+"|"+a.URI]
+		if !ok {
+			t.Errorf("row %q|%q present after second build but not first", a.Title, a.URI)
+			continue
+		}
+		if a.Badge != want.badge {
+			t.Errorf("%q|%q: Badge changed across rebuilds: first=%q second=%q", a.Title, a.URI, want.badge, a.Badge)
+		}
+		if a.DiscCount != want.discCount {
+			t.Errorf("%q|%q: DiscCount changed across rebuilds: first=%d second=%d", a.Title, a.URI, want.discCount, a.DiscCount)
+		}
+	}
+}
+
 // TestGetStats_SkippedCountDefaultsToZero_WhenNoMetaRow verifies that a
 // fresh DB with no skipped_count meta row (e.g. before any FullBuild ever
 // ran) reports SkippedCount == 0, not an error.
