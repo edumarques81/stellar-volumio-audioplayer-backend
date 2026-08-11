@@ -3,14 +3,14 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: executing
-stopped_at: Completed 01-02-PLAN.md
-last_updated: "2026-08-11T10:12:22.348Z"
+stopped_at: Completed 01-05-PLAN.md
+last_updated: "2026-08-11T10:34:59.025Z"
 last_activity: 2026-08-11
 progress:
   total_phases: 3
   completed_phases: 0
   total_plans: 7
-  completed_plans: 4
+  completed_plans: 5
   percent: 0
 ---
 
@@ -27,7 +27,7 @@ browse surface is honest about what it's showing.
 ## Current Position
 
 Phase: 1 of 3 (Data Integrity Foundation)
-Plan: 3 of 7 complete in current phase (4 waves)
+Plan: 4 of 7 complete in current phase (4 waves)
 Status: Ready to execute
 Last activity: 2026-08-11
 
@@ -56,6 +56,7 @@ Progress: [░░░░░░░░░░] 0%
 | Phase 01 P01 | 10min | 2 tasks | 4 files |
 | Phase 01 P04 | 20min | 2 tasks | 1 files |
 | Phase 01 P02 | 35min | 3 tasks | 9 files |
+| Phase 01 P05 | 15min | 2 tasks | 2 files |
 
 ## Accumulated Context
 
@@ -93,6 +94,8 @@ Recent decisions affecting current work:
 - [Phase ?]: groupAlbumDetails stays package-mpd-local; only the resource-fork predicate is shared via musicfile
 - [Phase ?]: buildSkippedCount runs after buildAlbums, non-fatal on error, matching the buildRadioStations precedent
 - [Phase ?]: mpdDataProviderAdapter.CountUntagged wires through existing SearchByBase, avoiding a 3-interface signature-change blast radius
+- [Phase 01]: DATA-04 verified live: I3 gate diffs the FULL albums.track_count + artists.album_count snapshot before/after a synthetic ._ file, not a fixed set of pre-selected IDs — No per-album ID bookkeeping needed and catches a regression anywhere in the library, matching the ROADMAP criterion wording (any album... any artist)
+- [Phase 01]: Cache rebuilds triggered via new deploy/rebuild-cache.py (python-socketio client), not HTTP or CDP browser automation — Backend has no HTTP rebuild endpoint; CDP dynamic-import of /src/lib/services/socket.ts fails against the kiosk's production build, which has no dev-server module path
 
 ### Verified Environment Facts (measured 2026-08-11, supersede earlier estimates)
 
@@ -134,7 +137,7 @@ Items acknowledged and carried forward from previous milestone close:
 
 ## Session Continuity
 
-Last session: 2026-08-11T10:12:22.344Z
-Stopped at: Completed 01-02-PLAN.md
+Last session: 2026-08-11T10:34:59.021Z
+Stopped at: Completed 01-05-PLAN.md
 `/gsd:plan-phase 1`.
 Resume file: None

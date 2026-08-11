@@ -24,7 +24,7 @@ browse surface is honest about what it's showing.
 - [x] **DATA-03**: MPD's database contains no macOS `._` resource-fork entries. Verified by
   `mpc stats` song count matching the real file count (currently 1380 indexed vs 803 real).
 
-- [ ] **DATA-04**: The backend ignores `._` files consistently everywhere it reads MPD song lists —
+- [x] **DATA-04**: The backend ignores `._` files consistently everywhere it reads MPD song lists —
   not only in `GetAlbumTracks` — so a future macOS copy cannot corrupt album track counts or
   artist counts. *(Plan 01-01 delivered the shared `musicfile.IsResourceFork` predicate and
   refactored `GetAlbumTracks` to use it. Plan 01-02 hardened `GetAlbumDetails` — the single choke
