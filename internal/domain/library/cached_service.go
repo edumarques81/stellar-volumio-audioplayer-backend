@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"github.com/edumarques81/stellar-volumio-audioplayer-backend/internal/infra/cache"
+	"github.com/edumarques81/stellar-volumio-audioplayer-backend/internal/infra/musicfile"
 	"github.com/rs/zerolog/log"
 )
 
@@ -417,4 +418,15 @@ func (a *mpdDataProviderAdapter) ListPlaylistInfo(name string) ([]cache.TrackDat
 
 func (a *mpdDataProviderAdapter) CountAlbums() (int, error) {
 	return a.mpd.CountAlbums()
+}
+
+// CountUntagged returns the number of real (non-resource-fork) songs in
+// basePath with no Album tag -- DATA-02's skipped/untagged signal. A
+// SearchByBase error propagates unchanged rather than being swallowed.
+func (a *mpdDataProviderAdapter) CountUntagged(basePath string) (int, error) {
+	songs, err := a.mpd.SearchByBase(basePath)
+	if err != nil {
+		return 0, err
+	}
+	return musicfile.CountUntagged(songs), nil
 }

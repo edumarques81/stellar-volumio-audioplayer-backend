@@ -28,6 +28,9 @@ type MPDDataProvider interface {
 	// Used as a pre-count guard in FullBuild to avoid wiping the cache when
 	// MPD has not yet scanned its music directory (e.g. boot-before-MPD-ready).
 	CountAlbums() (int, error)
+	// CountUntagged returns the number of real (non-resource-fork) songs in
+	// basePath with no Album tag -- DATA-02's skipped/untagged signal.
+	CountUntagged(basePath string) (int, error)
 }
 
 // AlbumDetailsData represents album data from MPD.
@@ -159,6 +162,13 @@ func (b *Builder) FullBuild() error {
 	b.db.SetBuildingState(true, 10)
 	if err := b.buildAlbums(); err != nil {
 		return fmt.Errorf("failed to build albums: %w", err)
+	}
+
+	// Persist the skipped/untagged count (DATA-02). Non-fatal: matches the
+	// buildRadioStations pattern below -- a failure here must not fail the
+	// whole rebuild.
+	if err := b.buildSkippedCount(); err != nil {
+		log.Warn().Err(err).Msg("Failed to build skipped count (non-fatal)")
 	}
 
 	// Build artists
@@ -300,6 +310,31 @@ func (b *Builder) buildAlbums() error {
 	}
 
 	log.Debug().Int("count", albumCount).Msg("Albums cached")
+	return nil
+}
+
+// buildSkippedCount sums CountUntagged across every configured basePath and
+// persists the total via cache_meta ("skipped_count"), read back by
+// DB.GetStats() as CacheStats.SkippedCount -- DATA-02's skipped/untagged
+// observability signal. Per-basePath errors are logged and skipped, matching
+// buildAlbums' existing log.Warn().Err(err)...continue style, so one bad
+// basePath does not block the total for the others.
+func (b *Builder) buildSkippedCount() error {
+	total := 0
+	for _, basePath := range b.basePaths {
+		count, err := b.provider.CountUntagged(basePath)
+		if err != nil {
+			log.Warn().Err(err).Str("basePath", basePath).Msg("Failed to count untagged songs for base path")
+			continue
+		}
+		total += count
+	}
+
+	if err := b.db.setMeta("skipped_count", strconv.Itoa(total)); err != nil {
+		return fmt.Errorf("failed to persist skipped_count: %w", err)
+	}
+
+	log.Debug().Int("skipped", total).Msg("Skipped/untagged count cached")
 	return nil
 }
 

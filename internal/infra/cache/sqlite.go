@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"sync"
 	"time"
 
@@ -393,6 +394,13 @@ func (d *DB) GetStats() (*CacheStats, error) {
 	lastUpdated, _ := d.getMeta("last_updated")
 	if lastUpdated != "" {
 		stats.LastUpdated, _ = time.Parse(time.RFC3339, lastUpdated)
+	}
+
+	// Absent/unparsable meta silently defaults to the struct's zero value
+	// (0), never an error -- e.g. before any FullBuild has ever run.
+	skippedStr, _ := d.getMeta("skipped_count")
+	if skippedStr != "" {
+		stats.SkippedCount, _ = strconv.Atoi(skippedStr)
 	}
 
 	return stats, nil

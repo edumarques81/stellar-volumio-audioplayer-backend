@@ -88,17 +88,18 @@ type CacheMeta struct {
 
 // CacheStats provides statistics about the cache.
 type CacheStats struct {
-	AlbumCount    int       `json:"albumCount"`
-	ArtistCount   int       `json:"artistCount"`
-	TrackCount    int       `json:"trackCount"`
-	ArtworkCount  int       `json:"artworkCount"`
-	ArtworkMissing int      `json:"artworkMissing"`
-	RadioCount    int       `json:"radioCount"`
-	SchemaVersion string    `json:"schemaVersion"`
-	LastFullBuild time.Time `json:"lastFullBuild"`
-	LastUpdated   time.Time `json:"lastUpdated"`
-	IsBuilding    bool      `json:"isBuilding"`
-	BuildProgress int       `json:"buildProgress"` // 0-100
+	AlbumCount     int       `json:"albumCount"`
+	ArtistCount    int       `json:"artistCount"`
+	TrackCount     int       `json:"trackCount"`
+	ArtworkCount   int       `json:"artworkCount"`
+	ArtworkMissing int       `json:"artworkMissing"`
+	RadioCount     int       `json:"radioCount"`
+	SkippedCount   int       `json:"skippedCount"` // real, untagged (Album=="") songs, DATA-02
+	SchemaVersion  string    `json:"schemaVersion"`
+	LastFullBuild  time.Time `json:"lastFullBuild"`
+	LastUpdated    time.Time `json:"lastUpdated"`
+	IsBuilding     bool      `json:"isBuilding"`
+	BuildProgress  int       `json:"buildProgress"` // 0-100
 }
 
 // AlbumFilter defines filters for album queries.
