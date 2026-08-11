@@ -14,7 +14,12 @@ browse surface is honest about what it's showing.
 
 - [ ] **DATA-02**: If untagged files ever reappear, they are **detectable rather than silent** — the
   backend surfaces a count of skipped/untagged files (log + a field on the existing cache-status
-  payload) instead of quietly omitting them from browse results.
+  payload) instead of quietly omitting them from browse results. *(Plan 01-02 built the mechanism
+  end-to-end: `groupAlbumDetails` counts skipped songs and logs it; `CacheStats.SkippedCount` is
+  persisted on every `FullBuild` and surfaced as `skippedCount` on `pushLibraryCacheStatus` /
+  documented in `docs/SOCKET-CONTRACT.md`. Not yet checked off: D-09 defines success as the count
+  reading **0** after the DATA-01 retag, and that retag (Plan 01-07) is still blocked on the user.
+  Live count today is 16, matching the documented baseline.)*
 
 - [x] **DATA-03**: MPD's database contains no macOS `._` resource-fork entries. Verified by
   `mpc stats` song count matching the real file count (currently 1380 indexed vs 803 real).
@@ -22,8 +27,10 @@ browse surface is honest about what it's showing.
 - [ ] **DATA-04**: The backend ignores `._` files consistently everywhere it reads MPD song lists —
   not only in `GetAlbumTracks` — so a future macOS copy cannot corrupt album track counts or
   artist counts. *(Plan 01-01 delivered the shared `musicfile.IsResourceFork` predicate and
-  refactored `GetAlbumTracks` to use it; `GetAlbumDetails` (Plan 01-02) and the cache builder
-  paths (Plan 01-05) still need to adopt it before this requirement is fully satisfied.)*
+  refactored `GetAlbumTracks` to use it. Plan 01-02 hardened `GetAlbumDetails` — the single choke
+  point behind `GetAlbums`, `GetArtistAlbums`, the cache builder's `buildAlbums`, and
+  `localmusic`'s album browsing — via a new unit-tested `groupAlbumDetails` extraction. The cache
+  builder paths (Plan 01-05) still need to adopt it before this requirement is fully satisfied.)*
 
 ### Artist Listing
 
@@ -115,9 +122,9 @@ Which phases cover which requirements. Filled during roadmap creation.
 | Requirement | Phase | Status |
 |-------------|-------|--------|
 | DATA-01 | Phase 1 | Pending |
-| DATA-02 | Phase 1 | Pending |
+| DATA-02 | Phase 1 | In Progress (01-02 mechanism done; blocked on 01-07 user retag for D-09's "count == 0") |
 | DATA-03 | Phase 1 | Complete |
-| DATA-04 | Phase 1 | In Progress (01-01 done; 01-02, 01-05 pending) |
+| DATA-04 | Phase 1 | In Progress (01-01, 01-02 done; 01-05 pending) |
 | ARTIST-01 | Phase 2 | Pending |
 | ARTIST-02 | Phase 2 | Pending |
 | ARTIST-03 | Phase 2 | Pending |
