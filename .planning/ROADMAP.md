@@ -151,6 +151,35 @@ Plans:
 
 Unsequenced items. Not part of the v1.0 milestone phases; promote with `/gsd:review-backlog`.
 
+### Phase 999.2: Ship files to the Pi — upload, unzip, land on the SSD, index in MPD (BACKLOG)
+**Captured:** 2026-08-12 (user: *"I need a way to send files to the pi so it can unzip and add those files to the ssd drive and to mpd"*)
+
+**Status: deliberately un-designed.** The user asked to capture this and explicitly deferred all
+thinking about it until the v1.0 milestone phases finish. Do NOT start solving it here — promote it
+via `/gsd:review-backlog` when the milestone closes, then run it through discuss → plan properly.
+
+**The ask, in the user's terms:** a way to send files (archives) to the Pi, have the Pi unzip them,
+place the contents on the SSD music drive, and get them into MPD's database.
+
+**Already-established facts that any future design must respect** (recorded so they are not
+re-derived, not as design decisions):
+- `/mnt/ssd` is mounted **read-only** (`ro,nofail,uid=mpd,gid=audio`). Any write needs a
+  `remount,rw` → work → `remount,ro` round-trip, trap-guarded.
+- **macOS recreates `._` AppleDouble junk** on this exFAT volume. Phase 1 deleted 934 of them. An
+  upload path that routes through a macOS mount reintroduces the problem; copying over the network
+  (scp/rsync from Linux side) does not.
+- MPD needs an explicit `mpc update` plus a backend cache rebuild before new music appears.
+- Files land under `/mnt/ssd/Music`, exposed to MPD as `USB/` via
+  `/var/lib/mpd/music/USB -> /mnt/ssd/Music`.
+- New albums require `Album` and `AlbumArtist` tags or they are invisible (Phase 1, DATA-01/02);
+  `skippedCount` on `pushLibraryCacheStatus` will report untagged arrivals.
+- The music library holds irreplaceable masters — any ingest path needs care around overwrite.
+
+**Open questions for the future discuss phase** (listed, not answered): transport (web upload in the
+existing UI vs scp/rsync vs a watched folder vs Samba), who unzips and where, how to handle
+name collisions and partial uploads, whether tagging is validated at ingest, and whether this
+belongs in the backend or as a separate small service.
+
 ### Phase 999.1: Miles Ahead — cover art not displaying + booklet in metadata (BACKLOG)
 **Captured:** 2026-08-12 (user: *"Miles Ahead album from Miles Davis cover art and booklet … I can't see a cover art for it now"*)
 
