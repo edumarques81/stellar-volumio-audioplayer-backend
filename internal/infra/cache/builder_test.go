@@ -540,6 +540,208 @@ func TestFullBuild_PersistsSkippedCount(t *testing.T) {
 	}
 }
 
+// TestBuildArtists_CollapsesAndMergesPavarottiVariants verifies ARTIST-01/
+// ARTIST-02: the 15 real `Luciano Pavarotti, ...` raw MPD Artist tag values
+// captured in 02-ARTIST-CORPUS.md all collapse to a single "Luciano
+// Pavarotti" row whose AlbumCount is the SUM of all 15 raw variants' counts,
+// not the count of whichever variant buildArtists happened to process last
+// (map iteration order in Go is randomized, so a last-write-wins bug would
+// be flaky/undetectable without this explicit sum assertion).
+func TestBuildArtists_CollapsesAndMergesPavarottiVariants(t *testing.T) {
+	t.Parallel()
+
+	tmpDir := t.TempDir()
+	db := cache.NewDB(filepath.Join(tmpDir, "library.db"))
+	if err := db.Open(); err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+
+	pavarottiVariants := map[string]int{
+		"Luciano Pavarotti, Berliner Philharmoniker, Herbert von Karajan":                                                  1,
+		"Luciano Pavarotti, Coro del Teatro Comunale di Bologna, Orchestra del Teatro Comunale di Bologna, Anton Guadagno": 1,
+		"Luciano Pavarotti, English Chamber Orchestra, Richard Bonynge":                                                    1,
+		"Luciano Pavarotti, John Alldis Choir, Wandsworth School Boys Choir, London Philharmonic Orchestra, Zubin Mehta":   1,
+		"Luciano Pavarotti, London Symphony Orchestra, Richard Bonynge":                                                    1,
+		"Luciano Pavarotti, Mirella Freni, Berliner Philharmoniker, Herbert von Karajan":                                   1,
+		"Luciano Pavarotti, National Philharmonic Orchestra, Giancarlo Chiaramello":                                        1,
+		"Luciano Pavarotti, National Philharmonic Orchestra, Nicola Rescigno":                                              1,
+		"Luciano Pavarotti, New Philharmonia Orchestra, Richard Bonynge":                                                   1,
+		"Luciano Pavarotti, Nicolai Ghiaurov, National Philharmonic Orchestra, Robin Stapleton":                            1,
+		"Luciano Pavarotti, Orchestra del Teatro Comunale di Bologna, Richard Bonynge":                                     1,
+		"Luciano Pavarotti, Orchestra of the Royal Opera House, Covent Garden, Edward Downes":                              1,
+		"Luciano Pavarotti, Philharmonia Orchestra, Piero Gamba":                                                           1,
+		"Luciano Pavarotti, Wiener Opernorchester, Nicola Rescigno":                                                        1,
+		"Luciano Pavarotti, Wiener Philharmoniker, Sir Georg Solti":                                                        1,
+		"Luciano Pavarotti, Wiener Volksopernorchester, Leone Magiera":                                                     1,
+	}
+	if len(pavarottiVariants) != 16 {
+		t.Fatalf("test setup error: expected 16 distinct raw keys (15 Pavarotti variants + this check), got %d", len(pavarottiVariants))
+	}
+
+	provider := &stubMPDDataProvider{
+		countAlbumsResult: 1, // non-zero so FullBuild proceeds normally
+		artists:           pavarottiVariants,
+	}
+
+	builder := cache.NewBuilder(db, provider, cache.NewDefaultPathClassifier())
+	if err := builder.FullBuild(); err != nil {
+		t.Fatalf("FullBuild: %v", err)
+	}
+
+	dao := cache.NewDAO(db)
+	artists, total, err := dao.QueryArtists("", cache.NewPagination(1, 50))
+	if err != nil {
+		t.Fatalf("QueryArtists: %v", err)
+	}
+	if total != 1 {
+		t.Fatalf("total artists = %d, want 1 (all 16 raw Pavarotti variants must collapse to one row)", total)
+	}
+	if len(artists) != 1 {
+		t.Fatalf("len(artists) = %d, want 1", len(artists))
+	}
+	if artists[0].Name != "Luciano Pavarotti" {
+		t.Errorf("artist name = %q, want %q", artists[0].Name, "Luciano Pavarotti")
+	}
+	if artists[0].AlbumCount != 16 {
+		t.Errorf("AlbumCount = %d, want 16 (sum of all 16 raw variants, not last-write-wins)", artists[0].AlbumCount)
+	}
+}
+
+// TestBuildArtists_MergesCanonicalAndVariants verifies the mixed case: an
+// already-canonical raw name ("Moby": 3) plus two raw variants that both
+// collapse to the same canonical ("Moby, Jim James": 1, "Moby, Mindy
+// Jones": 1) must merge into ONE "Moby" row with AlbumCount 5 (3+1+1), not
+// three separate rows and not a last-write-wins overwrite.
+func TestBuildArtists_MergesCanonicalAndVariants(t *testing.T) {
+	t.Parallel()
+
+	tmpDir := t.TempDir()
+	db := cache.NewDB(filepath.Join(tmpDir, "library.db"))
+	if err := db.Open(); err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+
+	provider := &stubMPDDataProvider{
+		countAlbumsResult: 1,
+		artists: map[string]int{
+			"Moby":              3,
+			"Moby, Jim James":   1,
+			"Moby, Mindy Jones": 1,
+		},
+	}
+
+	builder := cache.NewBuilder(db, provider, cache.NewDefaultPathClassifier())
+	if err := builder.FullBuild(); err != nil {
+		t.Fatalf("FullBuild: %v", err)
+	}
+
+	dao := cache.NewDAO(db)
+	artists, total, err := dao.QueryArtists("", cache.NewPagination(1, 50))
+	if err != nil {
+		t.Fatalf("QueryArtists: %v", err)
+	}
+	if total != 1 {
+		t.Fatalf("total artists = %d, want 1", total)
+	}
+	if artists[0].Name != "Moby" {
+		t.Errorf("artist name = %q, want %q", artists[0].Name, "Moby")
+	}
+	if artists[0].AlbumCount != 5 {
+		t.Errorf("AlbumCount = %d, want 5 (3+1+1 merged)", artists[0].AlbumCount)
+	}
+}
+
+// TestBuildArtists_EmptyRawNameProducesNoRow verifies ARTIST-03: MPD's real
+// `list artist` output contains one empty-string entry, and buildArtists
+// must never insert a row for it.
+func TestBuildArtists_EmptyRawNameProducesNoRow(t *testing.T) {
+	t.Parallel()
+
+	tmpDir := t.TempDir()
+	db := cache.NewDB(filepath.Join(tmpDir, "library.db"))
+	if err := db.Open(); err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+
+	provider := &stubMPDDataProvider{
+		countAlbumsResult: 1,
+		artists: map[string]int{
+			"":     7,
+			"Moby": 3,
+		},
+	}
+
+	builder := cache.NewBuilder(db, provider, cache.NewDefaultPathClassifier())
+	if err := builder.FullBuild(); err != nil {
+		t.Fatalf("FullBuild: %v", err)
+	}
+
+	dao := cache.NewDAO(db)
+	artists, total, err := dao.QueryArtists("", cache.NewPagination(1, 50))
+	if err != nil {
+		t.Fatalf("QueryArtists: %v", err)
+	}
+	if total != 1 {
+		t.Fatalf("total artists = %d, want 1 (empty-name entry must be skipped)", total)
+	}
+	for _, a := range artists {
+		if a.Name == "" {
+			t.Errorf("found artist row with empty Name — ARTIST-03 violated")
+		}
+	}
+}
+
+// TestBuildArtists_NonCollapsibleNamesPassThroughUnchanged is the
+// regression safety net for the 88 "leave alone" corpus values: raw names
+// with no collapse-eligible delimiter must produce one row per name,
+// unchanged, with unchanged counts.
+func TestBuildArtists_NonCollapsibleNamesPassThroughUnchanged(t *testing.T) {
+	t.Parallel()
+
+	tmpDir := t.TempDir()
+	db := cache.NewDB(filepath.Join(tmpDir, "library.db"))
+	if err := db.Open(); err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+
+	provider := &stubMPDDataProvider{
+		countAlbumsResult: 1,
+		artists: map[string]int{
+			"Radiohead":      4,
+			"Björk":          2,
+			"Massive Attack": 1,
+		},
+	}
+
+	builder := cache.NewBuilder(db, provider, cache.NewDefaultPathClassifier())
+	if err := builder.FullBuild(); err != nil {
+		t.Fatalf("FullBuild: %v", err)
+	}
+
+	dao := cache.NewDAO(db)
+	artists, total, err := dao.QueryArtists("", cache.NewPagination(1, 50))
+	if err != nil {
+		t.Fatalf("QueryArtists: %v", err)
+	}
+	if total != 3 {
+		t.Fatalf("total artists = %d, want 3 (no collapsing should occur)", total)
+	}
+	gotCounts := map[string]int{}
+	for _, a := range artists {
+		gotCounts[a.Name] = a.AlbumCount
+	}
+	want := map[string]int{"Radiohead": 4, "Björk": 2, "Massive Attack": 1}
+	for name, wantCount := range want {
+		if gotCounts[name] != wantCount {
+			t.Errorf("artist %q AlbumCount = %d, want %d", name, gotCounts[name], wantCount)
+		}
+	}
+}
+
 // TestGetStats_SkippedCountDefaultsToZero_WhenNoMetaRow verifies that a
 // fresh DB with no skipped_count meta row (e.g. before any FullBuild ever
 // ran) reports SkippedCount == 0, not an error.
