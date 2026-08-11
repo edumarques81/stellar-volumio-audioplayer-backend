@@ -104,11 +104,23 @@ func TestCachedService_GetAlbums_MapsBadgeAndDiscCount(t *testing.T) {
 		Source:      "usb",
 		DiscCount:   11,
 	}
-	if err := dao.InsertAlbum(badged); err != nil {
+
+	// InsertAlbumTx (not the non-Tx InsertAlbum, which pre-dates Schema v6
+	// and never persists badge/disc_count -- it is a test-only helper never
+	// called from production code) is the path that actually round-trips
+	// Badge/DiscCount, matching how Builder.buildAlbums writes real rows.
+	tx, err := db.BeginTx()
+	if err != nil {
+		t.Fatalf("BeginTx: %v", err)
+	}
+	if err := dao.InsertAlbumTx(tx, badged); err != nil {
 		t.Fatalf("insert badged: %v", err)
 	}
-	if err := dao.InsertAlbum(grouped); err != nil {
+	if err := dao.InsertAlbumTx(tx, grouped); err != nil {
 		t.Fatalf("insert grouped: %v", err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatalf("commit: %v", err)
 	}
 
 	svc := NewCachedService(&MockMPDClient{}, &MockPathClassifier{}, db)

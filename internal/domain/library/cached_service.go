@@ -169,6 +169,8 @@ func (s *CachedService) GetAlbums(req GetAlbumsRequest) AlbumsResponse {
 			Quality:    quality,
 			TrackType:  ca.TrackType,
 			Genre:      ca.Genre,
+			Badge:      ca.Badge,
+			DiscCount:  ca.DiscCount,
 		})
 	}
 
@@ -350,6 +352,7 @@ func (a *mpdDataProviderAdapter) GetAlbumDetails(basePath string) ([]cache.Album
 			TotalTime:   d.TotalTime,
 			Format:      d.Format,
 			Genre:       d.Genre,
+			Disc:        d.Disc,
 		})
 	}
 	return result, nil

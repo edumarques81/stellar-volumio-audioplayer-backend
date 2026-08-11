@@ -880,9 +880,10 @@ func TestSchema_FreshDB_HasBadgeAndDiscCountColumns(t *testing.T) {
 
 // TestMigration_V5ToV6_AddsBadgeAndDiscCountColumns verifies that opening a
 // database previously initialised at schema v5 (genre column present, no
-// badge/disc_count) transparently migrates to v6 by adding
-// `badge TEXT DEFAULT ''` and `disc_count INTEGER DEFAULT 0` while
-// preserving any existing rows -- mirrors TestMigration_V4ToV5_AddsGenreColumn.
+// badge/disc_count) transparently migrates to v6 by adding a badge text
+// column (empty-string default) and a disc_count integer column
+// (zero default) while preserving any existing rows -- mirrors
+// TestMigration_V4ToV5_AddsGenreColumn.
 func TestMigration_V5ToV6_AddsBadgeAndDiscCountColumns(t *testing.T) {
 	t.Parallel()
 	tmpDir := t.TempDir()

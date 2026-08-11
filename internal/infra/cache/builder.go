@@ -10,6 +10,8 @@ import (
 	"time"
 
 	"github.com/edumarques81/stellar-volumio-audioplayer-backend/internal/infra/artistidentity"
+	"github.com/edumarques81/stellar-volumio-audioplayer-backend/internal/infra/discgroup"
+	"github.com/edumarques81/stellar-volumio-audioplayer-backend/internal/infra/dupebadge"
 	"github.com/rs/zerolog/log"
 )
 
@@ -44,6 +46,7 @@ type AlbumDetailsData struct {
 	Year        int
 	Format      string // Audio format from MPD, e.g. "44100:16:2"
 	Genre       string // Album-level genre (first track's Genre tag, normalized)
+	Disc        string // MPD Disc tag from a representative track, first-track-wins; "" when absent
 }
 
 // TrackData represents track data from MPD.
@@ -205,6 +208,15 @@ func (b *Builder) FullBuild() error {
 }
 
 // buildAlbums builds the albums cache from MPD.
+//
+// Grouping (discgroup.GroupFolders, BROWSE-07) runs per basePath -- a box
+// set's member disc-folders always share one common root directory under
+// one source by construction. Badging (dupebadge.Compute, BROWSE-01/02/03)
+// runs ONCE over the FULL cross-basePath set, after every basePath's groups
+// have been collected, mirroring Service.GetAlbums's badging-scope decision
+// (see 03-03-SUMMARY.md key-decisions): duplicates can span basePaths (e.g.
+// "The Light For Days": LOCAL vs USB), so per-basePath badging would miss
+// them.
 func (b *Builder) buildAlbums() error {
 	tx, err := b.db.BeginTx()
 	if err != nil {
@@ -212,7 +224,12 @@ func (b *Builder) buildAlbums() error {
 	}
 	defer tx.Rollback()
 
-	albumCount := 0
+	// Collected across ALL basePaths before any insert, so badging can see
+	// the full merged set. discs is aligned by index with cachedAlbums --
+	// each entry is that album's representative discgroup.Group.Disc value
+	// (only meaningful when DiscCount<=1), fed to dupebadge's disc tier.
+	var cachedAlbums []*CachedAlbum
+	var discs []string
 
 	for _, basePath := range b.basePaths {
 		albums, err := b.provider.GetAlbumDetails(basePath)
@@ -221,62 +238,106 @@ func (b *Builder) buildAlbums() error {
 			continue
 		}
 
+		folders := make([]discgroup.Folder, 0, len(albums))
 		for _, album := range albums {
 			if album.Album == "" {
 				continue
 			}
+			folders = append(folders, discgroup.Folder{
+				Album:       album.Album,
+				AlbumArtist: album.AlbumArtist,
+				Directory:   filepath.Dir(album.FirstTrack),
+				Disc:        album.Disc,
+				FirstTrack:  album.FirstTrack,
+				TrackCount:  album.TrackCount,
+				TotalTime:   album.TotalTime,
+				Format:      album.Format,
+				Genre:       album.Genre,
+			})
+		}
 
-			// Get source type from first track path
-			source := b.classifier.GetSourceType(album.FirstTrack)
+		groups := discgroup.GroupFolders(folders)
 
-			// Get directory URI for playback
-			uri := filepath.Dir(album.FirstTrack)
+		for _, g := range groups {
+			// Get source type from the representative first track path
+			source := b.classifier.GetSourceType(g.FirstTrack)
+
+			// URI is the group's RootDir -- for a merged box set this is the
+			// common parent directory (NOT filepath.Dir(g.FirstTrack), which
+			// would point at disc 1's own subfolder), so MPD's recursive
+			// `search base <uri>` returns every disc's tracks with no new
+			// query logic. On an ungrouped group, RootDir equals the
+			// original folder's own Directory (unchanged existing behavior).
+			uri := g.RootDir
 
 			// Generate album ID including URI so different quality versions are separate
-			albumID := generateAlbumID(album.AlbumArtist, album.Album, uri)
+			albumID := generateAlbumID(g.AlbumArtist, g.Album, uri)
 
 			// Parse audio format (e.g. "44100:16:2" → sampleRate, bitDepth)
 			var sampleRate, bitDepth int
-			if album.Format != "" {
-				parts := strings.Split(album.Format, ":")
+			if g.Format != "" {
+				parts := strings.Split(g.Format, ":")
 				if len(parts) >= 2 {
 					sampleRate, _ = strconv.Atoi(parts[0])
 					bitDepth, _ = strconv.Atoi(parts[1])
 				}
 			}
 
-			// Detect track type from first track's file extension
+			// Detect track type from the representative first track's file extension
 			trackType := ""
-			if album.FirstTrack != "" {
-				if idx := strings.LastIndex(album.FirstTrack, "."); idx >= 0 {
-					trackType = strings.ToLower(album.FirstTrack[idx+1:])
+			if g.FirstTrack != "" {
+				if idx := strings.LastIndex(g.FirstTrack, "."); idx >= 0 {
+					trackType = strings.ToLower(g.FirstTrack[idx+1:])
 				}
+			}
+
+			// DiscCount is only set when the group is genuinely a multi-disc
+			// box set (>1); an ungrouped discgroup.Group's own convention is
+			// DiscCount=1, which must map to CachedAlbum.DiscCount=0 so the
+			// "0/unset = ordinary single-disc album" contract Service.GetAlbums'
+			// albumFromGroup (service.go) already established holds through
+			// the cache path too -- this plan's objective is byte-for-byte
+			// parity between the two paths.
+			discCount := 0
+			if g.DiscCount > 1 {
+				discCount = g.DiscCount
 			}
 
 			cachedAlbum := &CachedAlbum{
 				ID:            albumID,
-				Title:         album.Album,
-				AlbumArtist:   album.AlbumArtist,
+				Title:         g.Album,
+				AlbumArtist:   g.AlbumArtist,
 				URI:           uri,
-				FirstTrack:    album.FirstTrack,
-				TrackCount:    album.TrackCount,
-				TotalDuration: album.TotalTime,
+				FirstTrack:    g.FirstTrack,
+				TrackCount:    g.TrackCount,
+				TotalDuration: g.TotalTime,
 				Source:        source,
-				Year:          album.Year,
 				SampleRate:    sampleRate,
 				BitDepth:      bitDepth,
 				TrackType:     trackType,
-				Genre:         album.Genre,
+				Genre:         g.Genre,
+				DiscCount:     discCount,
 				AddedAt:       time.Now(), // Would be better to get from file mtime
 			}
 
-			if err := b.dao.InsertAlbumTx(tx, cachedAlbum); err != nil {
-				log.Warn().Err(err).Str("album", album.Album).Msg("Failed to insert album")
-				continue
-			}
-
-			albumCount++
+			cachedAlbums = append(cachedAlbums, cachedAlbum)
+			discs = append(discs, g.Disc)
 		}
+	}
+
+	// Compute BROWSE-01/02/03 duplicate-disambiguation badges across the
+	// FULL cross-basePath set, before any insert -- see this function's doc
+	// comment.
+	applyDupeBadges(cachedAlbums, discs)
+
+	albumCount := 0
+	for _, cachedAlbum := range cachedAlbums {
+		if err := b.dao.InsertAlbumTx(tx, cachedAlbum); err != nil {
+			log.Warn().Err(err).Str("album", cachedAlbum.Title).Msg("Failed to insert album")
+			continue
+		}
+
+		albumCount++
 	}
 
 	// Re-link albums to their existing artwork rows. Clear() preserves the
@@ -476,6 +537,88 @@ func (b *Builder) BuildAlbumTracks(albumID, album, albumArtist string) error {
 	}
 
 	return nil
+}
+
+// applyDupeBadges computes BROWSE-01/02/03 duplicate-disambiguation badges
+// (internal/infra/dupebadge) across the full album list and writes results
+// back into each CachedAlbum.Badge by index. discs must be the same length
+// as albums, aligned by index (each album's representative
+// discgroup.Group.Disc value). Mirrors
+// internal/domain/library.applyDupeBadges (service.go) -- see
+// 03-03-SUMMARY.md key-decisions for why badging must run over the FULL
+// merged set, not per basePath.
+func applyDupeBadges(albums []*CachedAlbum, discs []string) {
+	if len(albums) == 0 {
+		return
+	}
+
+	candidates := make([]dupebadge.Candidate, len(albums))
+	for i, a := range albums {
+		disc := ""
+		if i < len(discs) {
+			disc = discs[i]
+		}
+		candidates[i] = dupebadge.Candidate{
+			Title:   a.Title,
+			Artist:  a.AlbumArtist,
+			Quality: formatQualityLabel(a.SampleRate, a.BitDepth, a.TrackType),
+			Disc:    disc,
+			Source:  a.Source,
+		}
+	}
+
+	badges := dupebadge.Compute(candidates)
+	for i := range albums {
+		albums[i].Badge = badges[i]
+	}
+}
+
+// formatQualityLabel mirrors internal/domain/library.formatQualityLabel
+// (cached_service.go) byte-for-byte. It must be duplicated here rather than
+// imported: internal/infra packages must not import internal/domain
+// packages (see discgroup's and dupebadge's package docs for the two
+// verified facts justifying this layering rule), and
+// dupebadge.Candidate.Quality expects the same already-formatted label
+// string the MPD-direct path (service.go) computes.
+func formatQualityLabel(sampleRate, bitDepth int, trackType string) string {
+	if sampleRate == 0 && bitDepth == 0 && trackType == "" {
+		return ""
+	}
+
+	tt := strings.ToUpper(trackType)
+
+	if trackType == "dsf" || trackType == "dff" || trackType == "dsd" {
+		switch {
+		case sampleRate >= 11289600 || sampleRate == 176400:
+			return "DSD256"
+		case sampleRate >= 5644800 || sampleRate == 88200:
+			return "DSD128"
+		case sampleRate >= 2822400:
+			return "DSD64"
+		default:
+			return "DSD"
+		}
+	}
+
+	var parts []string
+	if sampleRate > 0 {
+		if sampleRate%1000 == 0 {
+			parts = append(parts, fmt.Sprintf("%dkHz", sampleRate/1000))
+		} else {
+			parts = append(parts, fmt.Sprintf("%.1fkHz", float64(sampleRate)/1000))
+		}
+	}
+	if bitDepth > 0 {
+		parts = append(parts, fmt.Sprintf("%dbit", bitDepth))
+	}
+
+	label := strings.Join(parts, "/")
+	if tt != "" && label != "" {
+		label += " " + tt
+	} else if tt != "" {
+		label = tt
+	}
+	return label
 }
 
 // Helper functions for generating IDs
