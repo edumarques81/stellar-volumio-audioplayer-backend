@@ -66,11 +66,14 @@ Plans:
   4. Artist photos/artwork that rendered before the collapse still render after it for the same real artists — no broken-image placeholders — verified by comparing artwork-link counts (or screenshots) on the Pi before and after the migration.
   5. The count of albums with no artwork link drops from 39 toward 0 without any new network call to Fanart.tv, Deezer, or MusicBrainz; re-running the migration a second time changes nothing and deletes no files under the artwork directory (idempotent, non-destructive).
 
-**Plans**: TBD
+**Plans**: 4 plans (3 waves)
 
 Plans:
 
-- [ ] 02-01: TBD
+- [ ] 02-01-PLAN.md — TDD: pure Collapse() artist-name rule, proven against the real 124-value corpus (ARTIST-01, ARTIST-02, ARTIST-03)
+- [ ] 02-02-PLAN.md — Wire Collapse() into the cache builder + the MPD-direct fallback, merging album counts across collapsed variants (ARTIST-01, ARTIST-02, ARTIST-03)
+- [ ] 02-03-PLAN.md — Deterministic artist-artwork rekey (auto-runs on boot) + album-artwork orphan rekey helper, unit-tested, zero live Pi contact (ART-01, ART-02, ART-03)
+- [ ] 02-04-PLAN.md — Deploy collapse + migration together, human-confirmed album-artwork matching, live verification (autonomous: false) (ARTIST-01, ARTIST-02, ARTIST-03, ART-01, ART-02, ART-03)
 
 ### Phase 3: Browse Experience — Duplicate Badges & Empty States
 
@@ -152,6 +155,6 @@ Phases execute in numeric order: 1 → 2 → 3 → 4
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
 | 1. Data Integrity Foundation | 5/7 | In Progress|  |
-| 2. Artist Identity & Artwork Migration | 0/TBD | Not started | - |
+| 2. Artist Identity & Artwork Migration | 0/4 | Not started | - |
 | 3. Browse Experience — Duplicate Badges & Empty States | 0/TBD | Not started | - |
 | 4. Tail Cleanup — DSD Test File Conversion | 0/TBD | Not started | - |
