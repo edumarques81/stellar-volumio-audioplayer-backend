@@ -11,9 +11,9 @@ browse surface is honest about what it's showing.
 ## Current Position
 
 Phase: 1 of 3 (Data Integrity Foundation)
-Plan: 0 of TBD in current phase
-Status: Ready to plan
-Last activity: 2026-08-11 — Roadmap created, 15/15 v1 requirements mapped across 3 phases
+Plan: 0 of 7 complete in current phase (4 waves)
+Status: Planned — ready to execute
+Last activity: 2026-08-11 — Phase 1 planned: 7 plans across 4 waves, plan-checker verdict PASS
 
 Progress: [░░░░░░░░░░] 0%
 
@@ -49,6 +49,28 @@ Recent decisions affecting current work:
   so the identity change never orphans artwork before the migration lands.
 - [Roadmap]: ARTIST-04 (empty-grid artist) merged into Phase 3 with BROWSE-04 since both require the
   same underlying "loose songs render as a song list" fix on both clients.
+- [Phase 1 planning]: The `._` predicate goes in a NEW leaf package `internal/infra/musicfile`, NOT
+  `internal/domain/library`. Verified: `internal/infra/**` imports `internal/domain/**` in zero
+  non-test files, while domain→infra happens in 5+ files. Since `GetAlbumDetails` (which needs the
+  filter) lives in `internal/infra/mpd`, a domain-side helper would invert the layering for the
+  first time in this codebase.
+- [Phase 1 planning]: `GetAlbumDetails` in `internal/infra/mpd/client.go` is the single chokepoint —
+  `GetAlbums`, `GetArtistAlbums`, the cache builder, and localmusic all route through it. Hardening
+  it once covers all four browse paths (call graph traced and confirmed by the plan-checker).
+- [Phase 1 planning]: Skipped-count wiring adds an additive `CountUntagged` method to
+  `cache.MPDDataProvider` rather than changing `GetAlbumDetails`'s signature, which would have
+  forced churn across 3 unrelated interfaces.
+
+### Verified Environment Facts (measured 2026-08-11, supersede earlier estimates)
+
+- `/mnt/ssd` is mounted **read-only** (`ro,nofail,uid=mpd,gid=audio` in `/etc/fstab`; live `findmnt`
+  confirms `ro`). `blockdev --getro /dev/sda1` returns `0`, so it is a software mount-option flip,
+  not hardware write protection — deletion requires a `remount,rw` → delete → `remount,ro`
+  round-trip. Passwordless sudo works on the Pi.
+- Live counts: `mpc stats` = **1380** songs; **803** real audio files on disk; **699** `._` files
+  carrying audio extensions; **934** `._` files total. The earlier "566" figure was scoped to
+  `search base "USB"` and to MPD-indexed entries only — it understated the cleanup. Plans treat live
+  measurement as authoritative rather than hardcoding these.
 
 ### Pending Todos
 
