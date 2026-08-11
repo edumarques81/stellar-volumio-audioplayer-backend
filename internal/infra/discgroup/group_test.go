@@ -40,7 +40,7 @@ func TestGroup_RealCorpus(t *testing.T) {
 			t.Fatalf("fixture arithmetic error: wantTrackCount = %d, live-measured total is 63", wantTrackCount)
 		}
 
-		got := Group(folders)
+		got := GroupFolders(folders)
 		if len(got) != 1 {
 			t.Fatalf("Group() returned %d groups, want 1 (Mahler must collapse to a single tile): %+v", len(got), got)
 		}
@@ -91,7 +91,7 @@ func TestGroup_RealCorpus(t *testing.T) {
 			},
 		}
 
-		got := Group(folders)
+		got := GroupFolders(folders)
 		if len(got) != 3 {
 			t.Fatalf("Group() returned %d groups, want 3 (Kind Of Blue must NOT merge -- Disc tag identical across all 3 folders, distinct-Disc-values check must fail): %+v", len(got), got)
 		}
@@ -132,7 +132,7 @@ func TestGroup_RealCorpus(t *testing.T) {
 		}
 		const wantTrackCount = 8 + 7 + 6
 
-		got := Group(folders)
+		got := GroupFolders(folders)
 		if len(got) != 1 {
 			t.Fatalf("Group() returned %d groups, want 1: %+v", len(got), got)
 		}
@@ -164,7 +164,7 @@ func TestGroup_RealCorpus(t *testing.T) {
 			t.Fatalf("fixture arithmetic error: wantTrackCount = %d, live-measured total is 26", wantTrackCount)
 		}
 
-		got := Group(folders)
+		got := GroupFolders(folders)
 		if len(got) != 1 {
 			t.Fatalf("Group() returned %d groups, want 1: %+v", len(got), got)
 		}
@@ -190,7 +190,7 @@ func TestGroup_RealCorpus(t *testing.T) {
 		}
 		const wantTrackCount = 10 + 12
 
-		got := Group(folders)
+		got := GroupFolders(folders)
 		if len(got) != 1 {
 			t.Fatalf("Group() returned %d groups, want 1: %+v", len(got), got)
 		}
@@ -221,7 +221,7 @@ func TestGroup_DefensiveEdgeCases(t *testing.T) {
 			{Album: "Some Box", AlbumArtist: "Some Artist", Directory: "USB/Some Box/CD 2", Disc: "", FirstTrack: "USB/Some Box/CD 2/01.flac", TrackCount: 5, Format: "FLAC"},
 		}
 
-		got := Group(folders)
+		got := GroupFolders(folders)
 		if len(got) != 2 {
 			t.Fatalf("Group() returned %d groups, want 2 (empty Disc must fail check 1, even though CD marker matches and neither value is a duplicate): %+v", len(got), got)
 		}
@@ -243,7 +243,7 @@ func TestGroup_DefensiveEdgeCases(t *testing.T) {
 			{Album: "Some Album", AlbumArtist: "Some Artist", Directory: "USB/Some Album/Version B", Disc: "2", FirstTrack: "USB/Some Album/Version B/01.flac", TrackCount: 9, Format: "FLAC"},
 		}
 
-		got := Group(folders)
+		got := GroupFolders(folders)
 		if len(got) != 2 {
 			t.Fatalf("Group() returned %d groups, want 2 (no /CD ?\\d+/ path marker must fail check 2, even though Disc values are distinct and non-empty): %+v", len(got), got)
 		}
@@ -264,7 +264,7 @@ func TestGroup_DefensiveEdgeCases(t *testing.T) {
 			{Album: "Solo Release", AlbumArtist: "Solo Artist", Directory: "USB/Solo Release/CD 1", Disc: "1", FirstTrack: "USB/Solo Release/CD 1/01.flac", TrackCount: 11, Format: "FLAC"},
 		}
 
-		got := Group(folders)
+		got := GroupFolders(folders)
 		if len(got) != 1 {
 			t.Fatalf("Group() returned %d groups, want 1: %+v", len(got), got)
 		}
@@ -287,7 +287,7 @@ func TestGroup_DefensiveEdgeCases(t *testing.T) {
 			{Album: "The Future Is Now", AlbumArtist: "Some Band", Directory: "USB/Some Band/The Future Is Now", Disc: "1", FirstTrack: "USB/Some Band/The Future Is Now/01.flac", TrackCount: 12, TotalTime: 2600, Format: "FLAC", Genre: "Rock"},
 		}
 
-		got := Group(folders)
+		got := GroupFolders(folders)
 		if len(got) != 1 {
 			t.Fatalf("Group() returned %d groups, want 1: %+v", len(got), got)
 		}
