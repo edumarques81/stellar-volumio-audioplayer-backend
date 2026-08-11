@@ -11,6 +11,8 @@ import (
 	"github.com/rs/zerolog/log"
 
 	"github.com/edumarques81/stellar-volumio-audioplayer-backend/internal/infra/artistidentity"
+	"github.com/edumarques81/stellar-volumio-audioplayer-backend/internal/infra/discgroup"
+	"github.com/edumarques81/stellar-volumio-audioplayer-backend/internal/infra/dupebadge"
 	"github.com/edumarques81/stellar-volumio-audioplayer-backend/internal/infra/musicfile"
 )
 
@@ -77,16 +79,26 @@ func NewService(mpd MPDClient, classifier PathClassifier) *Service {
 // GetAlbums returns albums based on the request parameters.
 func (s *Service) GetAlbums(req GetAlbumsRequest) AlbumsResponse {
 	albums := make([]Album, 0)
+	var discs []string
 
 	// Determine which base paths to query based on scope
 	basePaths := s.getBasePathsForScope(req.Scope)
 
-	// Fetch albums from each base path
+	// Fetch albums from each base path. Grouping (discgroup) is inherently
+	// basePath-scoped -- a box set's member folders always share one root
+	// under a single source -- but duplicate-disambiguation badging
+	// (dupebadge) is NOT: live duplicate groups like "The Light For Days"
+	// (LOCAL vs USB) and "Djesse Vol. 4 (Deluxe)" span different basePaths.
+	// Badges are therefore computed once, below, over the FULL merged list
+	// across all queried basePaths -- not per basePath.
 	for _, basePath := range basePaths {
 		sourceType := s.sourceTypeForBasePath(basePath)
-		albumsFromPath := s.getAlbumsFromBasePath(basePath, sourceType, req.Query)
+		albumsFromPath, discsFromPath := s.getAlbumsFromBasePath(basePath, sourceType, req.Query)
 		albums = append(albums, albumsFromPath...)
+		discs = append(discs, discsFromPath...)
 	}
+
+	applyDupeBadges(albums, discs)
 
 	// Sort albums
 	s.sortAlbums(albums, req.Sort)
@@ -155,75 +167,157 @@ func (s *Service) sourceTypeForBasePath(basePath string) SourceType {
 	}
 }
 
-// getAlbumsFromBasePath fetches albums from a specific base path.
-func (s *Service) getAlbumsFromBasePath(basePath string, sourceType SourceType, query string) []Album {
-	var albums []Album
-
+// getAlbumsFromBasePath fetches albums from a specific base path, grouping
+// multi-disc box sets (BROWSE-07) via discgroup before converting to Album
+// records. Returns the built albums alongside each album's representative
+// discgroup.Group.Disc value (aligned by index, not exposed on Album itself)
+// so the caller can feed dupebadge.Compute across the FULL merged album list
+// once all basePaths have been collected -- see GetAlbums's comment on why
+// badging is not done per basePath.
+func (s *Service) getAlbumsFromBasePath(basePath string, sourceType SourceType, query string) ([]Album, []string) {
 	albumDetails, err := s.mpd.GetAlbumDetails(basePath)
 	if err != nil {
 		log.Debug().Err(err).Str("path", basePath).Msg("Failed to get albums from database")
-		return albums
+		return nil, nil
 	}
+
+	groups := discgroup.GroupFolders(foldersFromAlbumDetails(albumDetails))
 
 	queryLower := strings.ToLower(query)
 
-	for _, details := range albumDetails {
+	var albums []Album
+	var discs []string
+	for _, g := range groups {
 		// Apply query filter if provided
 		if query != "" {
-			if !strings.Contains(strings.ToLower(details.Album), queryLower) &&
-				!strings.Contains(strings.ToLower(details.AlbumArtist), queryLower) {
+			if !strings.Contains(strings.ToLower(g.Album), queryLower) &&
+				!strings.Contains(strings.ToLower(g.AlbumArtist), queryLower) {
 				continue
 			}
 		}
 
-		// Get URI from first track directory
-		uri := ""
-		if details.FirstTrack != "" {
-			uri = path.Dir(details.FirstTrack)
-		}
-
-		// Generate album ID including URI so different quality versions are separate
-		albumID := generateID(details.Album + "\x00" + details.AlbumArtist + "\x00" + uri)
-
-		// Get album art from first track
-		albumArt := ""
-		if details.FirstTrack != "" {
-			albumArt = "/albumart?path=" + details.FirstTrack
-		}
-
-		// Parse audio format and detect track type
-		var sampleRate, bitDepth int
-		if details.Format != "" {
-			parts := strings.Split(details.Format, ":")
-			if len(parts) >= 2 {
-				sampleRate, _ = strconv.Atoi(parts[0])
-				bitDepth, _ = strconv.Atoi(parts[1])
-			}
-		}
-		trackType := ""
-		if details.FirstTrack != "" {
-			if idx := strings.LastIndex(details.FirstTrack, "."); idx >= 0 {
-				trackType = strings.ToLower(details.FirstTrack[idx+1:])
-			}
-		}
-		quality := formatQualityLabel(sampleRate, bitDepth, trackType)
-
-		album := Album{
-			ID:         albumID,
-			Title:      details.Album,
-			Artist:     details.AlbumArtist,
-			URI:        uri,
-			AlbumArt:   albumArt,
-			TrackCount: details.TrackCount,
-			Source:     sourceType,
-			Quality:    quality,
-			TrackType:  trackType,
-		}
-
-		albums = append(albums, album)
+		albums = append(albums, albumFromGroup(g, sourceType, false))
+		discs = append(discs, g.Disc)
 	}
 
-	return albums
+	return albums, discs
+}
+
+// foldersFromAlbumDetails converts raw per-folder AlbumDetails (one entry
+// per (Album, AlbumArtist, Directory) tuple, per mpd.groupAlbumDetails) into
+// discgroup.Folder values for discgroup.GroupFolders.
+func foldersFromAlbumDetails(albumDetails []AlbumDetails) []discgroup.Folder {
+	folders := make([]discgroup.Folder, 0, len(albumDetails))
+	for _, details := range albumDetails {
+		directory := ""
+		if details.FirstTrack != "" {
+			directory = path.Dir(details.FirstTrack)
+		}
+		folders = append(folders, discgroup.Folder{
+			Album:       details.Album,
+			AlbumArtist: details.AlbumArtist,
+			Directory:   directory,
+			Disc:        details.Disc,
+			FirstTrack:  details.FirstTrack,
+			TrackCount:  details.TrackCount,
+			TotalTime:   details.TotalTime,
+			Format:      details.Format,
+			Genre:       details.Genre,
+		})
+	}
+	return folders
+}
+
+// albumFromGroup builds an Album from a discgroup.Group. URI is
+// group.RootDir -- NOT path.Dir(group.FirstTrack) -- so a grouped box set's
+// URI is the common parent directory, making MPD's recursive
+// `search base <uri>` (via GetAlbumTracks/SearchByBase) return every disc's
+// tracks with no new query logic. DiscCount is only set when the group is
+// genuinely a multi-disc box set (>1); otherwise it stays 0 so `omitempty`
+// drops it, matching this package's existing "0/unset means ordinary
+// single-disc album" convention. includeGenre matches GetArtistAlbums's
+// pre-existing behavior of populating Genre, which GetAlbums's album shape
+// has never set.
+func albumFromGroup(g discgroup.Group, sourceType SourceType, includeGenre bool) Album {
+	uri := g.RootDir
+
+	albumID := generateID(g.Album + "\x00" + g.AlbumArtist + "\x00" + uri)
+
+	albumArt := ""
+	if g.FirstTrack != "" {
+		albumArt = "/albumart?path=" + g.FirstTrack
+	}
+
+	var sampleRate, bitDepth int
+	if g.Format != "" {
+		parts := strings.Split(g.Format, ":")
+		if len(parts) >= 2 {
+			sampleRate, _ = strconv.Atoi(parts[0])
+			bitDepth, _ = strconv.Atoi(parts[1])
+		}
+	}
+	trackType := ""
+	if g.FirstTrack != "" {
+		if idx := strings.LastIndex(g.FirstTrack, "."); idx >= 0 {
+			trackType = strings.ToLower(g.FirstTrack[idx+1:])
+		}
+	}
+	quality := formatQualityLabel(sampleRate, bitDepth, trackType)
+
+	discCount := 0
+	if g.DiscCount > 1 {
+		discCount = g.DiscCount
+	}
+
+	album := Album{
+		ID:         albumID,
+		Title:      g.Album,
+		Artist:     g.AlbumArtist,
+		URI:        uri,
+		AlbumArt:   albumArt,
+		TrackCount: g.TrackCount,
+		Source:     sourceType,
+		Quality:    quality,
+		TrackType:  trackType,
+		DiscCount:  discCount,
+	}
+	if includeGenre {
+		album.Genre = g.Genre
+	}
+	return album
+}
+
+// applyDupeBadges computes BROWSE-01/02/03 duplicate-disambiguation badges
+// (internal/infra/dupebadge) across the full album list and writes results
+// back into each Album.Badge by index. discs must be the same length as
+// albums, aligned by index (each album's representative discgroup.Group.Disc
+// value, threaded through without being exposed on Album itself). A missing
+// or short discs slice degrades to "" per-candidate, which only affects the
+// disc precedence tier (quality and source tiers are unaffected).
+func applyDupeBadges(albums []Album, discs []string) {
+	if len(albums) == 0 {
+		return
+	}
+
+	candidates := make([]dupebadge.Candidate, len(albums))
+	for i, a := range albums {
+		disc := ""
+		if i < len(discs) {
+			disc = discs[i]
+		}
+		candidates[i] = dupebadge.Candidate{
+			Title:   a.Title,
+			Artist:  a.Artist,
+			Quality: a.Quality,
+			Disc:    disc,
+			Source:  string(a.Source),
+		}
+	}
+
+	badges := dupebadge.Compute(candidates)
+	for i := range albums {
+		albums[i].Badge = badges[i]
+	}
 }
 
 // sortAlbums sorts albums by the specified order.
@@ -374,6 +468,7 @@ func (s *Service) GetArtists(req GetArtistsRequest) ArtistsResponse {
 // album covers render.
 func (s *Service) GetArtistAlbums(req GetArtistAlbumsRequest) ArtistAlbumsResponse {
 	albums := make([]Album, 0)
+	var discs []string
 
 	// Scope to all sources — artist filtering at this layer is by name only.
 	basePaths := s.getBasePathsForScope(ScopeAll)
@@ -386,56 +481,28 @@ func (s *Service) GetArtistAlbums(req GetArtistAlbumsRequest) ArtistAlbumsRespon
 			continue
 		}
 
-		for _, details := range albumDetails {
+		// Group the FULL per-basePath AlbumDetails first, then filter by
+		// artist from the grouped output -- grouping never mixes different
+		// AlbumArtist values by construction (discgroup clusters by
+		// (Album, AlbumArtist)), so filtering after grouping is equivalent
+		// to filtering before it, without needing to special-case it.
+		groups := discgroup.GroupFolders(foldersFromAlbumDetails(albumDetails))
+
+		for _, g := range groups {
 			// Case-insensitive AlbumArtist match — MPD tag casing is unreliable.
-			if !strings.EqualFold(details.AlbumArtist, req.Artist) {
+			if !strings.EqualFold(g.AlbumArtist, req.Artist) {
 				continue
 			}
 
-			// Derive URI from the first track's directory.
-			uri := ""
-			if details.FirstTrack != "" {
-				uri = path.Dir(details.FirstTrack)
-			}
-
-			albumID := generateID(details.Album + "\x00" + details.AlbumArtist + "\x00" + uri)
-
-			albumArt := ""
-			if details.FirstTrack != "" {
-				albumArt = "/albumart?path=" + details.FirstTrack
-			}
-
-			// Parse audio format and detect track type (same logic as GetAlbums).
-			var sampleRate, bitDepth int
-			if details.Format != "" {
-				parts := strings.Split(details.Format, ":")
-				if len(parts) >= 2 {
-					sampleRate, _ = strconv.Atoi(parts[0])
-					bitDepth, _ = strconv.Atoi(parts[1])
-				}
-			}
-			trackType := ""
-			if details.FirstTrack != "" {
-				if idx := strings.LastIndex(details.FirstTrack, "."); idx >= 0 {
-					trackType = strings.ToLower(details.FirstTrack[idx+1:])
-				}
-			}
-			quality := formatQualityLabel(sampleRate, bitDepth, trackType)
-
-			albums = append(albums, Album{
-				ID:         albumID,
-				Title:      details.Album,
-				Artist:     details.AlbumArtist,
-				URI:        uri,
-				AlbumArt:   albumArt,
-				TrackCount: details.TrackCount,
-				Source:     sourceType,
-				Quality:    quality,
-				TrackType:  trackType,
-				Genre:      details.Genre,
-			})
+			albums = append(albums, albumFromGroup(g, sourceType, true))
+			discs = append(discs, g.Disc)
 		}
 	}
+
+	// Badging across the full merged list -- see GetAlbums's comment on why
+	// this cannot be done per basePath (cross-source duplicates like "The
+	// Light For Days" LOCAL vs USB).
+	applyDupeBadges(albums, discs)
 
 	s.sortAlbums(albums, req.Sort)
 
