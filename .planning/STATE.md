@@ -10,7 +10,7 @@ progress:
   total_phases: 3
   completed_phases: 0
   total_plans: 7
-  completed_plans: 5
+  completed_plans: 6
   percent: 0
 ---
 
@@ -28,7 +28,7 @@ browse surface is honest about what it's showing.
 
 Phase: 1 of 3 (Data Integrity Foundation)
 Plan: 4 of 7 complete in current phase (4 waves)
-Status: Ready to execute
+Status: Executing — 6/7 done; 01-07 blocked on user retagging
 Last activity: 2026-08-11
 
 Progress: [░░░░░░░░░░] 0%

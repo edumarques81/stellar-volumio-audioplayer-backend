@@ -48,7 +48,7 @@ Plans:
 - [x] 01-03-PLAN.md — Enumerate ._ junk on the Pi into a manifest + human checkpoint before deletion (DATA-03)
 - [x] 01-04-PLAN.md — Delete manifested ._ files, restore read-only mount, verify mpc stats (DATA-03)
 - [x] 01-05-PLAN.md — Deploy hardened backend + live ._-recurrence regression test (DATA-04)
-- [ ] 01-06-PLAN.md — Produce the DATA-01 retag recommendation list + human-action handoff (DATA-01)
+- [x] 01-06-PLAN.md — Produce the DATA-01 retag recommendation list + human-action handoff (DATA-01)
 - [ ] 01-07-PLAN.md — Verify retag landed + skippedCount reads 0 (DATA-01, DATA-02; blocked on the user's own retag step)
 
 ### Phase 2: Artist Identity & Artwork Migration
