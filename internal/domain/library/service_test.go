@@ -521,6 +521,110 @@ func TestService_GetArtists_Pagination(t *testing.T) {
 	}
 }
 
+// TestService_GetArtists_CollapsesDoubleSpaceRoleSuffix verifies ARTIST-01
+// on the MPD-direct fallback path: the real Karajan album shape --
+// AlbumArtist already "Herbert von Karajan" but raw Artist tag
+// "Herbert von Karajan  Wiener Philharmoniker" (double space) -- collapses
+// to exactly one Artist row named "Herbert von Karajan", matching what
+// AlbumArtist already says (per 02-CONTEXT.md's "visible acceptance case").
+func TestService_GetArtists_CollapsesDoubleSpaceRoleSuffix(t *testing.T) {
+	mockMPD := &MockMPDClient{
+		ListArtistsResponse: []string{"Herbert von Karajan  Wiener Philharmoniker"},
+		FindAlbumsByArtistResp: map[string][]AlbumInfo{
+			"Herbert von Karajan  Wiener Philharmoniker": {{Album: "Symphony No. 5", AlbumArtist: "Herbert von Karajan"}},
+		},
+	}
+
+	service := NewService(mockMPD, &MockPathClassifier{})
+	resp := service.GetArtists(GetArtistsRequest{})
+
+	if len(resp.Artists) != 1 {
+		t.Fatalf("Expected 1 artist, got %d: %+v", len(resp.Artists), resp.Artists)
+	}
+	if resp.Artists[0].Name != "Herbert von Karajan" {
+		t.Errorf("Artist name = %q, want %q", resp.Artists[0].Name, "Herbert von Karajan")
+	}
+}
+
+// TestService_GetArtists_EmptyRawNameProducesNoRow verifies ARTIST-03 on the
+// MPD-direct fallback: an empty string entry in ListArtists() must never
+// produce an Artist{Name: ""} row.
+func TestService_GetArtists_EmptyRawNameProducesNoRow(t *testing.T) {
+	mockMPD := &MockMPDClient{
+		ListArtistsResponse: []string{"", "Moby"},
+	}
+
+	service := NewService(mockMPD, &MockPathClassifier{})
+	resp := service.GetArtists(GetArtistsRequest{})
+
+	if len(resp.Artists) != 1 {
+		t.Fatalf("Expected 1 artist (empty entry skipped), got %d: %+v", len(resp.Artists), resp.Artists)
+	}
+	for _, a := range resp.Artists {
+		if a.Name == "" {
+			t.Errorf("found Artist row with empty Name — ARTIST-03 violated")
+		}
+	}
+}
+
+// TestService_GetArtists_MergesCollapsedVariantCounts verifies that two raw
+// MPD Artist tag variants collapsing to the same canonical name ("Moby")
+// produce ONE Artist row whose AlbumCount is the SUM of both variants'
+// FindAlbumsByArtist results, not a last-write-wins overwrite (Go slice
+// iteration is deterministic but the merge logic itself must not discard
+// either variant's contribution).
+func TestService_GetArtists_MergesCollapsedVariantCounts(t *testing.T) {
+	mockMPD := &MockMPDClient{
+		ListArtistsResponse: []string{"Moby", "Moby, Jim James"},
+		FindAlbumsByArtistResp: map[string][]AlbumInfo{
+			"Moby":            {{Album: "Play", AlbumArtist: "Moby"}, {Album: "18", AlbumArtist: "Moby"}, {Album: "Hotel", AlbumArtist: "Moby"}},
+			"Moby, Jim James": {{Album: "Wait for Me", AlbumArtist: "Moby"}},
+		},
+	}
+
+	service := NewService(mockMPD, &MockPathClassifier{})
+	resp := service.GetArtists(GetArtistsRequest{})
+
+	if len(resp.Artists) != 1 {
+		t.Fatalf("Expected 1 merged artist, got %d: %+v", len(resp.Artists), resp.Artists)
+	}
+	if resp.Artists[0].Name != "Moby" {
+		t.Errorf("Artist name = %q, want %q", resp.Artists[0].Name, "Moby")
+	}
+	if resp.Artists[0].AlbumCount != 4 {
+		t.Errorf("AlbumCount = %d, want 4 (3+1 merged)", resp.Artists[0].AlbumCount)
+	}
+}
+
+// TestService_GetArtists_QueryFiltersOnCanonicalName verifies that
+// req.Query filtering matches against the CANONICAL (post-collapse) name,
+// not the raw MPD tag -- e.g. querying "karajan" still matches the
+// collapsed "Herbert von Karajan" row even though the raw tag also
+// contained "Wiener Philharmoniker".
+func TestService_GetArtists_QueryFiltersOnCanonicalName(t *testing.T) {
+	mockMPD := &MockMPDClient{
+		ListArtistsResponse: []string{"Herbert von Karajan  Wiener Philharmoniker", "Radiohead"},
+	}
+
+	service := NewService(mockMPD, &MockPathClassifier{})
+	resp := service.GetArtists(GetArtistsRequest{Query: "karajan"})
+
+	if len(resp.Artists) != 1 {
+		t.Fatalf("Expected 1 artist matching 'karajan', got %d: %+v", len(resp.Artists), resp.Artists)
+	}
+	if resp.Artists[0].Name != "Herbert von Karajan" {
+		t.Errorf("Artist name = %q, want %q", resp.Artists[0].Name, "Herbert von Karajan")
+	}
+
+	// A query that only matches text present in the raw tag but NOT in the
+	// canonical (post-collapse) name must NOT match -- proving the filter
+	// runs against the canonical name, not the raw MPD tag.
+	resp2 := service.GetArtists(GetArtistsRequest{Query: "philharmoniker"})
+	if len(resp2.Artists) != 0 {
+		t.Errorf("Expected 0 artists matching 'philharmoniker' (present only in raw tag, not canonical name), got %d: %+v", len(resp2.Artists), resp2.Artists)
+	}
+}
+
 // --- GetArtistAlbums Tests ---
 
 func TestService_GetArtistAlbums_Empty(t *testing.T) {
