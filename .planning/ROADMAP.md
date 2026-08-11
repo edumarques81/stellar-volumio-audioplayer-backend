@@ -21,6 +21,7 @@ loose songs. Audio playback is never touched.
 Decimal phases appear between their surrounding integers in numeric order.
 
 - [x] **Phase 1: Data Integrity Foundation** - Remove `._` junk from MPD's index, harden the backend against it everywhere, fix the 16 untagged real songs at source (user-executed), and make future data gaps detectable instead of silent.
+- [ ] **Phase 4: Tail Cleanup — DSD Test File Conversion** - Convert the last untagged `.dff` test tone to `.dsf` on the MacBook so MPD can read its tags and `skippedCount` reaches 0. Runs after all feature phases.
 - [ ] **Phase 2: Artist Identity & Artwork Migration** - Collapse credited-collaborator artist strings to one entry per real performer and re-key existing artwork onto the new identities in the same pass, recovering the 38 orphaned album-artwork rows too.
 - [ ] **Phase 3: Browse Experience — Duplicate Badges & Empty States** - Add the quality-disambiguation badge to duplicate albums on both the LCD and the iPhone app, and make artists with only loose songs (or zero albums) render a real, playable result instead of an empty grid.
 
@@ -95,13 +96,62 @@ Plans:
 (the duplicate-detection signal and the loose-song list are new payload fields). Any event-shape
 change here is a three-repo change — update `docs/SOCKET-CONTRACT.md` and ship all three together.
 
+### Phase 4: Tail Cleanup — DSD Test File Conversion
+**Goal**: The last untagged file in the library becomes visible, taking `skippedCount` from 1 to 0 and closing the data-integrity story opened in Phase 1.
+**Mode:** mvp
+**Depends on**: Phase 3 (runs last, after all feature work)
+**Requirements**: DATA-05
+**Success Criteria** (what must be TRUE):
+  1. `USB/Sigxer SU-6 test/DSD-测试文件 ANNOUNCEMENT FOR BASIC CHECKS (Voice).dff` is replaced by a `.dsf` equivalent that MPD indexes with `Album = "Singxer SU-6 Test"` and `AlbumArtist = "Test Signals"` — verified live via `mpc search`.
+  2. The backend's `skippedCount` reads **0** after a cache rebuild (was 16 pre-Phase-1, 1 after Phase 1).
+  3. The DSD audio survives the container change bit-perfectly — the decoded stream MD5 of the `.dsf` matches the original `.dff` (`ffmpeg -nostdin -i <f> -map 0:a -f md5 -`). A DSD→PCM conversion is a FAILURE, not an acceptable outcome, on a bit-perfect appliance.
+  4. `deploy/verify-data-integrity.sh` still passes all gates, `/mnt/ssd` ends mounted `ro`, and no `._` files are created.
+**Plans**: TBD
+
+> **⚠ Feasibility investigated 2026-08-12 — this is NOT a one-liner.** The tooling to do it is not
+> on the Pi:
+> - `ffmpeg` 5.1.8 has a **dsf demuxer but no dsf or dsdiff muxer** (`ffmpeg -muxers | grep dsf` →
+>   0 hits). Upstream ffmpeg cannot *write* either DSD container. `-c:a copy` to `.dsf` will fail.
+> - `dff2dsf`, `sacd_extract`, `dsf2flac` are all absent from the Pi.
+> - Source file: `dsd_msbf`, 2ch, 42,940,056 bytes. It already carries a correct ID3 chunk written by
+>   `mutagen.dsdiff` in Phase 1 — the blocker was never the tag, it is that **MPD 0.23.12's DSDIFF
+>   decoder does not read ID3 back**. Converting the container is the workaround.
+>
+> **DECIDED (user, 2026-08-12): do the conversion on the MacBook**, not on the Pi. No appliance
+> dependency gets installed.
+>
+> **Recommended mechanism — copy the file, never mount the SSD on macOS:**
+> `scp` the `.dff` from the Pi → convert on the Mac → `scp` the `.dsf` back → remove the `.dff` on
+> the Pi from Linux. This keeps macOS away from the exFAT volume entirely, so **no `._` sidecars are
+> created** and no `dot_clean` pass is needed. Mounting the SSD on the Mac would reintroduce exactly
+> the junk Phase 1 removed.
+>
+> **Known before planning starts (checked 2026-08-12, do not re-derive):**
+> - Mac `ffmpeg` is 8.0.1 — it also has a **dsf demuxer but no dsf/dsdiff muxer**. Stock ffmpeg on
+>   either machine cannot write DSF.
+> - No `sox`, `xld`, `dbpoweramp`, `dff2dsf`, `sacd_extract`, `dsf2flac`, or AudioGate on the Mac.
+>   `numpy` 1.26.3 is present; `mutagen` is not (it is on the Pi).
+> - So Phase 4 must still pick a tool: install one via Homebrew, use a GUI converter, or write a
+>   small DFF→DSF container remuxer (both wrap the same DSD bitstream, but DSF is planar 4096-byte
+>   blocks per channel and typically LSB-first, while this DFF is interleaved `dsd_msbf` — so the
+>   remux needs de-interleaving and bit-order reversal, not a byte copy).
+>
+> **Fallback if conversion proves not worth it:** delete the file, or accept it. This is a **DAC
+> verification tone, not music**, and `skippedCount: 1` is now legible rather than silent — which was
+> the actual Phase 1 goal. Criterion 3 (bit-perfect DSD survival) is non-negotiable; a DSD→PCM
+> "conversion" fails this phase rather than completing it.
+
+Plans:
+- [ ] 04-01: TBD
+
 ## Progress
 
 **Execution Order:**
-Phases execute in numeric order: 1 → 2 → 3
+Phases execute in numeric order: 1 → 2 → 3 → 4
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
 | 1. Data Integrity Foundation | 5/7 | In Progress|  |
 | 2. Artist Identity & Artwork Migration | 0/TBD | Not started | - |
 | 3. Browse Experience — Duplicate Badges & Empty States | 0/TBD | Not started | - |
+| 4. Tail Cleanup — DSD Test File Conversion | 0/TBD | Not started | - |

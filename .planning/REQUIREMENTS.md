@@ -78,6 +78,14 @@ browse surface is honest about what it's showing.
 - [ ] **BROWSE-04**: An artist whose tracks belong to no album renders those tracks as a playable
   song list rather than an empty album grid.
 
+### Tail Cleanup
+
+- [ ] **DATA-05**: The last untagged file — `USB/Sigxer SU-6 test/DSD-测试文件 ANNOUNCEMENT FOR BASIC
+  CHECKS (Voice).dff` — is converted to `.dsf` **on the MacBook** (copy off the Pi, convert, copy
+  back; never mount the SSD on macOS) so MPD indexes its `Album`/`AlbumArtist` and `skippedCount`
+  reaches 0. The DSD bitstream must survive bit-perfectly — a DSD→PCM conversion fails this
+  requirement. Runs last, after all feature phases.
+
 ## v2 Requirements
 
 Deferred. Tracked but not in this roadmap.
@@ -136,11 +144,12 @@ Which phases cover which requirements. Filled during roadmap creation.
 | BROWSE-02 | Phase 3 | Pending |
 | BROWSE-03 | Phase 3 | Pending |
 | BROWSE-04 | Phase 3 | Pending |
+| DATA-05 | Phase 4 | Pending |
 
 **Coverage:**
 
-- v1 requirements: 15 total
-- Mapped to phases: 15 (Phase 1: 4, Phase 2: 6, Phase 3: 5)
+- v1 requirements: 16 total
+- Mapped to phases: 16 (Phase 1: 4, Phase 2: 6, Phase 3: 5, Phase 4: 1)
 - Unmapped: 0 ✓
 
 ---
