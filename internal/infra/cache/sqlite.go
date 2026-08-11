@@ -16,7 +16,7 @@ import (
 
 const (
 	// CurrentSchemaVersion is the current database schema version.
-	CurrentSchemaVersion = "5"
+	CurrentSchemaVersion = "6"
 
 	// DefaultDBPath is the default path for the cache database.
 	DefaultDBPath = "data/library.db"
@@ -145,6 +145,24 @@ func (d *DB) initSchema() error {
 			}
 		}
 
+		// Migration to version "6": add badge and disc_count columns to the
+		// existing albums table (BROWSE-01/02/03/07 -- Phase 3 Plan 04). Same
+		// tolerant pattern as every prior migration in this function: SQLite
+		// has no "ADD COLUMN IF NOT EXISTS", so a "duplicate column name"
+		// error on a second run is expected and logged, not fatal -- keeps
+		// this migration idempotent.
+		if currentVersion == "1" || currentVersion == "2" || currentVersion == "3" || currentVersion == "4" || currentVersion == "5" {
+			migrations := []string{
+				"ALTER TABLE albums ADD COLUMN badge TEXT DEFAULT ''",
+				"ALTER TABLE albums ADD COLUMN disc_count INTEGER DEFAULT 0",
+			}
+			for _, m := range migrations {
+				if _, err := d.db.Exec(m); err != nil {
+					log.Warn().Err(err).Str("sql", m).Msg("Migration statement failed (column may already exist)")
+				}
+			}
+		}
+
 		return d.setMeta("schema_version", CurrentSchemaVersion)
 	}
 
@@ -169,6 +187,8 @@ func (d *DB) createSchema() error {
 		bit_depth INTEGER DEFAULT 0,
 		track_type TEXT DEFAULT '',
 		genre TEXT DEFAULT '',
+		badge TEXT DEFAULT '',
+		disc_count INTEGER DEFAULT 0,
 		added_at TEXT,
 		last_played TEXT,
 		artwork_id TEXT,

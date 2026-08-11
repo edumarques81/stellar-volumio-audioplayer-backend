@@ -69,19 +69,19 @@ func (dao *DAO) InsertAlbumTx(tx *sql.Tx, album *CachedAlbum) error {
 
 	_, err := tx.Exec(`
 		INSERT INTO albums (id, title, album_artist, uri, first_track, track_count, total_duration,
-			source, year, sample_rate, bit_depth, track_type, genre, added_at, artwork_id, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			source, year, sample_rate, bit_depth, track_type, genre, badge, disc_count, added_at, artwork_id, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(id) DO UPDATE SET
 			title = ?, album_artist = ?, uri = ?, first_track = COALESCE(?, albums.first_track),
 			track_count = ?, total_duration = ?,
-			source = ?, year = ?, sample_rate = ?, bit_depth = ?, track_type = ?, genre = ?,
+			source = ?, year = ?, sample_rate = ?, bit_depth = ?, track_type = ?, genre = ?, badge = ?, disc_count = ?,
 			added_at = COALESCE(albums.added_at, ?),
 			artwork_id = COALESCE(?, albums.artwork_id), updated_at = ?
 	`,
 		album.ID, album.Title, album.AlbumArtist, album.URI, album.FirstTrack, album.TrackCount, album.TotalDuration,
-		album.Source, album.Year, album.SampleRate, album.BitDepth, album.TrackType, album.Genre, addedAt, album.ArtworkID, now, now,
+		album.Source, album.Year, album.SampleRate, album.BitDepth, album.TrackType, album.Genre, album.Badge, album.DiscCount, addedAt, album.ArtworkID, now, now,
 		album.Title, album.AlbumArtist, album.URI, album.FirstTrack, album.TrackCount, album.TotalDuration,
-		album.Source, album.Year, album.SampleRate, album.BitDepth, album.TrackType, album.Genre, addedAt, album.ArtworkID, now,
+		album.Source, album.Year, album.SampleRate, album.BitDepth, album.TrackType, album.Genre, album.Badge, album.DiscCount, addedAt, album.ArtworkID, now,
 	)
 	return err
 }
@@ -244,7 +244,7 @@ func (dao *DAO) QueryAlbums(filter AlbumFilter, sort SortOrder, pag Pagination) 
 	// Get paginated results
 	query := fmt.Sprintf(`
 		SELECT id, title, album_artist, uri, first_track, track_count, total_duration, source,
-			year, sample_rate, bit_depth, track_type, genre, added_at, last_played, artwork_id, created_at, updated_at
+			year, sample_rate, bit_depth, track_type, genre, badge, disc_count, added_at, last_played, artwork_id, created_at, updated_at
 		FROM albums %s %s LIMIT ? OFFSET ?
 	`, whereClause, orderClause)
 
@@ -267,6 +267,7 @@ func (dao *DAO) QueryAlbums(filter AlbumFilter, sort SortOrder, pag Pagination) 
 		err := rows.Scan(
 			&album.ID, &album.Title, &album.AlbumArtist, &album.URI, &firstTrack, &album.TrackCount,
 			&album.TotalDuration, &album.Source, &year, &sampleRate, &bitDepth, &trackType, &genre,
+			&album.Badge, &album.DiscCount,
 			&addedAt, &lastPlayed, &artworkID, &createdAt, &updatedAt,
 		)
 		if err != nil {

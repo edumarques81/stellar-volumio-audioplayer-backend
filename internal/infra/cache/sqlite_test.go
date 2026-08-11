@@ -551,8 +551,8 @@ func TestMigration_V4ToV5_AddsGenreColumn(t *testing.T) {
 	if stats.SchemaVersion != cache.CurrentSchemaVersion {
 		t.Fatalf("schema_version = %q, want %q", stats.SchemaVersion, cache.CurrentSchemaVersion)
 	}
-	if cache.CurrentSchemaVersion != "5" {
-		t.Fatalf("CurrentSchemaVersion = %q, want %q", cache.CurrentSchemaVersion, "5")
+	if cache.CurrentSchemaVersion != "6" {
+		t.Fatalf("CurrentSchemaVersion = %q, want %q", cache.CurrentSchemaVersion, "6")
 	}
 
 	// 2. genre column is present on the albums table.
