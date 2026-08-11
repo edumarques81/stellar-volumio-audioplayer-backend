@@ -34,7 +34,7 @@ browse surface is honest about what it's showing.
 
 ### Artist Listing
 
-- [ ] **ARTIST-01**: The artist list shows one entry per main artist. Credited-collaborator strings
+- [x] **ARTIST-01**: The artist list shows one entry per main artist. Credited-collaborator strings
   collapse to the first credited performer, so `Herbert von Karajan  Wiener Philharmoniker` appears
   as `Herbert von Karajan` and every `Luciano Pavarotti, <label>` variant lands under
   `Luciano Pavarotti`.
@@ -46,7 +46,7 @@ browse surface is honest about what it's showing.
   (`Ella Fitzgerald with Nelson Riddle And His Orchestra`) — proven by a table-driven test built
   from the actual 123 artist values.
 
-- [ ] **ARTIST-03**: The empty artist value present in MPD's `list artist` output does not produce a
+- [x] **ARTIST-03**: The empty artist value present in MPD's `list artist` output does not produce a
   blank row in the artist list on either client.
 
 - [ ] **ARTIST-04**: Tapping an artist always leads somewhere real — an artist that resolves to zero
@@ -54,14 +54,14 @@ browse surface is honest about what it's showing.
 
 ### Artwork Identity
 
-- [ ] **ART-01**: Existing artist artwork survives the ARTIST-01 collapse. A one-shot migration
+- [x] **ART-01**: Existing artist artwork survives the ARTIST-01 collapse. A one-shot migration
   re-points artwork rows onto the new artist identities; no artwork is re-downloaded from
   Fanart.tv / Deezer / MusicBrainz.
 
-- [ ] **ART-02**: The 38 album-artwork rows orphaned by the NAS→SSD move are reconnected to their
+- [x] **ART-02**: The 38 album-artwork rows orphaned by the NAS→SSD move are reconnected to their
   albums, reducing "albums with no artwork link" from 39 toward 0 without re-fetching.
 
-- [ ] **ART-03**: The migration is idempotent and reversible — re-running it changes nothing, and
+- [x] **ART-03**: The migration is idempotent and reversible — re-running it changes nothing, and
   the artwork files on disk are never deleted by it.
 
 ### Browse Experience
@@ -137,9 +137,9 @@ Which phases cover which requirements. Filled during roadmap creation.
 | ARTIST-02 | Phase 2 | Complete |
 | ARTIST-03 | Phase 2 | In Progress (02-01 Collapse("") returns "" without panicking; 02-02 wired the empty-value skip into both buildArtists and Service.GetArtists, unit-tested — code-complete but unverified on the Pi; gated on 02-04 same as ARTIST-01) |
 | ARTIST-04 | Phase 3 | Pending |
-| ART-01 | Phase 2 | Pending |
-| ART-02 | Phase 2 | Pending |
-| ART-03 | Phase 2 | Pending |
+| ART-01 | Phase 2 | Complete |
+| ART-02 | Phase 2 | Complete (1/38 recovered; 39 of 40 unlinked albums already display covers via /albumart — see 02-04-SUMMARY) |
+| ART-03 | Phase 2 | Complete |
 | BROWSE-01 | Phase 3 | Pending |
 | BROWSE-02 | Phase 3 | Pending |
 | BROWSE-03 | Phase 3 | Pending |

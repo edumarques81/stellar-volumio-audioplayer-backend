@@ -21,7 +21,7 @@ loose songs. Audio playback is never touched.
 Decimal phases appear between their surrounding integers in numeric order.
 
 - [x] **Phase 1: Data Integrity Foundation** - Remove `._` junk from MPD's index, harden the backend against it everywhere, fix the 16 untagged real songs at source (user-executed), and make future data gaps detectable instead of silent.
-- [ ] **Phase 2: Artist Identity & Artwork Migration** - Collapse credited-collaborator artist strings to one entry per real performer and re-key existing artwork onto the new identities in the same pass, recovering the 38 orphaned album-artwork rows too.
+- [x] **Phase 2: Artist Identity & Artwork Migration** - Collapse credited-collaborator artist strings to one entry per real performer and re-key existing artwork onto the new identities in the same pass, recovering the 38 orphaned album-artwork rows too.
 - [ ] **Phase 3: Browse Experience — Duplicate Badges & Empty States** - Add the quality-disambiguation badge to duplicate albums on both the LCD and the iPhone app, and make artists with only loose songs (or zero albums) render a real, playable result instead of an empty grid.
 - [ ] **Phase 4: Tail Cleanup — DSD Test File Conversion** - Convert the last untagged `.dff` test tone to `.dsf` on the MacBook so MPD can read its tags and `skippedCount` reaches 0. Runs after all feature phases.
 
@@ -73,7 +73,7 @@ Plans:
 - [x] 02-01-PLAN.md — TDD: pure Collapse() artist-name rule, proven against the real 124-value corpus (ARTIST-01, ARTIST-02, ARTIST-03)
 - [x] 02-02-PLAN.md — Wire Collapse() into the cache builder + the MPD-direct fallback, merging album counts across collapsed variants (ARTIST-01, ARTIST-02, ARTIST-03)
 - [x] 02-03-PLAN.md — Deterministic artist-artwork rekey (auto-runs on boot) + album-artwork orphan rekey helper, unit-tested, zero live Pi contact (ART-01, ART-02, ART-03)
-- [ ] 02-04-PLAN.md — Deploy collapse + migration together, human-confirmed album-artwork matching, live verification (autonomous: false) (ARTIST-01, ARTIST-02, ARTIST-03, ART-01, ART-02, ART-03)
+- [x] 02-04-PLAN.md — Deploy collapse + migration together, human-confirmed album-artwork matching, live verification (autonomous: false) (ARTIST-01, ARTIST-02, ARTIST-03, ART-01, ART-02, ART-03)
 
 ### Phase 3: Browse Experience — Duplicate Badges & Empty States
 
