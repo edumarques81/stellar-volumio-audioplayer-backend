@@ -27,7 +27,7 @@ browse surface is honest about what it's showing.
 ## Current Position
 
 Phase: 1 of 3 (Data Integrity Foundation)
-Plan: 4 of 7 complete in current phase (4 waves)
+Plan: 6 of 7 complete in current phase (4 waves)
 Status: Executing — 6/7 done; 01-07 blocked on user retagging
 Last activity: 2026-08-11
 
