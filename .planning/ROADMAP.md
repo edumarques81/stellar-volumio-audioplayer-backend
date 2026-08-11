@@ -147,6 +147,47 @@ change here is a three-repo change — update `docs/SOCKET-CONTRACT.md` and ship
 Plans:
 - [ ] 04-01: TBD
 
+## Backlog
+
+Unsequenced items. Not part of the v1.0 milestone phases; promote with `/gsd:review-backlog`.
+
+### Phase 999.1: Miles Ahead — cover art not displaying + booklet in metadata (BACKLOG)
+**Captured:** 2026-08-12 (user: *"Miles Ahead album from Miles Davis cover art and booklet … I can't see a cover art for it now"*)
+
+**Album:** `Miles Ahead - Miles Davis + 19`
+**Album artist tag:** `Miles Davis - Arranged and Directed by Gil Evans`
+**Folder:** `/mnt/ssd/Music/Miles Ahead - Miles Davis + 19-DSF-11289k-1b/` (10 × `.dsf`, DSD)
+**Cache row:** `e8280b866030e11f2ae8b81fc6f236da` — **`artwork_id` is NULL**
+
+**⚠ Investigated 2026-08-12 — the naive framing is wrong. The art is NOT missing.**
+- The `.dsf` files **already carry embedded cover art**: `ffprobe` shows a second stream,
+  `codec_name=mjpeg codec_type=video`, alongside `dsd_lsbf_planar` audio.
+- The backend **already serves it successfully**:
+  `GET /albumart?path=USB/Miles Ahead - Miles Davis + 19-DSF-11289k-1b/01-Springsville.dsf`
+  → **HTTP 200, 440,399 bytes**.
+- The **booklet PDF is already on the SSD** too:
+  `Miles Davis + 19 - Miles Ahead  Booklet.pdf` (note the double space in the filename). The user also
+  uploaded a copy (5,194,438 bytes, 3 pages, 2 embedded images).
+
+So this is **not** "fetch missing artwork". The real question is why a cover the backend returns with
+HTTP 200 does not reach the screen. Investigate in this order:
+1. Which URL the LCD/iOS actually requests for this album, and whether it 200s (the album row's
+   `first_track` may differ from the file that works, or URL-encoding of `+` / double-space may break).
+   Note `+` in a URL query decodes to a space — this album's path contains a literal `+`.
+2. Whether the empty `artwork_id` matters on the path the client takes. Per
+   `reference_stellar_albumart_bypasses_artwork_table`, `/albumart?path=` bypasses the artwork table
+   entirely while `/artistart` requires it — so a NULL `artwork_id` should NOT block the cover.
+3. Whether DSD/`.dsf` embedded art is handled differently from FLAC anywhere in the resolution chain.
+
+**Second, separate ask:** surface the booklet PDF in album metadata. No mechanism exists today — the
+Socket.IO contract has no booklet/attachment field, so this needs a design decision (new field on the
+album payload + a client affordance to open it) before it is plannable.
+
+**Relationship to Phase 2:** the album artist `Miles Davis - Arranged and Directed by Gil Evans`
+contains ` - `, so Phase 2's collapse rule will render it as `Miles Davis`. Worth confirming that does
+not further disturb this album's artwork linkage.
+
+
 ## Progress
 
 **Execution Order:**
