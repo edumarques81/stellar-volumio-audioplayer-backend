@@ -66,15 +66,15 @@ browse surface is honest about what it's showing.
 
 ### Browse Experience
 
-- [ ] **BROWSE-01**: When two or more albums share the same title and artist, each tile shows a badge on
+- [x] **BROWSE-01**: When two or more albums share the same title and artist, each tile shows a badge on
   the **LCD** carrying whatever actually differs within that group — quality if it differs, else disc,
   else source. (Revised 2026-08-12: 6 of 8 live duplicate groups have identical quality, so a
   quality-only badge would disambiguate nothing.)
 
-- [ ] **BROWSE-02**: The same duplicate-disambiguating badge appears in the **iPhone app**'s album
+- [x] **BROWSE-02**: The same duplicate-disambiguating badge appears in the **iPhone app**'s album
   and artist-album grids.
 
-- [ ] **BROWSE-03**: No badge is shown when an album's title+artist is unique, so the grid stays
+- [x] **BROWSE-03**: No badge is shown when an album's title+artist is unique, so the grid stays
   clean for the common case.
 
 - [x] **BROWSE-07**: Multi-disc box sets render as **one album tile that drills into its discs**,
@@ -147,9 +147,9 @@ Which phases cover which requirements. Filled during roadmap creation.
 | ART-01 | Phase 2 | Complete |
 | ART-02 | Phase 2 | Complete (1/38 recovered; 39 of 40 unlinked albums already display covers via /albumart — see 02-04-SUMMARY) |
 | ART-03 | Phase 2 | Complete |
-| BROWSE-01 | Phase 3 | Pending |
-| BROWSE-02 | Phase 3 | Pending |
-| BROWSE-03 | Phase 3 | Pending |
+| BROWSE-01 | Phase 3 | Complete |
+| BROWSE-02 | Phase 3 | Complete |
+| BROWSE-03 | Phase 3 | Complete |
 | BROWSE-04 | Phase 3 | Pending |
 | BROWSE-07 | Phase 3 | Complete |
 | DATA-05 | Phase 4 | Pending |
