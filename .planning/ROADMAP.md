@@ -35,10 +35,16 @@ Decimal phases appear between their surrounding integers in numeric order.
   2. The backend produces a precise list of the 16 untagged real songs (3 folders) with recommended `Album`/`AlbumArtist` values; after the user retags them in their own editor and MPD rescans, the "R. Strauss — Also Sprach Zarathustra / Till Eulenspiegel" album (Karajan/VPO) appears in Library → Albums on the LCD with all 10 tracks present and playable, and the `toe` and "Singxer SU-6 test" folders likewise appear under their artists.
   3. The cache-status payload (or an equivalent field/log) reports a count of skipped/untagged files instead of quietly omitting them; the count reads 0 once the retag in criterion 2 is verified.
   4. Copying a `._`-prefixed file onto the SSD and rescanning does not change any album's track count or any artist's album count — verified against at least `GetAlbumTracks` and `GetArtistAlbums`, not just the one call site that was previously hardened.
-**Plans**: TBD
+**Plans**: 7 plans (4 waves)
 
 Plans:
-- [ ] 01-01: TBD
+- [ ] 01-01-PLAN.md — Shared internal/infra/musicfile resource-fork predicate + GetAlbumTracks refactor (DATA-04)
+- [ ] 01-02-PLAN.md — Harden GetAlbumDetails against ._ junk + wire skipped/untagged count to cache + Socket.IO (DATA-04, DATA-02)
+- [ ] 01-03-PLAN.md — Enumerate ._ junk on the Pi into a manifest + human checkpoint before deletion (DATA-03)
+- [ ] 01-04-PLAN.md — Delete manifested ._ files, restore read-only mount, verify mpc stats (DATA-03)
+- [ ] 01-05-PLAN.md — Deploy hardened backend + live ._-recurrence regression test (DATA-04)
+- [ ] 01-06-PLAN.md — Produce the DATA-01 retag recommendation list + human-action handoff (DATA-01)
+- [ ] 01-07-PLAN.md — Verify retag landed + skippedCount reads 0 (DATA-01, DATA-02; blocked on the user's own retag step)
 
 ### Phase 2: Artist Identity & Artwork Migration
 **Goal**: The artist list shows one row per real performer, using a uniform collapse rule validated against the real library, and every artist/album artwork row that existed before the collapse still resolves after it.
@@ -83,6 +89,6 @@ Phases execute in numeric order: 1 → 2 → 3
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
-| 1. Data Integrity Foundation | 0/TBD | Not started | - |
+| 1. Data Integrity Foundation | 0/7 | Not started | - |
 | 2. Artist Identity & Artwork Migration | 0/TBD | Not started | - |
 | 3. Browse Experience — Duplicate Badges & Empty States | 0/TBD | Not started | - |
