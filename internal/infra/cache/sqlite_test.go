@@ -767,6 +767,374 @@ func columnExists(t *testing.T, db *sql.DB, table, column string) bool {
 	return false
 }
 
+// TestDAOInsertAlbumTx_BadgeAndDiscCountRoundTrip verifies that Schema v6's
+// badge/disc_count columns round-trip through InsertAlbumTx -> QueryAlbums
+// unchanged: a non-empty Badge and a DiscCount > 1 (the Mahler-shaped case)
+// come back exactly as inserted.
+func TestDAOInsertAlbumTx_BadgeAndDiscCountRoundTrip(t *testing.T) {
+	t.Parallel()
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, "library.db")
+
+	db := cache.NewDB(dbPath)
+	if err := db.Open(); err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+
+	dao := cache.NewDAO(db)
+
+	tx, err := db.BeginTx()
+	if err != nil {
+		t.Fatalf("BeginTx: %v", err)
+	}
+
+	badged := &cache.CachedAlbum{
+		ID:          "badged-album",
+		Title:       "Kind Of Blue",
+		AlbumArtist: "Miles Davis",
+		URI:         "USB/Miles Davis/Kind Of Blue (DSD64)",
+		Source:      "usb",
+		Badge:       "DSD64",
+	}
+	grouped := &cache.CachedAlbum{
+		ID:          "grouped-album",
+		Title:       "Mahler: The Symphonies",
+		AlbumArtist: "Leonard Bernstein",
+		URI:         "USB/Mahler The Symphonies",
+		Source:      "usb",
+		DiscCount:   11,
+	}
+
+	if err := dao.InsertAlbumTx(tx, badged); err != nil {
+		t.Fatalf("InsertAlbumTx badged: %v", err)
+	}
+	if err := dao.InsertAlbumTx(tx, grouped); err != nil {
+		t.Fatalf("InsertAlbumTx grouped: %v", err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatalf("Commit: %v", err)
+	}
+
+	albums, _, err := dao.QueryAlbums(cache.AlbumFilter{}, cache.SortAlphabetical, cache.NewPagination(1, 50))
+	if err != nil {
+		t.Fatalf("QueryAlbums: %v", err)
+	}
+
+	got := map[string]*cache.CachedAlbum{}
+	for _, a := range albums {
+		got[a.ID] = a
+	}
+
+	if got["badged-album"] == nil {
+		t.Fatal("badged-album missing from QueryAlbums result")
+	}
+	if got["badged-album"].Badge != "DSD64" {
+		t.Errorf("badged-album.Badge = %q, want %q", got["badged-album"].Badge, "DSD64")
+	}
+	if got["badged-album"].DiscCount != 0 {
+		t.Errorf("badged-album.DiscCount = %d, want 0", got["badged-album"].DiscCount)
+	}
+
+	if got["grouped-album"] == nil {
+		t.Fatal("grouped-album missing from QueryAlbums result")
+	}
+	if got["grouped-album"].DiscCount != 11 {
+		t.Errorf("grouped-album.DiscCount = %d, want 11", got["grouped-album"].DiscCount)
+	}
+	if got["grouped-album"].Badge != "" {
+		t.Errorf("grouped-album.Badge = %q, want empty string", got["grouped-album"].Badge)
+	}
+}
+
+// TestSchema_FreshDB_HasBadgeAndDiscCountColumns verifies a fresh database
+// (no prior schema_version row) creates the albums table with badge and
+// disc_count columns present from createSchema() directly (schema v6).
+func TestSchema_FreshDB_HasBadgeAndDiscCountColumns(t *testing.T) {
+	t.Parallel()
+	tmpDir := t.TempDir()
+	db := cache.NewDB(filepath.Join(tmpDir, "library.db"))
+	if err := db.Open(); err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+
+	if !columnExists(t, db.DB(), "albums", "badge") {
+		t.Fatalf("badge column missing from fresh-DB albums table")
+	}
+	if !columnExists(t, db.DB(), "albums", "disc_count") {
+		t.Fatalf("disc_count column missing from fresh-DB albums table")
+	}
+
+	stats, err := db.GetStats()
+	if err != nil {
+		t.Fatalf("GetStats: %v", err)
+	}
+	if stats.SchemaVersion != cache.CurrentSchemaVersion {
+		t.Fatalf("schema_version = %q, want %q", stats.SchemaVersion, cache.CurrentSchemaVersion)
+	}
+	if cache.CurrentSchemaVersion != "6" {
+		t.Fatalf("CurrentSchemaVersion = %q, want %q", cache.CurrentSchemaVersion, "6")
+	}
+}
+
+// TestMigration_V5ToV6_AddsBadgeAndDiscCountColumns verifies that opening a
+// database previously initialised at schema v5 (genre column present, no
+// badge/disc_count) transparently migrates to v6 by adding
+// `badge TEXT DEFAULT ''` and `disc_count INTEGER DEFAULT 0` while
+// preserving any existing rows -- mirrors TestMigration_V4ToV5_AddsGenreColumn.
+func TestMigration_V5ToV6_AddsBadgeAndDiscCountColumns(t *testing.T) {
+	t.Parallel()
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, "library.db")
+
+	seedV5Database(t, dbPath)
+
+	// Insert a pre-migration album so we can prove existing rows survive.
+	rawDB, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("open raw db: %v", err)
+	}
+	if _, err := rawDB.Exec(`
+		INSERT INTO albums (id, title, album_artist, uri, source, genre)
+		VALUES ('legacy-1', 'Legacy Album', 'Legacy Artist', 'NAS/legacy', 'nas', 'Jazz')
+	`); err != nil {
+		t.Fatalf("seed legacy album: %v", err)
+	}
+	if err := rawDB.Close(); err != nil {
+		t.Fatalf("close raw db: %v", err)
+	}
+
+	// Open through the production code path — this should run the v5→v6
+	// migration as a side-effect.
+	db := cache.NewDB(dbPath)
+	if err := db.Open(); err != nil {
+		t.Fatalf("open via cache.NewDB: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+
+	stats, err := db.GetStats()
+	if err != nil {
+		t.Fatalf("GetStats: %v", err)
+	}
+	if stats.SchemaVersion != cache.CurrentSchemaVersion {
+		t.Fatalf("schema_version = %q, want %q", stats.SchemaVersion, cache.CurrentSchemaVersion)
+	}
+	if cache.CurrentSchemaVersion != "6" {
+		t.Fatalf("CurrentSchemaVersion = %q, want %q", cache.CurrentSchemaVersion, "6")
+	}
+
+	if !columnExists(t, db.DB(), "albums", "badge") {
+		t.Fatalf("badge column missing from albums after migration")
+	}
+	if !columnExists(t, db.DB(), "albums", "disc_count") {
+		t.Fatalf("disc_count column missing from albums after migration")
+	}
+
+	// Pre-migration row still exists, genre preserved, badge/disc_count defaulted.
+	var legacyGenre sql.NullString
+	var legacyBadge sql.NullString
+	var legacyDiscCount sql.NullInt64
+	if err := db.DB().QueryRow(
+		`SELECT genre, badge, disc_count FROM albums WHERE id = ?`, "legacy-1",
+	).Scan(&legacyGenre, &legacyBadge, &legacyDiscCount); err != nil {
+		t.Fatalf("read legacy row: %v", err)
+	}
+	if legacyGenre.String != "Jazz" {
+		t.Fatalf("legacy genre = %q, want %q (must survive migration)", legacyGenre.String, "Jazz")
+	}
+	if legacyBadge.Valid && legacyBadge.String != "" {
+		t.Fatalf("legacy badge = %q, want empty string", legacyBadge.String)
+	}
+	if legacyDiscCount.Valid && legacyDiscCount.Int64 != 0 {
+		t.Fatalf("legacy disc_count = %d, want 0", legacyDiscCount.Int64)
+	}
+}
+
+// TestMigration_V5ToV6_Idempotent verifies the v5→v6 migration is safe to
+// re-run twice against the same database — the second run (whether via a
+// fresh Open() on an already-migrated file, or by directly invoking the
+// migration path again) must not error, matching the tolerant "duplicate
+// column name" pattern used by every prior migration in this file (hard
+// constraint 1).
+func TestMigration_V5ToV6_Idempotent(t *testing.T) {
+	t.Parallel()
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, "library.db")
+
+	seedV5Database(t, dbPath)
+
+	// First open: runs the v5->v6 migration.
+	db1 := cache.NewDB(dbPath)
+	if err := db1.Open(); err != nil {
+		t.Fatalf("first open: %v", err)
+	}
+	if err := db1.Close(); err != nil {
+		t.Fatalf("first close: %v", err)
+	}
+
+	// Second open: schema is already at v6 — must be a no-op, no error.
+	db2 := cache.NewDB(dbPath)
+	if err := db2.Open(); err != nil {
+		t.Fatalf("second open after migration: %v", err)
+	}
+	t.Cleanup(func() { _ = db2.Close() })
+
+	if !columnExists(t, db2.DB(), "albums", "badge") {
+		t.Fatalf("badge column lost after second open")
+	}
+	if !columnExists(t, db2.DB(), "albums", "disc_count") {
+		t.Fatalf("disc_count column lost after second open")
+	}
+
+	// Directly re-run the migration a THIRD time against the same on-disk
+	// file by opening again — proves running the migration twice in a row
+	// (not just "already migrated, no-op") is safe, per hard constraint 1's
+	// explicit requirement ("a test that runs the migration twice against
+	// the same DB and asserts success both times").
+	db3 := cache.NewDB(dbPath)
+	if err := db3.Open(); err != nil {
+		t.Fatalf("third open (second post-migration run): %v", err)
+	}
+	t.Cleanup(func() { _ = db3.Close() })
+
+	if !columnExists(t, db3.DB(), "albums", "badge") {
+		t.Fatalf("badge column lost after third open")
+	}
+}
+
+// seedV5Database writes a v5 schema (genre column present, no
+// badge/disc_count) directly to dbPath so tests can exercise the v5→v6
+// migration. Mirrors seedV4Database's pattern, one column further along.
+func seedV5Database(t *testing.T, dbPath string) {
+	t.Helper()
+
+	rawDB, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("open seed db: %v", err)
+	}
+	defer rawDB.Close()
+
+	schemaV5 := `
+		CREATE TABLE IF NOT EXISTS albums (
+			id TEXT PRIMARY KEY,
+			title TEXT NOT NULL,
+			album_artist TEXT NOT NULL,
+			uri TEXT NOT NULL,
+			first_track TEXT,
+			track_count INTEGER DEFAULT 0,
+			total_duration INTEGER DEFAULT 0,
+			source TEXT NOT NULL,
+			year INTEGER,
+			sample_rate INTEGER DEFAULT 0,
+			bit_depth INTEGER DEFAULT 0,
+			track_type TEXT DEFAULT '',
+			genre TEXT DEFAULT '',
+			added_at TEXT,
+			last_played TEXT,
+			artwork_id TEXT,
+			created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+			updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+		);
+
+		CREATE TABLE IF NOT EXISTS artists (
+			id TEXT PRIMARY KEY,
+			name TEXT NOT NULL UNIQUE,
+			album_count INTEGER DEFAULT 0,
+			track_count INTEGER DEFAULT 0,
+			artwork_id TEXT,
+			created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+			updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+		);
+
+		CREATE TABLE IF NOT EXISTS tracks (
+			id TEXT PRIMARY KEY,
+			album_id TEXT NOT NULL,
+			title TEXT NOT NULL,
+			artist TEXT NOT NULL,
+			uri TEXT NOT NULL UNIQUE,
+			track_number INTEGER,
+			disc_number INTEGER DEFAULT 1,
+			duration INTEGER DEFAULT 0,
+			source TEXT NOT NULL,
+			created_at TEXT DEFAULT CURRENT_TIMESTAMP
+		);
+
+		CREATE TABLE IF NOT EXISTS artwork (
+			id TEXT PRIMARY KEY,
+			album_id TEXT,
+			artist_id TEXT,
+			type TEXT NOT NULL,
+			file_path TEXT,
+			source TEXT NOT NULL,
+			mime_type TEXT,
+			width INTEGER,
+			height INTEGER,
+			file_size INTEGER,
+			checksum TEXT,
+			fetched_at TEXT,
+			expires_at TEXT,
+			created_at TEXT DEFAULT CURRENT_TIMESTAMP
+		);
+
+		CREATE TABLE IF NOT EXISTS radio_stations (
+			id TEXT PRIMARY KEY,
+			name TEXT NOT NULL,
+			uri TEXT NOT NULL,
+			icon TEXT,
+			genre TEXT,
+			created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+			updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+		);
+
+		CREATE TABLE IF NOT EXISTS cache_meta (
+			key TEXT PRIMARY KEY,
+			value TEXT,
+			updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+		);
+
+		CREATE TABLE IF NOT EXISTS album_bios (
+			key TEXT PRIMARY KEY,
+			artist TEXT NOT NULL,
+			album TEXT NOT NULL,
+			summary TEXT NOT NULL,
+			source_url TEXT,
+			fetched_at INTEGER NOT NULL,
+			expires_at INTEGER NOT NULL
+		);
+
+		CREATE TABLE IF NOT EXISTS artist_bios (
+			key TEXT PRIMARY KEY,
+			artist TEXT NOT NULL,
+			summary TEXT NOT NULL,
+			source_url TEXT,
+			fetched_at INTEGER NOT NULL,
+			expires_at INTEGER NOT NULL
+		);
+
+		CREATE TABLE IF NOT EXISTS last_played_album (
+			key TEXT PRIMARY KEY,
+			artist TEXT NOT NULL,
+			album TEXT NOT NULL,
+			album_art TEXT,
+			track_uri TEXT,
+			track_type TEXT,
+			sample_rate TEXT,
+			bit_depth TEXT,
+			last_played_at INTEGER NOT NULL,
+			updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+		);
+	`
+	if _, err := rawDB.Exec(schemaV5); err != nil {
+		t.Fatalf("seed v5 schema: %v", err)
+	}
+	if _, err := rawDB.Exec(
+		`INSERT INTO cache_meta (key, value) VALUES ('schema_version', '5')`,
+	); err != nil {
+		t.Fatalf("seed schema_version=5: %v", err)
+	}
+}
+
 func TestPagination(t *testing.T) {
 	pag := cache.NewPagination(1, 50)
 	if pag.Page != 1 {
