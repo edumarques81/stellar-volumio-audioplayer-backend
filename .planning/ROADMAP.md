@@ -89,12 +89,21 @@ Plans:
   4. Tapping into an artist whose tracks belong to no album (or who resolves to zero albums) shows a real, playable song list on both the LCD and the iPhone app instead of an empty grid — proven by a synthetic test fixture, since no artist in the live library has zero albums.
   5. `Mahler: The Symphonies` renders as ONE album tile on the LCD and the iPhone (was 11 identical tiles), and drilling into it exposes its 11 discs. `Miles Davis - Kind Of Blue` does NOT group — it stays 3 separate entries distinguished by badge, because every track is `Disc: 1`.
 
-**Plans**: TBD
+**Plans**: 10 plans (6 waves)
 **UI hint**: yes
 
 Plans:
 
-- [ ] 03-01: TBD
+- [ ] 03-01-PLAN.md — TDD: pure multi-disc box-set grouping rule (discgroup), proven against real Mahler/Kind Of Blue Pi data (BROWSE-07)
+- [ ] 03-02-PLAN.md — TDD: pure duplicate-disambiguation badge rule (dupebadge), quality->disc->source precedence (BROWSE-01, BROWSE-02, BROWSE-03)
+- [ ] 03-03-PLAN.md — Backend contract (Album.badge/discCount, Track.disc) + wire grouping/badging into the MPD-direct GetAlbums/GetArtistAlbums path + disc-aware track sort (BROWSE-01, BROWSE-02, BROWSE-03, BROWSE-07)
+- [ ] 03-04-PLAN.md — Cache schema v6 + wire grouping/badging into the cache-build path Builder.buildAlbums/CachedService.GetAlbums (BROWSE-01, BROWSE-02, BROWSE-03, BROWSE-07)
+- [ ] 03-05-PLAN.md — Loose-track fallback for GetArtistAlbums, proven by a synthetic zero-album fixture (ARTIST-04, BROWSE-04)
+- [ ] 03-06-PLAN.md — docs/SOCKET-CONTRACT.md update + backend build/deploy/live Socket.IO verification against the real 81-album library (ARTIST-04, BROWSE-01, BROWSE-02, BROWSE-03, BROWSE-04, BROWSE-07)
+- [ ] 03-07a-PLAN.md — Volumio2-UI (LCD): badge render, disc-grouped track headers, loose-track fallback (ARTIST-04, BROWSE-01, BROWSE-03, BROWSE-04, BROWSE-07)
+- [ ] 03-07b-PLAN.md — Volumio2-UI deploy + CDP screenshot verification + human checkpoint (BROWSE-01, BROWSE-03, BROWSE-07)
+- [ ] 03-08a-PLAN.md — stellar-ios: badge render on both album grids, disc-grouped track headers, loose-track fallback (ARTIST-04, BROWSE-02, BROWSE-03, BROWSE-04, BROWSE-07)
+- [ ] 03-08b-PLAN.md — stellar-ios simulator build + screenshot verification + human checkpoint (BROWSE-02, BROWSE-03, BROWSE-07)
 
 **Note:** Phase 3 touches the Socket.IO contract shared by backend, `Volumio2-UI`, and `stellar-ios`
 (the duplicate-detection signal and the loose-song list are new payload fields). Any event-shape
