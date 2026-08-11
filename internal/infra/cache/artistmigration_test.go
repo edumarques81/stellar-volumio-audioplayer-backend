@@ -42,7 +42,7 @@ func dumpArtwork(t *testing.T, db *cache.DB) []artworkRow {
 	if err != nil {
 		t.Fatalf("dumpArtwork query: %v", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	var out []artworkRow
 	for rows.Next() {

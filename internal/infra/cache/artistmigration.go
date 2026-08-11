@@ -80,16 +80,16 @@ func MigrateArtistArtwork(dao *DAO, dryRun bool) (*ArtistArtworkMigrationReport,
 	for rows.Next() {
 		var r artistRow
 		if err := rows.Scan(&r.id, &r.name); err != nil {
-			rows.Close()
+			_ = rows.Close()
 			return nil, fmt.Errorf("scan artist row: %w", err)
 		}
 		all = append(all, r)
 	}
 	if err := rows.Err(); err != nil {
-		rows.Close()
+		_ = rows.Close()
 		return nil, fmt.Errorf("rows iter: %w", err)
 	}
-	rows.Close()
+	_ = rows.Close()
 
 	report := &ArtistArtworkMigrationReport{}
 	claimed := make(map[string]bool)
@@ -195,7 +195,7 @@ func rekeyArtistArtworkRow(dao *DAO, oldArtworkID, newArtworkID, newArtistID str
 	if err != nil {
 		return err
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 
 	if _, err := tx.Exec(`UPDATE artwork SET id = ?, artist_id = ? WHERE id = ?`,
 		newArtworkID, newArtistID, oldArtworkID); err != nil {
