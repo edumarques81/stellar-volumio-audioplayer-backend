@@ -80,13 +80,14 @@ Plans:
 **Goal**: Every browse surface on the LCD and the iPhone app tells the truth: duplicate album versions are distinguishable at a glance, and an artist with no browsable albums never looks like a dead end.
 **Mode:** mvp
 **Depends on**: Phase 2
-**Requirements**: ARTIST-04, BROWSE-01, BROWSE-02, BROWSE-03, BROWSE-04
+**Requirements**: ARTIST-04, BROWSE-01, BROWSE-02, BROWSE-03, BROWSE-04, BROWSE-07
 **Success Criteria** (what must be TRUE):
 
   1. On the LCD's album interface, when two or more albums share the same title and artist, each tile shows its quality label (e.g. `352.8kHz/24bit FLAC` vs `96kHz/24bit FLAC`) as a badge — verified against a real duplicate pair on the Pi.
   2. The same badge appears in the iPhone app's album grid and artist→albums grid for that same duplicate pair, verified on the simulator against the live backend.
   3. A unique album (no title+artist duplicate) shows no badge on either client — spot-checked against a known unique album so the common case stays clean.
-  4. Tapping into an artist whose tracks belong to no album (or who resolves to zero albums) shows a real, playable song list on both the LCD and the iPhone app instead of an empty grid — verified end-to-end by playing a track from that list.
+  4. Tapping into an artist whose tracks belong to no album (or who resolves to zero albums) shows a real, playable song list on both the LCD and the iPhone app instead of an empty grid — proven by a synthetic test fixture, since no artist in the live library has zero albums.
+  5. `Mahler: The Symphonies` renders as ONE album tile on the LCD and the iPhone (was 11 identical tiles), and drilling into it exposes its 11 discs. `Miles Davis - Kind Of Blue` does NOT group — it stays 3 separate entries distinguished by badge, because every track is `Disc: 1`.
 
 **Plans**: TBD
 **UI hint**: yes

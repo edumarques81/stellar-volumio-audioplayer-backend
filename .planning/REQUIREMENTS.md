@@ -66,8 +66,10 @@ browse surface is honest about what it's showing.
 
 ### Browse Experience
 
-- [ ] **BROWSE-01**: When two or more albums share the same title and artist, each tile shows its
-  quality label (e.g. `352.8kHz/24bit FLAC` vs `96kHz/24bit FLAC`) as a badge on the **LCD**.
+- [ ] **BROWSE-01**: When two or more albums share the same title and artist, each tile shows a badge on
+  the **LCD** carrying whatever actually differs within that group — quality if it differs, else disc,
+  else source. (Revised 2026-08-12: 6 of 8 live duplicate groups have identical quality, so a
+  quality-only badge would disambiguate nothing.)
 
 - [ ] **BROWSE-02**: The same duplicate-disambiguating badge appears in the **iPhone app**'s album
   and artist-album grids.
@@ -75,6 +77,10 @@ browse surface is honest about what it's showing.
 - [ ] **BROWSE-03**: No badge is shown when an album's title+artist is unique, so the grid stays
   clean for the common case.
 
+- [ ] **BROWSE-07**: Multi-disc box sets render as **one album tile that drills into its discs**,
+  not as N identical tiles. `Mahler: The Symphonies` goes from 11 tiles to 1. Disc detection uses
+  MPD's `Disc` tag, corroborated by the `/CD nn/` path marker. `Miles Davis - Kind Of Blue` must NOT
+  group (all tracks are `Disc: 1`; it is 3 distinct releases) — the negative test case.
 - [ ] **BROWSE-04**: An artist whose tracks belong to no album renders those tracks as a playable
   song list rather than an empty album grid.
 
@@ -144,12 +150,13 @@ Which phases cover which requirements. Filled during roadmap creation.
 | BROWSE-02 | Phase 3 | Pending |
 | BROWSE-03 | Phase 3 | Pending |
 | BROWSE-04 | Phase 3 | Pending |
+| BROWSE-07 | Phase 3 | Pending |
 | DATA-05 | Phase 4 | Pending |
 
 **Coverage:**
 
-- v1 requirements: 16 total
-- Mapped to phases: 16 (Phase 1: 4, Phase 2: 6, Phase 3: 5, Phase 4: 1)
+- v1 requirements: 17 total
+- Mapped to phases: 17 (Phase 1: 4, Phase 2: 6, Phase 3: 6, Phase 4: 1)
 - Unmapped: 0 ✓
 
 ---
