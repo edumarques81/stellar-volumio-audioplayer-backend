@@ -29,6 +29,7 @@ type AlbumDetails struct {
 	TotalTime   int
 	Format      string // Audio format from MPD, e.g. "44100:16:2"
 	Genre       string // Album-level genre (first track's Genre tag, normalized)
+	Disc        string // MPD Disc tag from a representative track, first-track-wins; "" when absent
 }
 
 // MPDClient interface for MPD operations needed by this service.

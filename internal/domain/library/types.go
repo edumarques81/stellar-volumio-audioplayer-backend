@@ -48,6 +48,8 @@ type Album struct {
 	Quality    string     `json:"quality,omitempty"`   // e.g. "192kHz/24bit FLAC"
 	TrackType  string     `json:"trackType,omitempty"` // e.g. "flac", "dsf"
 	Genre      string     `json:"genre,omitempty"`     // e.g. "Ambient / Post-Rock"
+	Badge      string     `json:"badge,omitempty"`     // duplicate-disambiguation label (BROWSE-01/02/03), e.g. "352.8kHz/24bit FLAC", "Disc 04", "USB"
+	DiscCount  int        `json:"discCount,omitempty"` // >1 when this Album is a collapsed multi-disc box set (BROWSE-07); 0/1 otherwise
 }
 
 // Artist represents an artist in the library.
@@ -65,6 +67,7 @@ type Track struct {
 	Album       string     `json:"album"`
 	URI         string     `json:"uri"`
 	TrackNumber int        `json:"trackNumber,omitempty"`
+	Disc        int        `json:"disc,omitempty"` // MPD Disc tag, 1-based; 0 when absent/single-disc (BROWSE-07)
 	Duration    int        `json:"duration,omitempty"`
 	AlbumArt    string     `json:"albumArt,omitempty"`
 	Source      SourceType `json:"source"`

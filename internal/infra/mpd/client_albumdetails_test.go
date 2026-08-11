@@ -107,3 +107,31 @@ func TestGroupAlbumDetails_AggregationUnchanged(t *testing.T) {
 		t.Errorf("Genre = %q, want %q", got.Genre, "Ambient / Post-Rock")
 	}
 }
+
+// TestGroupAlbumDetails_DiscFirstTrackWins pins 03-03-PLAN.md Task 1: a song
+// carrying an MPD "Disc" tag produces an AlbumDetails.Disc matching it,
+// following the same first-track-wins convention already used for
+// Format/Genre.
+func TestGroupAlbumDetails_DiscFirstTrackWins(t *testing.T) {
+	songs := []mpd.Attrs{
+		{
+			"file": "USB/Mahler The Symphonies/CD 02/01.flac", "Album": "Mahler: The Symphonies",
+			"AlbumArtist": "Gustav Mahler", "Time": "180", "Disc": "2",
+		},
+		{
+			"file": "USB/Mahler The Symphonies/CD 02/02.flac", "Album": "Mahler: The Symphonies",
+			"AlbumArtist": "Gustav Mahler", "Time": "200", "Disc": "2",
+		},
+	}
+
+	albums, skipped := groupAlbumDetails(songs)
+	if skipped != 0 {
+		t.Fatalf("skipped = %d, want 0", skipped)
+	}
+	if len(albums) != 1 {
+		t.Fatalf("len(albums) = %d, want 1", len(albums))
+	}
+	if albums[0].Disc != "2" {
+		t.Errorf("Disc = %q, want %q", albums[0].Disc, "2")
+	}
+}

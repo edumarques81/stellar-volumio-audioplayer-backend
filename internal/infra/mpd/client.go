@@ -696,6 +696,9 @@ type AlbumDetails struct {
 	TotalTime   int    // Total duration in seconds
 	Format      string // Audio format from MPD, e.g. "44100:16:2"
 	Genre       string // Album-level genre (first track's Genre tag, normalized)
+	// Disc is the MPD Disc tag from a representative track, first-track-wins
+	// (same convention as Format/Genre). "" when absent.
+	Disc string
 }
 
 // NormalizeGenre converts MPD's Genre tag value into the form the Library UI
@@ -794,6 +797,7 @@ func groupAlbumDetails(songs []mpd.Attrs) (albums []AlbumDetails, skipped int) {
 				// Format/quality. Multi-value genres get normalized to
 				// "Ambient / Post-Rock" by NormalizeGenre.
 				Genre: NormalizeGenre(song["Genre"]),
+				Disc:  song["Disc"],
 			}
 		}
 
