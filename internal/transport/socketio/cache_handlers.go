@@ -42,6 +42,7 @@ type CacheStatusResponse struct {
 	ArtworkCached  int    `json:"artworkCached"`
 	ArtworkMissing int    `json:"artworkMissing"`
 	RadioCount     int    `json:"radioCount"`
+	SkippedCount   int    `json:"skippedCount"` // real, untagged (Album=="") songs, DATA-02
 	IsBuilding     bool   `json:"isBuilding"`
 	BuildProgress  int    `json:"buildProgress"`
 	SchemaVersion  string `json:"schemaVersion"`
@@ -65,6 +66,7 @@ func (h *CacheHandlers) handleGetCacheStatus(client *socket.Socket) {
 		ArtworkCached:  stats.ArtworkCount,
 		ArtworkMissing: stats.ArtworkMissing,
 		RadioCount:     stats.RadioCount,
+		SkippedCount:   stats.SkippedCount,
 		IsBuilding:     stats.IsBuilding,
 		BuildProgress:  stats.BuildProgress,
 		SchemaVersion:  stats.SchemaVersion,
