@@ -112,6 +112,26 @@ func (a *LibraryMPDAdapter) FindAlbumTracks(album, albumArtist string) ([]map[st
 	return result, nil
 }
 
+// FindTracksByArtist returns tracks crediting the given artist via MPD's
+// Artist tag (case-insensitive substring match at the MPD level; callers
+// must filter for an exact match).
+func (a *LibraryMPDAdapter) FindTracksByArtist(artist string) ([]map[string]string, error) {
+	tracks, err := a.client.FindTracksByArtist(artist)
+	if err != nil {
+		return nil, err
+	}
+
+	// Convert mpd.Attrs to map[string]string
+	result := make([]map[string]string, len(tracks))
+	for i, track := range tracks {
+		result[i] = make(map[string]string)
+		for k, v := range track {
+			result[i][k] = v
+		}
+	}
+	return result, nil
+}
+
 // SearchByBase searches for all songs within a specific base path.
 func (a *LibraryMPDAdapter) SearchByBase(basePath string) ([]map[string]string, error) {
 	tracks, err := a.client.SearchByBase(basePath)

@@ -224,6 +224,23 @@ func TestClientCountArtistsWithoutConnect(t *testing.T) {
 	}
 }
 
+// TestClientFindTracksByArtistWithoutConnect pins the ARTIST-04/BROWSE-04
+// fallback query (03-05-PLAN.md Task 1) into the same "fails cleanly when
+// not connected" pattern already established for every other MPD query
+// method in this file. FindAlbumTracks/SearchByBase have no method-specific
+// test of their own to match against, so this follows the generic
+// ensureConnected-failure convention; the query's actual behavior (Artist
+// tag search, substring-match caveat) is exercised indirectly by the
+// synthetic zero-album fixture at the service layer (Task 2).
+func TestClientFindTracksByArtistWithoutConnect(t *testing.T) {
+	client := mpd.NewClient("localhost", 6600, "")
+
+	_, err := client.FindTracksByArtist("Loose Test Artist")
+	if err == nil {
+		t.Error("FindTracksByArtist should fail when not connected")
+	}
+}
+
 // Tests for Volumio integration queue manipulation methods
 
 func TestClientAddIdWithoutConnect(t *testing.T) {

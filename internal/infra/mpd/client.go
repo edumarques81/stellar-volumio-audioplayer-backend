@@ -624,6 +624,29 @@ func (c *Client) FindAlbumTracks(album string, albumArtist string) ([]mpd.Attrs,
 	return cmd.AttrsList("file")
 }
 
+// FindTracksByArtist finds all tracks crediting the given artist via MPD's
+// Artist tag, independent of the AlbumArtist grouping GetAlbumDetails/
+// GetArtistAlbums otherwise use. This is the ARTIST-04/BROWSE-04 fallback
+// query: it can surface tracks that never got an AlbumArtist grouping at
+// all (e.g. loose, untagged imports with no album).
+//
+// NOTE: MPD's "search" command (as opposed to "find") is a case-insensitive
+// SUBSTRING match, not an exact match -- a search for "Bach" also matches
+// "Bach Collegium". Callers MUST filter the returned songs client-side for
+// an exact Artist-tag match, mirroring the strings.EqualFold filter already
+// applied to AlbumArtist elsewhere in this package.
+func (c *Client) FindTracksByArtist(artist string) ([]mpd.Attrs, error) {
+	if err := c.ensureConnected(); err != nil {
+		return nil, err
+	}
+
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	// AttrsList("file") tells the parser each song starts with "file:" key
+	return c.client.Command("search artist %s", artist).AttrsList("file")
+}
+
 // SearchByBase searches for all songs within a specific base path.
 // This is useful for filtering songs by source (e.g., INTERNAL, USB).
 func (c *Client) SearchByBase(basePath string) ([]mpd.Attrs, error) {
