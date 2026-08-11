@@ -94,7 +94,7 @@ Plans:
 
 Plans:
 
-- [ ] 03-01-PLAN.md — TDD: pure multi-disc box-set grouping rule (discgroup), proven against real Mahler/Kind Of Blue Pi data (BROWSE-07)
+- [x] 03-01-PLAN.md — TDD: pure multi-disc box-set grouping rule (discgroup), proven against real Mahler/Kind Of Blue Pi data (BROWSE-07)
 - [ ] 03-02-PLAN.md — TDD: pure duplicate-disambiguation badge rule (dupebadge), quality->disc->source precedence (BROWSE-01, BROWSE-02, BROWSE-03)
 - [ ] 03-03-PLAN.md — Backend contract (Album.badge/discCount, Track.disc) + wire grouping/badging into the MPD-direct GetAlbums/GetArtistAlbums path + disc-aware track sort (BROWSE-01, BROWSE-02, BROWSE-03, BROWSE-07)
 - [ ] 03-04-PLAN.md — Cache schema v6 + wire grouping/badging into the cache-build path Builder.buildAlbums/CachedService.GetAlbums (BROWSE-01, BROWSE-02, BROWSE-03, BROWSE-07)
@@ -252,5 +252,5 @@ Phases execute in numeric order: 1 → 2 → 3 → 4
 |-------|----------------|--------|-----------|
 | 1. Data Integrity Foundation | 5/7 | In Progress|  |
 | 2. Artist Identity & Artwork Migration | 3/4 | In Progress|  |
-| 3. Browse Experience — Duplicate Badges & Empty States | 0/TBD | Not started | - |
+| 3. Browse Experience — Duplicate Badges & Empty States | 1/10 | In Progress|  |
 | 4. Tail Cleanup — DSD Test File Conversion | 0/TBD | Not started | - |

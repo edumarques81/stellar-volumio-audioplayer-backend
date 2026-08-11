@@ -77,10 +77,11 @@ browse surface is honest about what it's showing.
 - [ ] **BROWSE-03**: No badge is shown when an album's title+artist is unique, so the grid stays
   clean for the common case.
 
-- [ ] **BROWSE-07**: Multi-disc box sets render as **one album tile that drills into its discs**,
+- [x] **BROWSE-07**: Multi-disc box sets render as **one album tile that drills into its discs**,
   not as N identical tiles. `Mahler: The Symphonies` goes from 11 tiles to 1. Disc detection uses
   MPD's `Disc` tag, corroborated by the `/CD nn/` path marker. `Miles Davis - Kind Of Blue` must NOT
   group (all tracks are `Disc: 1`; it is 3 distinct releases) — the negative test case.
+
 - [ ] **BROWSE-04**: An artist whose tracks belong to no album renders those tracks as a playable
   song list rather than an empty album grid.
 
@@ -150,7 +151,7 @@ Which phases cover which requirements. Filled during roadmap creation.
 | BROWSE-02 | Phase 3 | Pending |
 | BROWSE-03 | Phase 3 | Pending |
 | BROWSE-04 | Phase 3 | Pending |
-| BROWSE-07 | Phase 3 | Pending |
+| BROWSE-07 | Phase 3 | Complete |
 | DATA-05 | Phase 4 | Pending |
 
 **Coverage:**

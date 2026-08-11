@@ -2,16 +2,16 @@
 gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
-status: executing
-stopped_at: Completed 02-03-PLAN.md
-last_updated: "2026-08-11T17:38:27.561Z"
+status: completed
+stopped_at: Completed 03-01-PLAN.md
+last_updated: "2026-08-11T21:51:45.226Z"
 last_activity: 2026-08-11
 progress:
   total_phases: 6
   completed_phases: 2
-  total_plans: 11
-  completed_plans: 10
-  percent: 17
+  total_plans: 21
+  completed_plans: 12
+  percent: 33
 ---
 
 # Project State
@@ -60,6 +60,7 @@ Progress: [░░░░░░░░░░] 0%
 | Phase 02 P01 | 2min | 2 tasks | 2 files |
 | Phase 02 P02 | 12min | 2 tasks | 4 files |
 | Phase 02 P03 | 35min | 2 tasks | 5 files |
+| Phase 03 P01 | 15min | 2 tasks | 2 files |
 
 ## Accumulated Context
 
@@ -107,6 +108,7 @@ Recent decisions affecting current work:
 - [Phase 02]: Service.GetArtists query filter runs against the canonical (post-collapse) name, not the raw MPD tag
 - [Phase 02-03]: RekeyAlbumArtwork idempotence check ordered target-album-state-first (not orphan-row-first) so a safe repeat call never fails on the renamed-away orphan id — hard_constraint #2 explicitly flagged this exact case as a prior planning mistake to correct
 - [Phase 02-03]: MigrateArtistArtwork merge tie-break scans all rows in pass 1 (not a pre-filtered candidate list) so exact-match rows can still claim their own artwork slot — resolves an internal inconsistency in the plan's action wording; id always equals md5(name) for pre-migration rows
+- [Phase ?]: [Phase 03-01]: Renamed discgroup entrypoint from Group to GroupFolders (plan's interfaces contract specified both a type and func named Group in the same package, which Go rejects) — Plan 03 wave-2 callers must use discgroup.GroupFolders(folders), not discgroup.Group(folders)
 
 ### Verified Environment Facts (measured 2026-08-11, supersede earlier estimates)
 
@@ -148,7 +150,7 @@ Items acknowledged and carried forward from previous milestone close:
 
 ## Session Continuity
 
-Last session: 2026-08-11T17:38:27.558Z
-Stopped at: Completed 02-03-PLAN.md
+Last session: 2026-08-11T21:51:45.223Z
+Stopped at: Completed 03-01-PLAN.md
 `/gsd:plan-phase 1`.
 Resume file: None
