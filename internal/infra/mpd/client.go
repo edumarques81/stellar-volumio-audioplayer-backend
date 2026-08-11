@@ -8,6 +8,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/edumarques81/stellar-volumio-audioplayer-backend/internal/infra/musicfile"
 	"github.com/fhs/gompd/v2/mpd"
 	"github.com/rs/zerolog/log"
 )
@@ -735,11 +736,33 @@ func (c *Client) GetAlbumDetails(basePath string) ([]AlbumDetails, error) {
 		return nil, fmt.Errorf("failed to search base %s: %w", basePath, err)
 	}
 
+	albums, skipped := groupAlbumDetails(songs)
+	log.Debug().Str("basePath", basePath).Int("skipped", skipped).
+		Msg("GetAlbumDetails: skipped untagged real songs")
+
+	return albums, nil
+}
+
+// groupAlbumDetails groups raw MPD song attrs by album + artist + directory
+// (so different quality versions of the same album in different folders
+// become separate entries), returning the grouped albums alongside a count
+// of real (non-resource-fork) songs that were skipped for lacking an Album
+// tag -- DATA-02's skipped/untagged signal.
+//
+// macOS AppleDouble resource-fork sidecar files (musicfile.IsResourceFork)
+// are always excluded from grouping and are never counted as "skipped" --
+// they are junk DATA-04 filtering removes, not untagged real music DATA-01
+// retagging should fix (T-01-03).
+func groupAlbumDetails(songs []mpd.Attrs) (albums []AlbumDetails, skipped int) {
 	// Group songs by album + artist + directory (so different quality versions
 	// of the same album in different folders become separate entries)
 	albumMap := make(map[string]*AlbumDetails)
 
 	for _, song := range songs {
+		if musicfile.IsResourceFork(song["file"]) {
+			continue
+		}
+
 		album := song["Album"]
 		artist := song["AlbumArtist"]
 		if artist == "" {
@@ -748,6 +771,7 @@ func (c *Client) GetAlbumDetails(basePath string) ([]AlbumDetails, error) {
 
 		// Skip songs without album tag
 		if album == "" {
+			skipped++
 			continue
 		}
 
@@ -785,12 +809,11 @@ func (c *Client) GetAlbumDetails(basePath string) ([]AlbumDetails, error) {
 	}
 
 	// Convert map to slice
-	var albums []AlbumDetails
 	for _, details := range albumMap {
 		albums = append(albums, *details)
 	}
 
-	return albums, nil
+	return albums, skipped
 }
 
 // ListArtists returns all unique album artists from the MPD database.
