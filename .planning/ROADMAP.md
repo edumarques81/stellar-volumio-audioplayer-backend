@@ -20,7 +20,7 @@ loose songs. Audio playback is never touched.
 
 Decimal phases appear between their surrounding integers in numeric order.
 
-- [ ] **Phase 1: Data Integrity Foundation** - Remove `._` junk from MPD's index, harden the backend against it everywhere, fix the 16 untagged real songs at source (user-executed), and make future data gaps detectable instead of silent.
+- [x] **Phase 1: Data Integrity Foundation** - Remove `._` junk from MPD's index, harden the backend against it everywhere, fix the 16 untagged real songs at source (user-executed), and make future data gaps detectable instead of silent.
 - [ ] **Phase 2: Artist Identity & Artwork Migration** - Collapse credited-collaborator artist strings to one entry per real performer and re-key existing artwork onto the new identities in the same pass, recovering the 38 orphaned album-artwork rows too.
 - [ ] **Phase 3: Browse Experience — Duplicate Badges & Empty States** - Add the quality-disambiguation badge to duplicate albums on both the LCD and the iPhone app, and make artists with only loose songs (or zero albums) render a real, playable result instead of an empty grid.
 
@@ -49,7 +49,7 @@ Plans:
 - [x] 01-04-PLAN.md — Delete manifested ._ files, restore read-only mount, verify mpc stats (DATA-03)
 - [x] 01-05-PLAN.md — Deploy hardened backend + live ._-recurrence regression test (DATA-04)
 - [x] 01-06-PLAN.md — Produce the DATA-01 retag recommendation list + human-action handoff (DATA-01)
-- [ ] 01-07-PLAN.md — Verify retag landed + skippedCount reads 0 (DATA-01, DATA-02; blocked on the user's own retag step)
+- [x] 01-07-PLAN.md — Verify retag landed + skippedCount reads 0 (DATA-01, DATA-02; blocked on the user's own retag step)
 
 ### Phase 2: Artist Identity & Artwork Migration
 

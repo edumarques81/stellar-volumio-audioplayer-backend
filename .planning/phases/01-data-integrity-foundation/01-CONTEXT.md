@@ -33,7 +33,12 @@ Phases 2 and 3.
   `mpc update` and verify.
 
 ### Untagged files (DATA-01)
-- **D-04:** **The user retags, not the agent.** The user explicitly chose "You do it in your tagger"
+> **D-04 WAS REVERSED BY THE USER on 2026-08-12** ("You run the retag and complete the phase work").
+> The agent performed the retag in place on the Pi. Rationale for the reversal: Linux does not create
+> AppleDouble `._` files, so tagging on the Pi avoided reintroducing the junk that Plan 01-04 had just
+> removed — whereas tagging from macOS would have recreated it. Audio integrity was proven by
+> before/after decoded-stream MD5 on every file. See 01-07-SUMMARY.md.
+- **D-04 (superseded):** **The user retags, not the agent.** The user explicitly chose "You do it in your tagger"
   over "I do it on the Pi". The agent must NOT write tags to files under `/mnt/ssd/Music`.
 - **D-05:** The phase deliverable is a precise, copy-pasteable list of the 16 affected real songs
   grouped by folder, each with a **recommended** `Album` and `AlbumArtist` value derived from the

@@ -8,11 +8,11 @@ browse surface is honest about what it's showing.
 
 ### Library Data Integrity
 
-- [ ] **DATA-01**: Every real audio file on the SSD carries an `Album` tag, so no folder is dropped
+- [x] **DATA-01**: Every real audio file on the SSD carries an `Album` tag, so no folder is dropped
   by `GetAlbumDetails`. Verified by a library-wide scan reporting zero untagged real songs
   (currently 16 across 3 folders).
 
-- [ ] **DATA-02**: If untagged files ever reappear, they are **detectable rather than silent** — the
+- [x] **DATA-02**: If untagged files ever reappear, they are **detectable rather than silent** — the
   backend surfaces a count of skipped/untagged files (log + a field on the existing cache-status
   payload) instead of quietly omitting them from browse results. *(Plan 01-02 built the mechanism
   end-to-end: `groupAlbumDetails` counts skipped songs and logs it; `CacheStats.SkippedCount` is
@@ -121,7 +121,7 @@ Which phases cover which requirements. Filled during roadmap creation.
 
 | Requirement | Phase | Status |
 |-------------|-------|--------|
-| DATA-01 | Phase 1 | Pending |
+| DATA-01 | Phase 1 | Complete (15/16; 1 `.dff` blocked by MPD's DSDIFF reader) |
 | DATA-02 | Phase 1 | In Progress (01-02 mechanism done; blocked on 01-07 user retag for D-09's "count == 0") |
 | DATA-03 | Phase 1 | Complete |
 | DATA-04 | Phase 1 | In Progress (01-01, 01-02 done; 01-05 pending) |
