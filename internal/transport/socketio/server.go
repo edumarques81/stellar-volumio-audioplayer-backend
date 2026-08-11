@@ -2496,6 +2496,17 @@ func (s *Server) InitializeCache() {
 		} else if n > 0 {
 			log.Info().Int("repaired", n).Msg("Album artwork backfill repaired orphan rows on startup")
 		}
+
+		// Re-key ARTIST artwork rows from their raw (pre-collapse) name
+		// identity onto the ARTIST-01 collapsed identity (Plan 02-02), so
+		// artwork already fetched keeps resolving after the collapse ships
+		// (D-07/D-12) instead of orphaning and re-fetching. Pure local-DB
+		// operation, no network I/O, idempotent, safe on every startup.
+		if report, err := cache.MigrateArtistArtwork(s.cacheDAO, false); err != nil {
+			log.Warn().Err(err).Msg("Artist artwork migration failed; continuing")
+		} else if report.Rekeyed > 0 {
+			log.Info().Int("rekeyed", report.Rekeyed).Msg("Artist artwork migration re-keyed rows onto collapsed identity on startup")
+		}
 	}
 
 	// Start enrichment worker
