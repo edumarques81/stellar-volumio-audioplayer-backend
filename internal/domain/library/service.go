@@ -9,6 +9,8 @@ import (
 	"strings"
 
 	"github.com/rs/zerolog/log"
+
+	"github.com/edumarques81/stellar-volumio-audioplayer-backend/internal/infra/musicfile"
 )
 
 // AlbumInfo matches the mpd.AlbumInfo type.
@@ -482,8 +484,7 @@ func (s *Service) GetAlbumTracks(req GetAlbumTracksRequest) AlbumTracksResponse 
 		}
 
 		// Skip macOS resource fork files (._prefix)
-		base := path.Base(file)
-		if strings.HasPrefix(base, "._") {
+		if musicfile.IsResourceFork(file) {
 			continue
 		}
 
