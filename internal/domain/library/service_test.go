@@ -429,6 +429,258 @@ func TestService_GetAlbums_SortByArtist(t *testing.T) {
 	}
 }
 
+// --- GetAlbums grouping + badging Tests (03-03: discgroup + dupebadge wiring) ---
+
+// TestService_GetAlbums_MahlerShaped_GroupsToOneAlbumWithDiscCount pins
+// 03-03-PLAN.md's Mahler-shaped truth: 11 raw per-basePath AlbumDetails
+// entries (one per CD-NN folder, distinct Disc tags 1..11, all sharing one
+// common parent directory) collapse to exactly ONE Album with DiscCount==11
+// and URI equal to the box set's common parent directory -- NOT a CD-NN
+// subfolder path (the critical bug this plan fixes: URI must become
+// group.RootDir, not path.Dir(group.FirstTrack)).
+func TestService_GetAlbums_MahlerShaped_GroupsToOneAlbumWithDiscCount(t *testing.T) {
+	details := make([]AlbumDetails, 11)
+	wantTrackCount := 0
+	for i := 0; i < 11; i++ {
+		discNum := i + 1
+		trackCount := 5 + i
+		wantTrackCount += trackCount
+		details[i] = AlbumDetails{
+			Album:       "Mahler: The Symphonies",
+			AlbumArtist: "Gustav Mahler",
+			TrackCount:  trackCount,
+			FirstTrack: fmt.Sprintf(
+				"USB/Mahler The Symphonies/CD %02d/01 - track.flac", discNum,
+			),
+			Format: "44100:16:2",
+			Disc:   fmt.Sprintf("%d", discNum),
+		}
+	}
+
+	mockMPD := &MockMPDClient{
+		GetAlbumDetailsResp: map[string][]AlbumDetails{
+			"USB": details,
+		},
+	}
+
+	service := NewService(mockMPD, &MockPathClassifier{})
+
+	resp := service.GetAlbums(GetAlbumsRequest{
+		Scope: ScopeUSB,
+		Sort:  SortAlphabetical,
+	})
+
+	if len(resp.Albums) != 1 {
+		t.Fatalf("Expected 1 grouped Mahler album, got %d: %+v", len(resp.Albums), resp.Albums)
+	}
+
+	album := resp.Albums[0]
+	if album.DiscCount != 11 {
+		t.Errorf("DiscCount = %d, want 11", album.DiscCount)
+	}
+	if album.URI != "USB/Mahler The Symphonies" {
+		t.Errorf("URI = %q, want the common parent %q (not a CD subfolder)", album.URI, "USB/Mahler The Symphonies")
+	}
+	if album.TrackCount != wantTrackCount {
+		t.Errorf("TrackCount = %d, want %d (summed across all 11 discs)", album.TrackCount, wantTrackCount)
+	}
+	if album.Badge != "" {
+		t.Errorf("Badge = %q, want empty (Mahler collapses to a single album, no duplicate cluster)", album.Badge)
+	}
+}
+
+// TestService_GetAlbums_KindOfBlueShaped_StaysSeparateWithQualityBadges pins
+// the load-bearing D-06 negative case: 3 raw AlbumDetails entries sharing
+// title+artist, all carrying IDENTICAL Disc:"1" and none matching the CD
+// path marker, must NOT be grouped by discgroup (Kind Of Blue is 3 distinct
+// releases, not a box set). Since their quality differs, dupebadge's tier-1
+// precedence fires: each Album's Badge is its own quality string verbatim.
+func TestService_GetAlbums_KindOfBlueShaped_StaysSeparateWithQualityBadges(t *testing.T) {
+	mockMPD := &MockMPDClient{
+		GetAlbumDetailsResp: map[string][]AlbumDetails{
+			"USB": {
+				{
+					Album: "Kind Of Blue", AlbumArtist: "Miles Davis", TrackCount: 5,
+					FirstTrack: "USB/Miles Davis/Kind Of Blue (DSD64)/01.dsf",
+					Format:     "2822400:f:2", Disc: "1",
+				},
+				{
+					Album: "Kind Of Blue", AlbumArtist: "Miles Davis", TrackCount: 5,
+					FirstTrack: "USB/Miles Davis/Kind Of Blue (DSD128)/01.dsf",
+					Format:     "5644800:f:2", Disc: "1",
+				},
+				{
+					Album: "Kind Of Blue", AlbumArtist: "Miles Davis", TrackCount: 5,
+					FirstTrack: "USB/Miles Davis/Kind Of Blue (FLAC)/01.flac",
+					Format:     "352800:24:2", Disc: "1",
+				},
+			},
+		},
+	}
+
+	service := NewService(mockMPD, &MockPathClassifier{})
+
+	resp := service.GetAlbums(GetAlbumsRequest{
+		Scope: ScopeUSB,
+		Sort:  SortAlphabetical,
+	})
+
+	if len(resp.Albums) != 3 {
+		t.Fatalf("Expected 3 separate Kind Of Blue albums (D-06 negative case), got %d: %+v", len(resp.Albums), resp.Albums)
+	}
+
+	for _, album := range resp.Albums {
+		if album.DiscCount != 0 {
+			t.Errorf("DiscCount = %d, want 0 (not a box set) for %q", album.DiscCount, album.URI)
+		}
+		if album.Badge == "" {
+			t.Errorf("Badge is empty, want each album's own quality string for %q", album.URI)
+		}
+		if album.Badge != album.Quality {
+			t.Errorf("Badge = %q, want it to equal this album's own Quality %q (quality tier)", album.Badge, album.Quality)
+		}
+	}
+
+	// Distinctness sanity: the whole point of the quality tier is that the
+	// three badges are not all identical.
+	seen := make(map[string]bool)
+	for _, album := range resp.Albums {
+		seen[album.Badge] = true
+	}
+	if len(seen) < 2 {
+		t.Errorf("Expected at least 2 distinct badge values among the 3 Kind Of Blue versions, got %v", seen)
+	}
+}
+
+// TestService_GetAlbums_UniqueAlbum_NoBadgeNoDiscCount pins BROWSE-03/D-03:
+// a single unrelated album (no title+artist duplicate, not a box set) gets
+// Badge=="" and DiscCount==0 -- the common case stays clean.
+func TestService_GetAlbums_UniqueAlbum_NoBadgeNoDiscCount(t *testing.T) {
+	mockMPD := &MockMPDClient{
+		GetAlbumDetailsResp: map[string][]AlbumDetails{
+			"USB": {
+				{
+					Album: "Solo Album", AlbumArtist: "Some Artist", TrackCount: 8,
+					FirstTrack: "USB/Some Artist/Solo Album/01.flac",
+					Format:     "44100:16:2", Disc: "1",
+				},
+			},
+		},
+	}
+
+	service := NewService(mockMPD, &MockPathClassifier{})
+
+	resp := service.GetAlbums(GetAlbumsRequest{
+		Scope: ScopeUSB,
+		Sort:  SortAlphabetical,
+	})
+
+	if len(resp.Albums) != 1 {
+		t.Fatalf("Expected 1 album, got %d", len(resp.Albums))
+	}
+	album := resp.Albums[0]
+	if album.Badge != "" {
+		t.Errorf("Badge = %q, want empty for a unique album", album.Badge)
+	}
+	if album.DiscCount != 0 {
+		t.Errorf("DiscCount = %d, want 0 for a unique, non-box-set album", album.DiscCount)
+	}
+}
+
+// --- GetArtistAlbums grouping + badging Tests (03-03) ---
+
+// TestService_GetArtistAlbums_MahlerShaped_GroupsToOneAlbumWithDiscCount
+// mirrors the GetAlbums-level Mahler test but through GetArtistAlbums's own
+// separate per-basePath loop, proving the identical grouping+URI fix was
+// applied there too (it does not call getAlbumsFromBasePath).
+func TestService_GetArtistAlbums_MahlerShaped_GroupsToOneAlbumWithDiscCount(t *testing.T) {
+	details := make([]AlbumDetails, 11)
+	for i := 0; i < 11; i++ {
+		discNum := i + 1
+		details[i] = AlbumDetails{
+			Album:       "Mahler: The Symphonies",
+			AlbumArtist: "Gustav Mahler",
+			TrackCount:  5,
+			FirstTrack: fmt.Sprintf(
+				"USB/Mahler The Symphonies/CD %02d/01 - track.flac", discNum,
+			),
+			Format: "44100:16:2",
+			Disc:   fmt.Sprintf("%d", discNum),
+		}
+	}
+
+	mockMPD := &MockMPDClient{
+		GetAlbumDetailsResp: map[string][]AlbumDetails{
+			"USB": details,
+		},
+	}
+
+	service := NewService(mockMPD, &MockPathClassifier{})
+
+	resp := service.GetArtistAlbums(GetArtistAlbumsRequest{
+		Artist: "Gustav Mahler",
+		Sort:   SortAlphabetical,
+	})
+
+	if len(resp.Albums) != 1 {
+		t.Fatalf("Expected 1 grouped Mahler album via GetArtistAlbums, got %d: %+v", len(resp.Albums), resp.Albums)
+	}
+	album := resp.Albums[0]
+	if album.DiscCount != 11 {
+		t.Errorf("DiscCount = %d, want 11", album.DiscCount)
+	}
+	if album.URI != "USB/Mahler The Symphonies" {
+		t.Errorf("URI = %q, want the common parent %q", album.URI, "USB/Mahler The Symphonies")
+	}
+}
+
+// TestService_GetArtistAlbums_KindOfBlueShaped_StaysSeparate re-asserts the
+// D-06 negative case at the GetArtistAlbums wiring layer too (hard
+// constraint 5): 3 same-quality-tag-1 Kind Of Blue folders must remain 3
+// separate Album entries when queried by artist, not collapsed to 1.
+func TestService_GetArtistAlbums_KindOfBlueShaped_StaysSeparate(t *testing.T) {
+	mockMPD := &MockMPDClient{
+		GetAlbumDetailsResp: map[string][]AlbumDetails{
+			"USB": {
+				{
+					Album: "Kind Of Blue", AlbumArtist: "Miles Davis", TrackCount: 5,
+					FirstTrack: "USB/Miles Davis/Kind Of Blue (DSD64)/01.dsf",
+					Format:     "2822400:f:2", Disc: "1",
+				},
+				{
+					Album: "Kind Of Blue", AlbumArtist: "Miles Davis", TrackCount: 5,
+					FirstTrack: "USB/Miles Davis/Kind Of Blue (DSD128)/01.dsf",
+					Format:     "5644800:f:2", Disc: "1",
+				},
+				{
+					Album: "Kind Of Blue", AlbumArtist: "Miles Davis", TrackCount: 5,
+					FirstTrack: "USB/Miles Davis/Kind Of Blue (FLAC)/01.flac",
+					Format:     "352800:24:2", Disc: "1",
+				},
+			},
+		},
+	}
+
+	service := NewService(mockMPD, &MockPathClassifier{})
+
+	resp := service.GetArtistAlbums(GetArtistAlbumsRequest{
+		Artist: "Miles Davis",
+		Sort:   SortAlphabetical,
+	})
+
+	if len(resp.Albums) != 3 {
+		t.Fatalf("Expected 3 separate Kind Of Blue albums via GetArtistAlbums, got %d: %+v", len(resp.Albums), resp.Albums)
+	}
+	for _, album := range resp.Albums {
+		if album.DiscCount != 0 {
+			t.Errorf("DiscCount = %d, want 0 for %q", album.DiscCount, album.URI)
+		}
+		if album.Badge == "" {
+			t.Errorf("Badge is empty, want a quality badge for %q", album.URI)
+		}
+	}
+}
+
 // --- GetArtists Tests ---
 
 func TestService_GetArtists_Empty(t *testing.T) {
