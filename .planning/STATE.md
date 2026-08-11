@@ -102,7 +102,10 @@ Recent decisions affecting current work:
 
 ### Pending Todos
 
-None yet.
+- **USER REMINDER (set 2026-08-11):** Once Phase 1 closes, run `/gsd:autonomous` to carry Phases 2
+  and 3 through discuss → plan → execute without per-phase prompting. The user explicitly chose to
+  wait until Phase 1's human gates are cleared before switching to autonomous mode. **Surface this
+  reminder at the Phase 1 → Phase 2 boundary.**
 
 ### Blockers/Concerns
 
