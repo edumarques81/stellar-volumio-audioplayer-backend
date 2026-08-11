@@ -97,26 +97,26 @@ Which phases cover which requirements. Filled during roadmap creation.
 
 | Requirement | Phase | Status |
 |-------------|-------|--------|
-| DATA-01 | — | Pending |
-| DATA-02 | — | Pending |
-| DATA-03 | — | Pending |
-| DATA-04 | — | Pending |
-| ARTIST-01 | — | Pending |
-| ARTIST-02 | — | Pending |
-| ARTIST-03 | — | Pending |
-| ARTIST-04 | — | Pending |
-| ART-01 | — | Pending |
-| ART-02 | — | Pending |
-| ART-03 | — | Pending |
-| BROWSE-01 | — | Pending |
-| BROWSE-02 | — | Pending |
-| BROWSE-03 | — | Pending |
-| BROWSE-04 | — | Pending |
+| DATA-01 | Phase 1 | Pending |
+| DATA-02 | Phase 1 | Pending |
+| DATA-03 | Phase 1 | Pending |
+| DATA-04 | Phase 1 | Pending |
+| ARTIST-01 | Phase 2 | Pending |
+| ARTIST-02 | Phase 2 | Pending |
+| ARTIST-03 | Phase 2 | Pending |
+| ARTIST-04 | Phase 3 | Pending |
+| ART-01 | Phase 2 | Pending |
+| ART-02 | Phase 2 | Pending |
+| ART-03 | Phase 2 | Pending |
+| BROWSE-01 | Phase 3 | Pending |
+| BROWSE-02 | Phase 3 | Pending |
+| BROWSE-03 | Phase 3 | Pending |
+| BROWSE-04 | Phase 3 | Pending |
 
 **Coverage:**
 - v1 requirements: 15 total
-- Mapped to phases: 0 (roadmap pending)
-- Unmapped: 15 ⚠️
+- Mapped to phases: 15 (Phase 1: 4, Phase 2: 6, Phase 3: 5)
+- Unmapped: 0 ✓
 
 ---
 *Requirements defined: 2026-08-11*
