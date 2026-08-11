@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/edumarques81/stellar-volumio-audioplayer-backend/internal/infra/artistidentity"
 	"github.com/rs/zerolog/log"
 )
 
@@ -339,10 +340,29 @@ func (b *Builder) buildSkippedCount() error {
 }
 
 // buildArtists builds the artists cache from MPD.
+//
+// Raw MPD Artist tag values are collapsed via artistidentity.Collapse
+// (ARTIST-01/ARTIST-02) before insertion: multiple raw credit-string
+// variants that name the same real performer (e.g. 15 distinct "Luciano
+// Pavarotti, <ensemble>" values) collapse to one canonical name, and their
+// album counts are summed rather than the last-processed variant winning
+// (Go map iteration order is randomized, so a naive overwrite would be
+// silently non-deterministic). The empty raw value MPD's real `list artist`
+// output contains collapses to "" and is skipped, producing no row
+// (ARTIST-03).
 func (b *Builder) buildArtists() error {
 	artistCounts, err := b.provider.GetArtistsWithAlbumCounts()
 	if err != nil {
 		return fmt.Errorf("failed to get artist counts: %w", err)
+	}
+
+	collapsed := make(map[string]int, len(artistCounts))
+	for artistName, albumCount := range artistCounts {
+		canonical := artistidentity.Collapse(artistName)
+		if canonical == "" {
+			continue
+		}
+		collapsed[canonical] += albumCount
 	}
 
 	tx, err := b.db.BeginTx()
@@ -351,7 +371,7 @@ func (b *Builder) buildArtists() error {
 	}
 	defer tx.Rollback()
 
-	for artistName, albumCount := range artistCounts {
+	for artistName, albumCount := range collapsed {
 		if artistName == "" {
 			continue
 		}
@@ -396,7 +416,7 @@ func (b *Builder) buildArtists() error {
 		return fmt.Errorf("failed to commit artists: %w", err)
 	}
 
-	log.Debug().Int("count", len(artistCounts)).Msg("Artists cached")
+	log.Debug().Int("count", len(collapsed)).Msg("Artists cached")
 	return nil
 }
 
