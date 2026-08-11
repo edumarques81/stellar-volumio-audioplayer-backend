@@ -3,15 +3,15 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: completed
-stopped_at: Completed 03-03-PLAN.md
-last_updated: "2026-08-11T22:18:56.940Z"
+stopped_at: Completed 03-04-PLAN.md
+last_updated: "2026-08-11T22:35:41.976Z"
 last_activity: 2026-08-12
 progress:
   total_phases: 6
   completed_phases: 2
   total_plans: 21
-  completed_plans: 14
-  percent: 33
+  completed_plans: 16
+  percent: 76
 ---
 
 # Project State
@@ -27,11 +27,11 @@ browse surface is honest about what it's showing.
 ## Current Position
 
 Phase: 3 (Browse Experience) — EXECUTING
-Plan: 03-03 complete (3/3 tasks). Next: 03-04 (cache wiring — populate Badge/DiscCount/Disc on the cache-primary path).
-Status: Phase 3 plans 01-03 complete (discgroup + dupebadge leaf packages wired into Service.GetAlbums/GetArtistAlbums/GetAlbumTracks, wave 2). Next: 03-04.
+Plan: 03-04 complete (2/2 tasks). Next: 03-05 (loose-track fallback for GetArtistAlbums, ARTIST-04/BROWSE-04).
+Status: Phase 3 plans 01-04 complete (discgroup + dupebadge leaf packages wired into both the MPD-direct AND cache-served album-list paths, wave 3). Next: 03-05.
 Last activity: 2026-08-12
 
-Progress: [░░░░░░░░░░] 0%
+Progress: [████████░░] 76%
 
 ## Performance Metrics
 
@@ -63,6 +63,7 @@ Progress: [░░░░░░░░░░] 0%
 | Phase 03 P01 | 15min | 2 tasks | 2 files |
 | Phase 03 P02 | 12min | 2 tasks | 2 files |
 | Phase 03 P03 | 20min | 3 tasks | 6 files |
+| Phase 03 P04 | 8min | 2 tasks | 8 files |
 
 ## Accumulated Context
 
@@ -113,6 +114,8 @@ Recent decisions affecting current work:
 - [Phase ?]: [Phase 03-01]: Renamed discgroup entrypoint from Group to GroupFolders (plan's interfaces contract specified both a type and func named Group in the same package, which Go rejects) — Plan 03 wave-2 callers must use discgroup.GroupFolders(folders), not discgroup.Group(folders)
 - [Phase 03-02]: Compute() accepts pre-formatted Candidate.Quality (caller runs formatQualityLabel) rather than reimplementing formatting in the leaf package — A test-only mirror (mirrorFormatQualityLabel) plus TestQualityLabelMirror_MatchesFixtures guards against fixture drift per hard constraint 5, without importing internal/domain from internal/infra
 - [Phase 03-03]: Badging (dupebadge.Compute) runs once over the full merged album list across all basePaths, not per basePath as the plan's action text literally describes — Live duplicate groups like The Light For Days (LOCAL vs USB) span basePaths; per-basePath badging would silently miss them. Grouping (discgroup.GroupFolders) stays per-basePath since a box set's discs always share one root under one source.
+- [Phase 03-04]: DiscCount only written when discgroup.Group.DiscCount>1 (0 otherwise), mirroring Service.GetAlbums' albumFromGroup gate, for byte-for-byte cache/MPD-direct parity
+- [Phase 03-04]: formatQualityLabel duplicated byte-for-byte inside internal/infra/cache/builder.go (not imported) so dupebadge.Candidate.Quality has an already-formatted label at cache-build time, per the infra->domain layering rule
 
 ### Verified Environment Facts (measured 2026-08-11, supersede earlier estimates)
 
@@ -154,7 +157,7 @@ Items acknowledged and carried forward from previous milestone close:
 
 ## Session Continuity
 
-Last session: 2026-08-11T22:18:37.895Z
-Stopped at: Completed 03-03-PLAN.md
+Last session: 2026-08-11T22:35:32.115Z
+Stopped at: Completed 03-04-PLAN.md
 `/gsd:plan-phase 1`.
 Resume file: None
