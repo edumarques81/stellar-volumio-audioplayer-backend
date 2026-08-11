@@ -4,13 +4,13 @@ milestone: v1.0
 milestone_name: milestone
 status: executing
 stopped_at: Completed 01-01-PLAN.md
-last_updated: "2026-08-11T09:32:21.525Z"
+last_updated: "2026-08-11T09:59:31.240Z"
 last_activity: 2026-08-11
 progress:
   total_phases: 3
   completed_phases: 0
   total_plans: 7
-  completed_plans: 1
+  completed_plans: 2
   percent: 0
 ---
 
@@ -27,7 +27,7 @@ browse surface is honest about what it's showing.
 ## Current Position
 
 Phase: 1 of 3 (Data Integrity Foundation)
-Plan: 1 of 7 complete in current phase (4 waves)
+Plan: 2 of 7 complete in current phase (4 waves)
 Status: Ready to execute
 Last activity: 2026-08-11
 
@@ -54,6 +54,7 @@ Progress: [░░░░░░░░░░] 0%
 
 *Updated after each plan completion*
 | Phase 01 P01 | 10min | 2 tasks | 4 files |
+| Phase 01 P04 | 20min | 2 tasks | 1 files |
 
 ## Accumulated Context
 
@@ -87,6 +88,7 @@ Recent decisions affecting current work:
 
 - [Phase 01]: musicfile helper placed at internal/infra/musicfile (leaf, zero internal deps), not internal/domain/library/filter.go — internal/infra/mpd (Plan 01-02) needs the predicate and internal/infra never imports internal/domain elsewhere in this codebase
 - [Phase 01]: player.isAppleDouble left as-is, not refactored to use musicfile — out of Plan 01-01 scope per its interfaces section; musicfile is the canonical implementation for new call sites going forward
+- [Phase 01]: DATA-03: mpc stats' global Songs: line aggregates MPD's INTERNAL source (11 unrelated files) alongside USB (/mnt/ssd/Music, the SSD); verify-data-integrity.sh scopes I1 to mpc listall USB rather than mpc stats to avoid a false FAIL from that unrelated source.
 
 ### Verified Environment Facts (measured 2026-08-11, supersede earlier estimates)
 
@@ -128,7 +130,7 @@ Items acknowledged and carried forward from previous milestone close:
 
 ## Session Continuity
 
-Last session: 2026-08-11T09:32:21.522Z
+Last session: 2026-08-11T09:58:19.187Z
 Stopped at: Completed 01-01-PLAN.md
 `/gsd:plan-phase 1`.
 Resume file: None

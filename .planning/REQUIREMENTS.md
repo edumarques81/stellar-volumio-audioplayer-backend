@@ -16,7 +16,7 @@ browse surface is honest about what it's showing.
   backend surfaces a count of skipped/untagged files (log + a field on the existing cache-status
   payload) instead of quietly omitting them from browse results.
 
-- [ ] **DATA-03**: MPD's database contains no macOS `._` resource-fork entries. Verified by
+- [x] **DATA-03**: MPD's database contains no macOS `._` resource-fork entries. Verified by
   `mpc stats` song count matching the real file count (currently 1380 indexed vs 803 real).
 
 - [ ] **DATA-04**: The backend ignores `._` files consistently everywhere it reads MPD song lists —
@@ -116,7 +116,7 @@ Which phases cover which requirements. Filled during roadmap creation.
 |-------------|-------|--------|
 | DATA-01 | Phase 1 | Pending |
 | DATA-02 | Phase 1 | Pending |
-| DATA-03 | Phase 1 | Pending |
+| DATA-03 | Phase 1 | Complete |
 | DATA-04 | Phase 1 | In Progress (01-01 done; 01-02, 01-05 pending) |
 | ARTIST-01 | Phase 2 | Pending |
 | ARTIST-02 | Phase 2 | Pending |
