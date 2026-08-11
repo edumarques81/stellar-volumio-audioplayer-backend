@@ -4,13 +4,13 @@ milestone: v1.0
 milestone_name: milestone
 status: executing
 stopped_at: Completed 02-01-PLAN.md
-last_updated: "2026-08-11T16:49:49.044Z"
+last_updated: "2026-08-11T17:19:20.016Z"
 last_activity: 2026-08-11
 progress:
   total_phases: 6
   completed_phases: 1
   total_plans: 11
-  completed_plans: 8
+  completed_plans: 9
   percent: 17
 ---
 
@@ -27,7 +27,7 @@ browse surface is honest about what it's showing.
 ## Current Position
 
 Phase: 2 (Artist Identity & Artwork Migration) — EXECUTING
-Plan: 2 of 4
+Plan: 3 of 4
 Status: Ready to execute
 Last activity: 2026-08-11
 
@@ -58,6 +58,7 @@ Progress: [░░░░░░░░░░] 0%
 | Phase 01 P02 | 35min | 3 tasks | 9 files |
 | Phase 01 P05 | 15min | 2 tasks | 2 files |
 | Phase 02 P01 | 2min | 2 tasks | 2 files |
+| Phase 02 P02 | 12min | 2 tasks | 4 files |
 
 ## Accumulated Context
 
@@ -100,6 +101,9 @@ Recent decisions affecting current work:
 - [Phase 02]: Single earliest-delimiter-wins scan (comma, ' - ', ' with ', double-space) handles all four ROADMAP join conventions with one code path in artistidentity.Collapse — No per-convention special-casing needed; verified against all 124 real corpus values with zero mismatches
 - [Phase 02]: No hand-maintained exception list for Collapse (D-06 discretion exercised toward uniform rule) — Adderley -> Adderley is a known, accepted imperfection, pinned by its own explicit standalone test rather than silently accepted as a table row
 - [Phase 02]: artistidentity package placed at internal/infra/artistidentity (leaf, zero internal deps) — Mirrors internal/infra/musicfile from Phase 1 -- internal/infra/cache (a later plan) needs Collapse without inverting the infra->domain import layering
+- [Phase 02]: Collapse wired at BOTH call sites (cache-build + MPD-direct fallback) per D-06, mirroring Phase 1 DATA-04 precedent
+- [Phase 02]: Merge-by-sum on collision (not last-write-wins) in both paths, proven with real 16-variant Pavarotti and Moby corpus cases
+- [Phase 02]: Service.GetArtists query filter runs against the canonical (post-collapse) name, not the raw MPD tag
 
 ### Verified Environment Facts (measured 2026-08-11, supersede earlier estimates)
 
@@ -141,7 +145,7 @@ Items acknowledged and carried forward from previous milestone close:
 
 ## Session Continuity
 
-Last session: 2026-08-11T16:49:49.041Z
+Last session: 2026-08-11T17:16:55.619Z
 Stopped at: Completed 02-01-PLAN.md
 `/gsd:plan-phase 1`.
 Resume file: None

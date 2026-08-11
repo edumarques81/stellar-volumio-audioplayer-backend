@@ -71,7 +71,7 @@ Plans:
 Plans:
 
 - [x] 02-01-PLAN.md — TDD: pure Collapse() artist-name rule, proven against the real 124-value corpus (ARTIST-01, ARTIST-02, ARTIST-03)
-- [ ] 02-02-PLAN.md — Wire Collapse() into the cache builder + the MPD-direct fallback, merging album counts across collapsed variants (ARTIST-01, ARTIST-02, ARTIST-03)
+- [x] 02-02-PLAN.md — Wire Collapse() into the cache builder + the MPD-direct fallback, merging album counts across collapsed variants (ARTIST-01, ARTIST-02, ARTIST-03)
 - [ ] 02-03-PLAN.md — Deterministic artist-artwork rekey (auto-runs on boot) + album-artwork orphan rekey helper, unit-tested, zero live Pi contact (ART-01, ART-02, ART-03)
 - [ ] 02-04-PLAN.md — Deploy collapse + migration together, human-confirmed album-artwork matching, live verification (autonomous: false) (ARTIST-01, ARTIST-02, ARTIST-03, ART-01, ART-02, ART-03)
 
@@ -241,6 +241,6 @@ Phases execute in numeric order: 1 → 2 → 3 → 4
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
 | 1. Data Integrity Foundation | 5/7 | In Progress|  |
-| 2. Artist Identity & Artwork Migration | 1/4 | In Progress|  |
+| 2. Artist Identity & Artwork Migration | 2/4 | In Progress|  |
 | 3. Browse Experience — Duplicate Badges & Empty States | 0/TBD | Not started | - |
 | 4. Tail Cleanup — DSD Test File Conversion | 0/TBD | Not started | - |
