@@ -51,6 +51,11 @@ type MPDClient interface {
 	// Track queries
 	FindAlbumTracks(album, albumArtist string) ([]map[string]string, error)
 	SearchByBase(basePath string) ([]map[string]string, error)
+	// FindTracksByArtist is the ARTIST-04/BROWSE-04 defensive fallback
+	// query: it searches MPD's Artist tag (independent of the AlbumArtist
+	// grouping GetArtistAlbums otherwise uses) so an artist that resolves
+	// to zero grouped albums can still surface a playable loose-track list.
+	FindTracksByArtist(artist string) ([]map[string]string, error)
 
 	// Playlist/radio queries
 	ListPlaylists() ([]string, error)
@@ -526,7 +531,7 @@ func (s *Service) GetArtistAlbums(req GetArtistAlbumsRequest) ArtistAlbumsRespon
 		end = len(albums)
 	}
 
-	return ArtistAlbumsResponse{
+	resp := ArtistAlbumsResponse{
 		Artist: req.Artist,
 		Albums: albums[start:end],
 		Pagination: Pagination{
@@ -536,6 +541,134 @@ func (s *Service) GetArtistAlbums(req GetArtistAlbumsRequest) ArtistAlbumsRespon
 			HasMore: end < total,
 		},
 	}
+
+	// ARTIST-04/BROWSE-04 defensive fallback (D-09): when the grouped
+	// AlbumArtist-based query resolves to zero albums, query MPD's Artist
+	// tag directly -- untagged/loose imports may credit an artist on
+	// individual tracks without ever getting an AlbumArtist grouping at
+	// all. This is defensive: no artist in the live library currently hits
+	// this path (D-08), but it prevents a silent dead-end response instead
+	// of failing loudly if/when it does.
+	if len(albums) == 0 {
+		rawSongs, err := s.mpd.FindTracksByArtist(req.Artist)
+		if err != nil {
+			log.Debug().Err(err).Str("artist", req.Artist).Msg("Failed to find loose tracks by artist")
+		} else {
+			var loose []Track
+			for _, song := range rawSongs {
+				// MPD's "search" command is a case-insensitive SUBSTRING
+				// match -- filter to an exact Artist-tag match before any
+				// track reaches the response (T-03-08).
+				if !strings.EqualFold(song["Artist"], req.Artist) {
+					continue
+				}
+				track, ok := s.trackFromRawSong(song)
+				if !ok {
+					continue
+				}
+				loose = append(loose, track)
+			}
+
+			sort.Slice(loose, func(i, j int) bool {
+				if loose[i].Album != loose[j].Album {
+					return loose[i].Album < loose[j].Album
+				}
+				if loose[i].Disc != loose[j].Disc {
+					return loose[i].Disc < loose[j].Disc
+				}
+				if loose[i].TrackNumber != loose[j].TrackNumber {
+					return loose[i].TrackNumber < loose[j].TrackNumber
+				}
+				return loose[i].Title < loose[j].Title
+			})
+
+			resp.LooseTracks = loose
+		}
+	}
+
+	return resp
+}
+
+// trackFromRawSong builds a playable Track from a raw MPD song map (the
+// shape returned by FindAlbumTracks/SearchByBase/FindTracksByArtist).
+// Returns (Track{}, false) when the song should be skipped -- an empty file
+// path or a macOS resource-fork entry (._prefix) -- mirroring the filter
+// GetAlbumTracks has always applied. Shared by GetAlbumTracks and the
+// ARTIST-04/BROWSE-04 loose-track fallback in GetArtistAlbums so the two
+// call sites can never drift on title-fallback/duration/disc parsing.
+func (s *Service) trackFromRawSong(track map[string]string) (Track, bool) {
+	file := track["file"]
+	if file == "" {
+		return Track{}, false
+	}
+
+	// Skip macOS resource fork files (._prefix)
+	if musicfile.IsResourceFork(file) {
+		return Track{}, false
+	}
+
+	// Parse track number
+	trackNum := 0
+	if tn := track["Track"]; tn != "" {
+		// Track can be "1" or "1/12"
+		if idx := strings.Index(tn, "/"); idx > 0 {
+			tn = tn[:idx]
+		}
+		if n, err := strconv.Atoi(tn); err == nil {
+			trackNum = n
+		}
+	}
+
+	// Parse disc number (BROWSE-07: a grouped multi-disc album's combined
+	// SearchByBase result must sort disc-1 tracks before disc-2's).
+	// Empty/absent/unparseable Disc yields 0, matching the TrackNumber/
+	// Duration convention -- omitempty drops it from JSON.
+	discNum := 0
+	if dn := track["Disc"]; dn != "" {
+		if idx := strings.Index(dn, "/"); idx > 0 {
+			dn = dn[:idx]
+		}
+		if n, err := strconv.Atoi(dn); err == nil {
+			discNum = n
+		}
+	}
+
+	// Parse duration
+	duration := 0
+	if d := track["Time"]; d != "" {
+		if n, err := strconv.Atoi(d); err == nil {
+			duration = n
+		}
+	} else if d := track["duration"]; d != "" {
+		if f, err := strconv.ParseFloat(d, 64); err == nil {
+			duration = int(f)
+		}
+	}
+
+	// Get title, fallback to filename
+	title := track["Title"]
+	if title == "" {
+		title = path.Base(file)
+		if ext := path.Ext(title); ext != "" {
+			title = title[:len(title)-len(ext)]
+		}
+	}
+
+	// Determine source type from file path
+	sourceType := s.classifier.GetSourceType(file)
+
+	return Track{
+		ID:          generateID(file),
+		Title:       title,
+		Artist:      track["Artist"],
+		Album:       track["Album"],
+		URI:         file,
+		TrackNumber: trackNum,
+		Disc:        discNum,
+		Duration:    duration,
+		AlbumArt:    "/albumart?path=" + file,
+		Source:      sourceType,
+	}, true
 }
 
 // GetAlbumTracks returns tracks for a specific album.
@@ -569,81 +702,11 @@ func (s *Service) GetAlbumTracks(req GetAlbumTracksRequest) AlbumTracksResponse 
 	totalDuration := 0
 
 	for _, track := range tracks {
-		file := track["file"]
-		if file == "" {
+		resultTrack, ok := s.trackFromRawSong(track)
+		if !ok {
 			continue
 		}
-
-		// Skip macOS resource fork files (._prefix)
-		if musicfile.IsResourceFork(file) {
-			continue
-		}
-
-		// Parse track number
-		trackNum := 0
-		if tn := track["Track"]; tn != "" {
-			// Track can be "1" or "1/12"
-			if idx := strings.Index(tn, "/"); idx > 0 {
-				tn = tn[:idx]
-			}
-			if n, err := strconv.Atoi(tn); err == nil {
-				trackNum = n
-			}
-		}
-
-		// Parse disc number (BROWSE-07: a grouped multi-disc album's combined
-		// SearchByBase result must sort disc-1 tracks before disc-2's).
-		// Empty/absent/unparseable Disc yields 0, matching the TrackNumber/
-		// Duration convention -- omitempty drops it from JSON.
-		discNum := 0
-		if dn := track["Disc"]; dn != "" {
-			if idx := strings.Index(dn, "/"); idx > 0 {
-				dn = dn[:idx]
-			}
-			if n, err := strconv.Atoi(dn); err == nil {
-				discNum = n
-			}
-		}
-
-		// Parse duration
-		duration := 0
-		if d := track["Time"]; d != "" {
-			if n, err := strconv.Atoi(d); err == nil {
-				duration = n
-			}
-		} else if d := track["duration"]; d != "" {
-			if f, err := strconv.ParseFloat(d, 64); err == nil {
-				duration = int(f)
-			}
-		}
-
-		totalDuration += duration
-
-		// Get title, fallback to filename
-		title := track["Title"]
-		if title == "" {
-			title = path.Base(file)
-			if ext := path.Ext(title); ext != "" {
-				title = title[:len(title)-len(ext)]
-			}
-		}
-
-		// Determine source type from file path
-		sourceType := s.classifier.GetSourceType(file)
-
-		resultTrack := Track{
-			ID:          generateID(file),
-			Title:       title,
-			Artist:      track["Artist"],
-			Album:       track["Album"],
-			URI:         file,
-			TrackNumber: trackNum,
-			Disc:        discNum,
-			Duration:    duration,
-			AlbumArt:    "/albumart?path=" + file,
-			Source:      sourceType,
-		}
-
+		totalDuration += resultTrack.Duration
 		resultTracks = append(resultTracks, resultTrack)
 	}
 
