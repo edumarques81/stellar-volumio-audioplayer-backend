@@ -2,7 +2,7 @@
 gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
-status: verifying
+status: milestone-closed
 stopped_at: Completed 03-08b-PLAN.md
 last_updated: "2026-08-12T09:32:10.000Z"
 last_activity: 2026-08-12
@@ -22,17 +22,24 @@ See: .planning/PROJECT.md (updated 2026-08-11)
 
 **Core value:** Every album on the disk is findable and playable from the LCD and the phone, and the
 browse surface is honest about what it's showing.
-**Current focus:** Phase 3 — Browse Experience
+**Current focus:** v1.0 closed — Phases 1-3 shipped, Phase 4 abandoned, backlog 999.1 (art) + 999.3 fixed
 
 ## Current Position
 
-Phase: 3 (Browse Experience) — COMPLETE
-Plan: 03-08b complete (2/2 auto tasks + checkpoint; live iOS Simulator verification against the deployed Pi backend — Mahler one-tile + ordered Disc N headers, Kind Of Blue's 3 distinct badges (DSD/DSD/352.8kHz FLAC), The Future Is Now's 2 badges on the Artist grid, Djesse Vol. 4's 2 real duplicates correctly unbadged, and dozens of other tiles confirmed clean/unbadged — 9 inspected screenshots). Phase 3 is now fully verified end-to-end (backend + LCD + iOS all confirmed against the same live 66-album Pi library). Next: Phase 4 planning.
-Status: Phase 3 complete — all 10 plans (01, 02, 03, 04, 05, 06, 07a, 07b, 08a, 08b) shipped and verified against live data on both clients (LCD kiosk + iPhone).
-Stopped At: Completed 03-08b-PLAN.md
+Phase: v1.0 milestone CLOSED (2026-08-12)
+- Phases 1, 2, 3: complete and verified live on the Pi.
+- Phase 4 (.dff -> .dsf): **ABANDONED by user decision** — no DSD muxer on either machine, hand-written
+  remuxer declined. `skippedCount` stays 1 (a DAC test tone, not music). Do not restart.
+- Backlog 999.3 (format strip bit depth + false HI-RES + wrong bio): **FIXED**, deployed, verified live.
+- Backlog 999.1 cover art (`+` in query decoded as space): **FIXED**, verified live (HTTP 200 / 440,399 B).
+- Backlog 999.1 booklet PDF + 999.2 file ingest to Pi: still open, both need design before planning.
+
+Status: No GSD phase in flight. Next work is user's choice — App Store (Xcode 26) is the standing
+open track outside this milestone.
+Stopped At: backlog fixes committed + pushed (backend f1907d3, Volumio2-UI 71ee0c78)
 Last activity: 2026-08-12
 
-Progress: [██████████] 100% (Phase 3)
+Progress: [##########] v1.0 complete (3 phases shipped, 1 abandoned)
 
 ## Performance Metrics
 

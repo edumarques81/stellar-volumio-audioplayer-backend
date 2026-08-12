@@ -23,7 +23,7 @@ Decimal phases appear between their surrounding integers in numeric order.
 - [x] **Phase 1: Data Integrity Foundation** - Remove `._` junk from MPD's index, harden the backend against it everywhere, fix the 16 untagged real songs at source (user-executed), and make future data gaps detectable instead of silent.
 - [x] **Phase 2: Artist Identity & Artwork Migration** - Collapse credited-collaborator artist strings to one entry per real performer and re-key existing artwork onto the new identities in the same pass, recovering the 38 orphaned album-artwork rows too.
 - [x] **Phase 3: Browse Experience — Duplicate Badges & Empty States** - Add the quality-disambiguation badge to duplicate albums on both the LCD and the iPhone app, and make artists with only loose songs (or zero albums) render a real, playable result instead of an empty grid. (completed 2026-08-12)
-- [ ] **Phase 4: Tail Cleanup — DSD Test File Conversion** - Convert the last untagged `.dff` test tone to `.dsf` on the MacBook so MPD can read its tags and `skippedCount` reaches 0. Runs after all feature phases.
+- [~] **Phase 4: Tail Cleanup — DSD Test File Conversion** - **ABANDONED 2026-08-12 by user decision.** No DSD muxer exists on either machine and a hand-written remuxer was declined; `skippedCount` stays at 1 (a DAC test tone, not music). Do not restart without a new instruction.
 
 ## Phase Details
 
@@ -109,7 +109,26 @@ Plans:
 (the duplicate-detection signal and the loose-song list are new payload fields). Any event-shape
 change here is a three-repo change — update `docs/SOCKET-CONTRACT.md` and ship all three together.
 
-### Phase 4: Tail Cleanup — DSD Test File Conversion
+### Phase 4: Tail Cleanup — DSD Test File Conversion (ABANDONED 2026-08-12)
+
+> **ABANDONED by user decision, 2026-08-12** ("Forget about it then. Move on.").
+> `skippedCount` stays at **1** permanently unless this is revisited. That is the *legible* kind of
+> skip, which was Phase 1's actual goal — the file is a **DAC verification announcement tone, not
+> music**.
+>
+> Do NOT restart this phase without a new instruction. The tooling survey was completed and is
+> conclusive: Mac `ffmpeg` 8.0.1 has a `dsf` **demuxer only and no DSD muxer at all** (and no
+> `dsdiff` demuxer, so success criterion 3 as written was never runnable on the Mac either); Pi
+> `ffmpeg` 5.1.8 likewise. Homebrew has nothing usable — `dsda-doom` is a Doom source port and
+> `sacad` is an album-art fetcher. No `sox`, `dff2dsf`, `sacd_extract`, `dsf2flac` on either machine.
+> The remaining option was a hand-written DFF->DSF container remuxer (de-interleave + bit-order
+> reversal), which the user explicitly declined.
+>
+> Confirmed while probing: the `.dff` **already carries a valid trailing ID3v2.4 chunk**
+> (`TPE1=Test Signals`, `TALB=Singxer SU-6 Te...`) written by Phase 1's `mutagen.dsdiff` pass, plus a
+> second in-`PROP` ID3 chunk. Source is `FRM8`/`DSD `, 2ch `SLFT`/`SRGT`, FS 2822400, `CMPR='DSD '`
+> ("not compressed"), DSD chunk 42,938,112 bytes. The tag was never the blocker — **MPD 0.23.12's
+> DSDIFF decoder simply does not read ID3 back**.
 
 **Goal**: The last untagged file in the library becomes visible, taking `skippedCount` from 1 to 0 and closing the data-integrity story opened in Phase 1.
 **Mode:** mvp
@@ -330,4 +349,4 @@ Phases execute in numeric order: 1 → 2 → 3 → 4
 | 1. Data Integrity Foundation | 5/7 | In Progress|  |
 | 2. Artist Identity & Artwork Migration | 3/4 | In Progress|  |
 | 3. Browse Experience — Duplicate Badges & Empty States | 10/10 | Complete   | 2026-08-12 |
-| 4. Tail Cleanup — DSD Test File Conversion | 0/TBD | Not started | - |
+| 4. Tail Cleanup — DSD Test File Conversion | 0/0 | Abandoned (user) | 2026-08-12 |
