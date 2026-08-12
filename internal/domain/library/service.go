@@ -14,6 +14,8 @@ import (
 	"github.com/edumarques81/stellar-volumio-audioplayer-backend/internal/infra/discgroup"
 	"github.com/edumarques81/stellar-volumio-audioplayer-backend/internal/infra/dupebadge"
 	"github.com/edumarques81/stellar-volumio-audioplayer-backend/internal/infra/musicfile"
+
+	"github.com/edumarques81/stellar-volumio-audioplayer-backend/internal/infra/arturl"
 )
 
 // AlbumInfo matches the mpd.AlbumInfo type.
@@ -250,7 +252,7 @@ func albumFromGroup(g discgroup.Group, sourceType SourceType, includeGenre bool)
 
 	albumArt := ""
 	if g.FirstTrack != "" {
-		albumArt = "/albumart?path=" + g.FirstTrack
+		albumArt = arturl.AlbumArt(g.FirstTrack)
 	}
 
 	var sampleRate, bitDepth int
@@ -666,7 +668,7 @@ func (s *Service) trackFromRawSong(track map[string]string) (Track, bool) {
 		TrackNumber: trackNum,
 		Disc:        discNum,
 		Duration:    duration,
-		AlbumArt:    "/albumart?path=" + file,
+		AlbumArt:    arturl.AlbumArt(file),
 		Source:      sourceType,
 	}, true
 }

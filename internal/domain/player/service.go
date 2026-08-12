@@ -10,6 +10,8 @@ import (
 
 	"github.com/edumarques81/stellar-volumio-audioplayer-backend/internal/infra/mpd"
 	"github.com/rs/zerolog/log"
+
+	"github.com/edumarques81/stellar-volumio-audioplayer-backend/internal/infra/arturl"
 )
 
 // audioExtensions defines supported audio file extensions.
@@ -133,7 +135,7 @@ func (s *Service) buildState(status, song map[string]string) map[string]interfac
 
 	// Album art - we'll need to implement albumart endpoint
 	if file := song["file"]; file != "" {
-		state["albumart"] = "/albumart?path=" + file
+		state["albumart"] = arturl.AlbumArt(file)
 	} else {
 		state["albumart"] = ""
 	}
@@ -271,7 +273,7 @@ func (s *Service) GetQueue() ([]map[string]interface{}, error) {
 
 		// Album art
 		if file := song["file"]; file != "" {
-			item["albumart"] = "/albumart?path=" + file
+			item["albumart"] = arturl.AlbumArt(file)
 		}
 
 		queue[i] = item
@@ -393,7 +395,7 @@ func (s *Service) entryToBrowseItem(entry map[string]string, parentUri string) m
 		}
 
 		// Album art URL - the /albumart endpoint will fetch from MPD
-		item["albumart"] = "/albumart?path=" + file
+		item["albumart"] = arturl.AlbumArt(file)
 
 		return item
 	}

@@ -2,6 +2,7 @@ package library
 
 import (
 	"fmt"
+	"net/url"
 	"strings"
 	"testing"
 )
@@ -1120,8 +1121,13 @@ func TestService_GetArtistAlbums_PopulatesFullFields(t *testing.T) {
 	if inRainbows.URI != "INTERNAL/Radiohead/In Rainbows" {
 		t.Errorf("Expected URI 'INTERNAL/Radiohead/In Rainbows', got %q", inRainbows.URI)
 	}
-	if inRainbows.AlbumArt != "/albumart?path=INTERNAL/Radiohead/In Rainbows/01 - 15 Step.flac" {
-		t.Errorf("Expected AlbumArt to point at first track, got %q", inRainbows.AlbumArt)
+	// AlbumArt is now query-encoded (internal/infra/arturl), so assert what
+	// actually matters — that the handler reads back the first track's path —
+	// rather than pinning a literal string that any encoding change breaks.
+	if gotArt, err := url.Parse(inRainbows.AlbumArt); err != nil {
+		t.Errorf("AlbumArt is not a parsable URL: %q (%v)", inRainbows.AlbumArt, err)
+	} else if got := gotArt.Query().Get("path"); got != "INTERNAL/Radiohead/In Rainbows/01 - 15 Step.flac" {
+		t.Errorf("Expected AlbumArt to point at first track, got %q (url %q)", got, inRainbows.AlbumArt)
 	}
 	if inRainbows.TrackCount != 10 {
 		t.Errorf("Expected TrackCount 10, got %d", inRainbows.TrackCount)

@@ -7,6 +7,8 @@ import (
 	"github.com/edumarques81/stellar-volumio-audioplayer-backend/internal/infra/cache"
 	"github.com/edumarques81/stellar-volumio-audioplayer-backend/internal/infra/musicfile"
 	"github.com/rs/zerolog/log"
+
+	"github.com/edumarques81/stellar-volumio-audioplayer-backend/internal/infra/arturl"
 )
 
 // formatQualityLabel creates a human-readable quality label from audio parameters.
@@ -152,7 +154,7 @@ func (s *CachedService) GetAlbums(req GetAlbumsRequest) AlbumsResponse {
 		// Generate album art URL from first track path (same as base Service)
 		albumArt := ""
 		if ca.FirstTrack != "" {
-			albumArt = "/albumart?path=" + ca.FirstTrack
+			albumArt = arturl.AlbumArt(ca.FirstTrack)
 		}
 
 		quality := formatQualityLabel(ca.SampleRate, ca.BitDepth, ca.TrackType)

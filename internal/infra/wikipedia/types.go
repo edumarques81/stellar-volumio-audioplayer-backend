@@ -10,8 +10,9 @@ var ErrNotFound = errors.New("wikipedia: not found")
 
 // Result is the parsed payload from a single REST summary call.
 type Result struct {
-	Title     string
-	Extract   string // plain-text first paragraph
-	SourceURL string // canonical desktop page URL
-	Kind      string // "album" or "artist" — set by LookupAlbum* methods
+	Title       string
+	Description string // short one-liner, e.g. "1959 studio album by Miles Davis"
+	Extract     string // plain-text first paragraph
+	SourceURL   string // canonical desktop page URL
+	Kind        string // "album" or "artist" — set by LookupAlbum* methods
 }

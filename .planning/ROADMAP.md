@@ -165,7 +165,7 @@ Plans:
 
 Unsequenced items. Not part of the v1.0 milestone phases; promote with `/gsd:review-backlog`.
 
-### Phase 999.3: Player format strip shows wrong bit depth + wrong "HI-RES" + wrong bio (BACKLOG)
+### Phase 999.3: Player format strip shows wrong bit depth + wrong "HI-RES" + wrong bio (FIXED 2026-08-12)
 
 **Captured:** 2026-08-12, observed directly in Plan 03-07b's live LCD screenshots. **Pre-existing —
 NOT a Phase 3 regression.** The new Phase 3 badge renders the same album correctly as
@@ -190,6 +190,40 @@ Defect 1 is the most embarrassing on an audiophile streamer — the device misre
 music it is playing. Defects 1 and 2 are frontend format-strip logic; defect 3 is backend
 (`internal/domain/bios/`), where the lookup should include the artist and reject low-confidence
 matches rather than displaying a confident wrong answer.
+
+**RESOLVED 2026-08-12** — all three defects fixed, deployed to the Pi, and verified live.
+
+- **Defects 1 + 2 had a single root cause.** `parseBitDepth` (Volumio2-UI
+  `src/lib/components/redesign/playerStateParsers.ts`) matched the FIRST run of digits in the
+  string. `AlbumPage` feeds it the backend's composite `album.quality` label, so
+  `"44.1kHz/16bit FLAC"` parsed to **44** -> rendered "44-bit", and `44 >= 24` then tripped the
+  HI-RES branch in `pickBadgeKind`. The badge threshold itself was always correct. Fixed by
+  requiring an explicit `bit`/`bits` token (or an otherwise bare number).
+  Live LCD after: `...Like Clockwork` (44.1/16) shows `16-bit / 44.1 kHz` with **no** HI-RES
+  cluster; `Cannonball and Coltrane` (352.8/24) still shows `HI-RES 352.8kHz | 24-bit / 352.8 kHz`.
+  Scope was larger than reported: of the 11 distinct `quality` shapes in the live library, **10 were
+  rendering a wrong bit depth** (48 of 66 albums), and 14 Red Book albums were falsely badged HI-RES.
+  A third instance of the same parsing bug was found and fixed: `parseSampleRate("DSD64")` read a
+  bare 64 -> 64 kHz, so `dsdRate()` rendered the badge as **"DSD1"**.
+
+- **Defect 3** (`internal/infra/wikipedia/client.go`): `LookupAlbum` fell back to the bare album
+  title and accepted whatever page returned. `"The Future Is Now (toe album)"` 404s, so it served
+  Non Phixion's album page as a confident match. Three gates added:
+  1. a bare-title hit must corroborate the artist (word-boundary match on the raw tag **and** its
+     `artistidentity.Collapse` form);
+  2. `type: "disambiguation"` pages are rejected outright (Wikipedia's `Miles Ahead` page is one, and
+     it name-drops Miles Davis, so an artist check alone would have accepted it);
+  3. `LookupArtist` gates the bare name on the page looking musical at all, then tries
+     `(band)`/`(musician)` — bare `toe` returns the anatomy article ("Toes are the digits of the foot
+     of a tetrapod"), which was being served as that band's bio.
+  `LookupArtist` also now tries the collapsed primary artist, so an album credited to
+  `Miles Davis - Arranged and Directed by Gil Evans` resolves to Miles Davis.
+  Live after: toe -> `en.wikipedia.org/wiki/Toe_(band)` ("Japanese post-rock and math rock band from
+  Tokyo"). Controls unchanged: Kind Of Blue and ...Like Clockwork still return their correct album
+  bios; Miles Ahead went from empty to the Miles Davis artist bio.
+
+- **iOS needed no change** — `FormatBadgeStrip` reads the discrete `bitdepth` field from `pushState`,
+  never the composite quality label, so it never had defects 1/2.
 
 ### Phase 999.2: Ship files to the Pi — upload, unzip, land on the SSD, index in MPD (BACKLOG)
 
@@ -226,9 +260,26 @@ existing UI vs scp/rsync vs a watched folder vs Samba), who unzips and where, ho
 name collisions and partial uploads, whether tagging is validated at ingest, and whether this
 belongs in the backend or as a separate small service.
 
-### Phase 999.1: Miles Ahead — cover art not displaying + booklet in metadata (BACKLOG)
+### Phase 999.1: Miles Ahead — cover art FIXED 2026-08-12; booklet still BACKLOG
 
 **Captured:** 2026-08-12 (user: *"Miles Ahead album from Miles Davis cover art and booklet … I can't see a cover art for it now"*)
+
+**COVER ART RESOLVED 2026-08-12.** The investigation note below was right that the art was never
+missing; the fault was in the URL. The backend built album-art URLs by raw string concatenation
+(`"/albumart?path=" + trackPath`) in **ten** places, and a literal `+` in a query value decodes to a
+SPACE — so the handler looked for `Miles Davis   19-DSF-11289k-1b`, found nothing, and returned 404,
+while the same request with `%2B` returned the cover. Fixed by a new leaf package
+`internal/infra/arturl` (query-encodes the value, preserves the `/albumart?path=` prefix that
+`isArtworkRedirectURL` matches on); all ten sites now call it. `&`, `#`, `%` and `=` were the same
+bug waiting on a differently-named album. `docs/SOCKET-CONTRACT.md` updated.
+
+Verified live from the kiosk browser, fetching the exact URL the backend emits: Miles Ahead returns
+**HTTP 200, 440,399 bytes**. All 66 album covers were fetched in the same pass — the only failure is
+`Singxer SU-6 Test`, the DAC test-tone folder, which genuinely has no artwork.
+
+**Still open:** surfacing the booklet PDF in album metadata. Unchanged from the note below — there is
+no booklet/attachment field in the Socket.IO contract, so it needs a design decision (new field on
+the album payload + a client affordance to open it) before it is plannable.
 
 **Album:** `Miles Ahead - Miles Davis + 19`
 **Album artist tag:** `Miles Davis - Arranged and Directed by Gil Evans`

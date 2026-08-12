@@ -10,6 +10,8 @@ import (
 
 	"github.com/edumarques81/stellar-volumio-audioplayer-backend/internal/infra/cache"
 	"github.com/edumarques81/stellar-volumio-audioplayer-backend/internal/infra/enrichment"
+
+	"github.com/edumarques81/stellar-volumio-audioplayer-backend/internal/infra/arturl"
 )
 
 // EnrichmentHandlers manages artwork enrichment from web sources.
@@ -330,5 +332,5 @@ func (p *cacheDAOArtistProvider) GetFirstAlbumArtwork(artistName string) (string
 		return "", nil
 	}
 	// Return the album art URL
-	return "/albumart?path=" + album.FirstTrack, nil
+	return arturl.AlbumArt(album.FirstTrack), nil
 }

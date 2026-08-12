@@ -9,6 +9,8 @@ import (
 	"strings"
 
 	"github.com/rs/zerolog/log"
+
+	"github.com/edumarques81/stellar-volumio-audioplayer-backend/internal/infra/arturl"
 )
 
 // MPDClient interface for MPD operations needed by this service.
@@ -134,7 +136,7 @@ func (s *Service) getAlbumsFromDatabase(basePath string, sourceType SourceType, 
 			Title:      details.Album,
 			Artist:     details.AlbumArtist,
 			URI:        albumPath,
-			AlbumArt:   "/albumart?path=" + details.FirstTrack,
+			AlbumArt:   arturl.AlbumArt(details.FirstTrack),
 			TrackCount: details.TrackCount,
 			Source:     sourceType,
 		}
@@ -280,7 +282,7 @@ func (s *Service) createAlbumFromDirectory(dirPath string, firstTrack map[string
 		Title:      albumTitle,
 		Artist:     artist,
 		URI:        dirPath,
-		AlbumArt:   "/albumart?path=" + albumArtPath,
+		AlbumArt:   arturl.AlbumArt(albumArtPath),
 		TrackCount: trackCount,
 		Source:     sourceType,
 	}
@@ -394,7 +396,7 @@ func (s *Service) GetAlbumTracks(req GetAlbumTracksRequest) AlbumTracksResponse 
 			URI:         file,
 			TrackNumber: trackNum,
 			Duration:    duration,
-			AlbumArt:    "/albumart?path=" + file,
+			AlbumArt:    arturl.AlbumArt(file),
 			Source:      sourceType,
 		}
 

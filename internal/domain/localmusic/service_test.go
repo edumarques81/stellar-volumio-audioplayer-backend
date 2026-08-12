@@ -2,6 +2,7 @@ package localmusic
 
 import (
 	"fmt"
+	"net/url"
 	"testing"
 )
 
@@ -635,9 +636,14 @@ func TestService_GetAlbumTracks_AlbumArt(t *testing.T) {
 	resp := service.GetAlbumTracks(GetAlbumTracksRequest{AlbumURI: "INTERNAL/Album"})
 
 	if len(resp.Tracks) > 0 {
-		expectedArt := "/albumart?path=INTERNAL/Album/track.flac"
-		if resp.Tracks[0].AlbumArt != expectedArt {
-			t.Errorf("Expected albumArt %q, got %q", expectedArt, resp.Tracks[0].AlbumArt)
+		// AlbumArt is query-encoded (internal/infra/arturl); assert the path
+		// the handler reads back rather than the literal URL bytes.
+		const wantPath = "INTERNAL/Album/track.flac"
+		got, err := url.Parse(resp.Tracks[0].AlbumArt)
+		if err != nil {
+			t.Errorf("albumArt is not a parsable URL: %q (%v)", resp.Tracks[0].AlbumArt, err)
+		} else if p := got.Query().Get("path"); p != wantPath {
+			t.Errorf("Expected albumArt path %q, got %q (url %q)", wantPath, p, resp.Tracks[0].AlbumArt)
 		}
 	}
 }
