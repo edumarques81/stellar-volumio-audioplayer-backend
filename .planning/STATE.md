@@ -3,15 +3,15 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: verifying
-stopped_at: Completed 03-07a-PLAN.md
-last_updated: "2026-08-12T06:01:01.280Z"
+stopped_at: Completed 03-07b-PLAN.md
+last_updated: "2026-08-12T06:17:23.749Z"
 last_activity: 2026-08-12
 progress:
   total_phases: 6
   completed_phases: 2
   total_plans: 21
-  completed_plans: 18
-  percent: 33
+  completed_plans: 19
+  percent: 90
 ---
 
 # Project State
@@ -27,12 +27,12 @@ browse surface is honest about what it's showing.
 ## Current Position
 
 Phase: 3 (Browse Experience) — EXECUTING
-Plan: 03-07a complete (3/3 tasks; Volumio2-UI LCD rendering for badge/discCount/disc/looseTracks — AlbumPage badge, AlbumTrackList disc grouping, LibraryView loose-track fallback, all unit/component-tested). Next: 03-07b (Volumio2-UI deploy + live LCD verification checkpoint).
-Status: Phase 3 plans 01-07a complete (discgroup + dupebadge wiring, cache schema v6, LooseTracks fallback, the live Pi deploy checkpoint, and now the LCD-side rendering of all four fields). Next: 03-07b (Volumio2-UI deploy + CDP screenshot verification), then 03-08a/03-08b (stellar-ios).
-Stopped At: Completed 03-07a-PLAN.md
+Plan: 03-07b complete (2/2 auto tasks + 1 checkpoint auto-approved; Volumio2-UI built + deployed to the Pi, kiosk reloaded, live CDP-driven visual + full-library DOM sweep verification of BROWSE-01/03/07 against the real 66-album library — badge on Kind Of Blue x3 + Future Is Now x2, Mahler as one tile with 11 Disc N headers, Djesse Vol. 4's real duplicates correctly unbadged). Next: 03-08a/03-08b (stellar-ios rendering of the same fields).
+Status: Phase 3 plans 01-07b complete (discgroup + dupebadge wiring, cache schema v6, LooseTracks fallback, the live Pi deploy checkpoint, LCD-side rendering of all four fields, and now the live deploy + physical-LCD verification of that rendering). Next: 03-08a/03-08b (stellar-ios).
+Stopped At: Completed 03-07b-PLAN.md
 Last activity: 2026-08-12
 
-Progress: [█████████░] 86%
+Progress: [█████████░] 90%
 
 ## Performance Metrics
 
@@ -68,6 +68,7 @@ Progress: [█████████░] 86%
 | Phase 03 P05 | 35min | 2 tasks | 6 files |
 | Phase 03 P06 | 25min | 3 tasks | 1 files |
 | Phase 03 P07a | 20min | 3 tasks | 9 files |
+| Phase 03 P07b | 32min | 2 tasks | 6 files |
 
 ## Accumulated Context
 
@@ -125,6 +126,7 @@ Recent decisions affecting current work:
 - [Phase 03-06]: docs/SOCKET-CONTRACT.md lives at the workspace root (not a git repo) — edited in place, no commit exists for it; this is the designed workspace layout, not an omission
 - [Phase 03-06]: Pi cache does not auto-rebuild on binary-only restart — schema migrates (v5->v6) but the old 80-row cache loads from disk as-is until library:cache:rebuild is triggered explicitly; triggered it live, dropping album count 80->66 as grouping collapsed 4 box sets (Mahler/Tosca/Rated R/Woody Allen)
 - [Phase 03-07a]: Volumio2-UI LCD rendering for badge/discCount/disc/looseTracks shipped: outlined pill badge on AlbumPage, Disc N headers via AlbumTrackList grouping, inline loose-track fallback on LibraryView — All unit/component-tested against the locked contract from 03-06; 03-07b handles live LCD visual verification + deploy
+- [Phase 03-07b]: CDP-driven real-DOM-click navigation (clicking the same chevron a physical finger taps) used to verify the production frontend build, instead of the dev-server module-import DevTools tap which doesn't work against a built dist/ — Production bundle has no reachable module path for the dev-server import trick; clicking data-testid elements is a more faithful verification path anyway
 
 ### Verified Environment Facts (measured 2026-08-11, supersede earlier estimates)
 
@@ -166,6 +168,6 @@ Items acknowledged and carried forward from previous milestone close:
 
 ## Session Continuity
 
-Last session: 2026-08-12T06:00:32.114Z
+Last session: 2026-08-12T06:17:23.744Z
 Stopped at: Completed 03-07a-PLAN.md
 Resume file: None
