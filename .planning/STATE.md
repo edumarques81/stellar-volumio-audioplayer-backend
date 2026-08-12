@@ -3,15 +3,15 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: verifying
-stopped_at: Completed 03-08a-PLAN.md
-last_updated: "2026-08-12T06:36:52.409Z"
+stopped_at: Completed 03-08b-PLAN.md
+last_updated: "2026-08-12T09:32:10.000Z"
 last_activity: 2026-08-12
 progress:
   total_phases: 7
-  completed_phases: 2
+  completed_phases: 3
   total_plans: 21
-  completed_plans: 20
-  percent: 29
+  completed_plans: 21
+  percent: 43
 ---
 
 # Project State
@@ -26,13 +26,13 @@ browse surface is honest about what it's showing.
 
 ## Current Position
 
-Phase: 3 (Browse Experience) — EXECUTING
-Plan: 03-08a complete (3/3 auto tasks; stellar-ios rendering of badge/discCount/disc/looseTracks — gold-outline duplicate badge on both AlbumPickerView and ArtistDetailView album grids, "Disc N" headers on AlbumTracksView for discCount>1, and a real tap-to-play loose-track fallback on ArtistDetailView for a zero-album artist drill-in, all store/unit-tested against the locked contract; 154/154 tests + clean simulator build). Next: 03-08b (live simulator visual verification against the deployed Pi backend).
-Status: Phase 3 plans 01-08a complete (discgroup + dupebadge wiring, cache schema v6, LooseTracks fallback, the live Pi deploy checkpoint, LCD-side rendering of all four fields, the live deploy + physical-LCD verification, and now the iOS-side rendering of the same four fields). Next: 03-08b (stellar-ios live verification).
-Stopped At: Completed 03-08a-PLAN.md
+Phase: 3 (Browse Experience) — COMPLETE
+Plan: 03-08b complete (2/2 auto tasks + checkpoint; live iOS Simulator verification against the deployed Pi backend — Mahler one-tile + ordered Disc N headers, Kind Of Blue's 3 distinct badges (DSD/DSD/352.8kHz FLAC), The Future Is Now's 2 badges on the Artist grid, Djesse Vol. 4's 2 real duplicates correctly unbadged, and dozens of other tiles confirmed clean/unbadged — 9 inspected screenshots). Phase 3 is now fully verified end-to-end (backend + LCD + iOS all confirmed against the same live 66-album Pi library). Next: Phase 4 planning.
+Status: Phase 3 complete — all 10 plans (01, 02, 03, 04, 05, 06, 07a, 07b, 08a, 08b) shipped and verified against live data on both clients (LCD kiosk + iPhone).
+Stopped At: Completed 03-08b-PLAN.md
 Last activity: 2026-08-12
 
-Progress: [█████████░] 90%
+Progress: [██████████] 100% (Phase 3)
 
 ## Performance Metrics
 
@@ -70,6 +70,7 @@ Progress: [█████████░] 90%
 | Phase 03 P07a | 20min | 3 tasks | 9 files |
 | Phase 03 P07b | 32min | 2 tasks | 6 files |
 | Phase 03 P08a | 25min | 3 tasks | 8 files |
+| Phase 03 P08b | 75min | 2 tasks | 0 files |
 
 ## Accumulated Context
 
@@ -131,6 +132,8 @@ Recent decisions affecting current work:
 - [Phase 03-08a]: AlbumDuplicateBadge factored into one shared struct reused by both AlbumPickerView and ArtistDetailView, while their two AlbumTile structs stay deliberately duplicated per plan — Avoids the badge chip's style silently drifting between the two grids over time without expanding the plan's scope
 - [Phase 03-08a]: ArtistPickerStore.applyArtistAlbumsPayload(_:) extracted from the bind() closure for testability — The closure itself can't be triggered from a unit test (no live socket connection); mirrors AlbumPickerStore.handleLibraryCacheUpdated's existing convention
 - [Phase 03-08a]: Track.disc defaults to 0 via a designated-initializer default parameter, not a required field — Keeps the two pre-existing Track(id:...) call sites in LibraryAutoRefreshTests.swift/AlbumTracksStoreTests.swift compiling unchanged
+- [Phase 03-08b]: Host-level GUI automation (AppleScript/System Events) is unavailable in this sandbox (0 windows reported for the booted Simulator; `screencapture` returns black) — XCUITest driving the app via the simulator's own accessibility channel is the correct fallback for any future simulator verification plan; a temporary UI test target was added, used, then fully reverted (no source commit, matching files_modified: [])
+- [Phase 03-08b]: Existence/hittable-gated scroll-search in XCUITest is unreliable against a live-refreshing SwiftUI LazyVGrid (3 tuning attempts each silently missed different targets) — an unconditional fixed-count fast-swipe sweep that screenshots at every stop, inspected visually afterward, is faster (61s vs 250-820s) and reliable; use this recipe for future iOS simulator verification
 
 ### Verified Environment Facts (measured 2026-08-11, supersede earlier estimates)
 
@@ -172,6 +175,6 @@ Items acknowledged and carried forward from previous milestone close:
 
 ## Session Continuity
 
-Last session: 2026-08-12T06:36:32.148Z
-Stopped at: Completed 03-07a-PLAN.md
+Last session: 2026-08-12T09:32:10.000Z
+Stopped at: Completed 03-08b-PLAN.md
 Resume file: None

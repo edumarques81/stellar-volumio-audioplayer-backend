@@ -22,7 +22,7 @@ Decimal phases appear between their surrounding integers in numeric order.
 
 - [x] **Phase 1: Data Integrity Foundation** - Remove `._` junk from MPD's index, harden the backend against it everywhere, fix the 16 untagged real songs at source (user-executed), and make future data gaps detectable instead of silent.
 - [x] **Phase 2: Artist Identity & Artwork Migration** - Collapse credited-collaborator artist strings to one entry per real performer and re-key existing artwork onto the new identities in the same pass, recovering the 38 orphaned album-artwork rows too.
-- [ ] **Phase 3: Browse Experience — Duplicate Badges & Empty States** - Add the quality-disambiguation badge to duplicate albums on both the LCD and the iPhone app, and make artists with only loose songs (or zero albums) render a real, playable result instead of an empty grid.
+- [x] **Phase 3: Browse Experience — Duplicate Badges & Empty States** - Add the quality-disambiguation badge to duplicate albums on both the LCD and the iPhone app, and make artists with only loose songs (or zero albums) render a real, playable result instead of an empty grid. (completed 2026-08-12)
 - [ ] **Phase 4: Tail Cleanup — DSD Test File Conversion** - Convert the last untagged `.dff` test tone to `.dsf` on the MacBook so MPD can read its tags and `skippedCount` reaches 0. Runs after all feature phases.
 
 ## Phase Details
@@ -103,7 +103,7 @@ Plans:
 - [x] 03-07a-PLAN.md — Volumio2-UI (LCD): badge render, disc-grouped track headers, loose-track fallback (ARTIST-04, BROWSE-01, BROWSE-03, BROWSE-04, BROWSE-07)
 - [x] 03-07b-PLAN.md — Volumio2-UI deploy + CDP screenshot verification + human checkpoint (BROWSE-01, BROWSE-03, BROWSE-07)
 - [x] 03-08a-PLAN.md — stellar-ios: badge render on both album grids, disc-grouped track headers, loose-track fallback (ARTIST-04, BROWSE-02, BROWSE-03, BROWSE-04, BROWSE-07)
-- [ ] 03-08b-PLAN.md — stellar-ios simulator build + screenshot verification + human checkpoint (BROWSE-02, BROWSE-03, BROWSE-07)
+- [x] 03-08b-PLAN.md — stellar-ios simulator build + screenshot verification + human checkpoint (BROWSE-02, BROWSE-03, BROWSE-07)
 
 **Note:** Phase 3 touches the Socket.IO contract shared by backend, `Volumio2-UI`, and `stellar-ios`
 (the duplicate-detection signal and the loose-song list are new payload fields). Any event-shape
@@ -278,5 +278,5 @@ Phases execute in numeric order: 1 → 2 → 3 → 4
 |-------|----------------|--------|-----------|
 | 1. Data Integrity Foundation | 5/7 | In Progress|  |
 | 2. Artist Identity & Artwork Migration | 3/4 | In Progress|  |
-| 3. Browse Experience — Duplicate Badges & Empty States | 9/10 | In Progress|  |
+| 3. Browse Experience — Duplicate Badges & Empty States | 10/10 | Complete   | 2026-08-12 |
 | 4. Tail Cleanup — DSD Test File Conversion | 0/TBD | Not started | - |
