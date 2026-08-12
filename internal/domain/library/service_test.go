@@ -23,6 +23,8 @@ type MockMPDClient struct {
 	ListArtistsError        error
 	FindAlbumsByArtistResp  map[string][]AlbumInfo
 	FindAlbumsByArtistError error
+	FindTracksByArtistResp  map[string][]map[string]string
+	FindTracksByArtistError error
 
 	// Track queries
 	FindAlbumTracksResp  map[string][]map[string]string
@@ -83,6 +85,16 @@ func (m *MockMPDClient) FindAlbumsByArtist(artist string) ([]AlbumInfo, error) {
 		return resp, nil
 	}
 	return []AlbumInfo{}, nil
+}
+
+func (m *MockMPDClient) FindTracksByArtist(artist string) ([]map[string]string, error) {
+	if m.FindTracksByArtistError != nil {
+		return nil, m.FindTracksByArtistError
+	}
+	if resp, ok := m.FindTracksByArtistResp[artist]; ok {
+		return resp, nil
+	}
+	return []map[string]string{}, nil
 }
 
 func (m *MockMPDClient) FindAlbumTracks(album, albumArtist string) ([]map[string]string, error) {
@@ -678,6 +690,130 @@ func TestService_GetArtistAlbums_KindOfBlueShaped_StaysSeparate(t *testing.T) {
 		if album.Badge == "" {
 			t.Errorf("Badge is empty, want a quality badge for %q", album.URI)
 		}
+	}
+}
+
+// TestService_GetArtistAlbums_LooseTracksFallback_SyntheticZeroAlbumArtist
+// proves the ARTIST-04/BROWSE-04 defensive fallback (D-09): this is a
+// SYNTHETIC fixture, not a live acceptance step -- no artist in the live
+// library currently resolves to zero albums (D-08), so this scenario cannot
+// be reproduced with real MPD data. GetAlbumDetails only returns albums for
+// a different AlbumArtist ("Other Artist"), so "Loose Test Artist" resolves
+// to zero grouped albums; FindTracksByArtist (the Artist-tag fallback
+// query) returns two loose songs plus a resource-fork entry that must be
+// excluded.
+func TestService_GetArtistAlbums_LooseTracksFallback_SyntheticZeroAlbumArtist(t *testing.T) {
+	mockMPD := &MockMPDClient{
+		GetAlbumDetailsResp: map[string][]AlbumDetails{
+			"INTERNAL": {
+				{
+					Album: "Some Album", AlbumArtist: "Other Artist", TrackCount: 5,
+					FirstTrack: "INTERNAL/Other Artist/Some Album/01.flac",
+					Format:     "44100:16:2",
+				},
+			},
+		},
+		FindTracksByArtistResp: map[string][]map[string]string{
+			"Loose Test Artist": {
+				{
+					"file":   "INTERNAL/Loose/02-Second.flac",
+					"Title":  "Second Loose Track",
+					"Artist": "Loose Test Artist",
+					"Album":  "",
+					"Track":  "2",
+					"Time":   "150",
+				},
+				{
+					"file":   "INTERNAL/Loose/01-First.flac",
+					"Title":  "First Loose Track",
+					"Artist": "Loose Test Artist",
+					"Album":  "",
+					"Track":  "1",
+					"Time":   "200",
+				},
+				{
+					// Resource-fork entry must be excluded, same filter
+					// GetAlbumTracks applies (musicfile.IsResourceFork).
+					"file":   "INTERNAL/Loose/._01-First.flac",
+					"Title":  "First Loose Track",
+					"Artist": "Loose Test Artist",
+					"Album":  "",
+					"Track":  "1",
+					"Time":   "200",
+				},
+			},
+		},
+	}
+
+	service := NewService(mockMPD, &MockPathClassifier{})
+
+	resp := service.GetArtistAlbums(GetArtistAlbumsRequest{
+		Artist: "Loose Test Artist",
+	})
+
+	if resp.Artist != "Loose Test Artist" {
+		t.Fatalf("Expected artist 'Loose Test Artist', got %q", resp.Artist)
+	}
+	if len(resp.Albums) != 0 {
+		t.Fatalf("Expected 0 grouped albums (synthetic zero-album artist), got %d: %+v", len(resp.Albums), resp.Albums)
+	}
+	if len(resp.LooseTracks) != 2 {
+		t.Fatalf("Expected 2 playable LooseTracks (resource-fork excluded), got %d: %+v", len(resp.LooseTracks), resp.LooseTracks)
+	}
+	for _, track := range resp.LooseTracks {
+		if track.URI == "" {
+			t.Errorf("Expected non-empty URI on loose track: %+v", track)
+		}
+		if strings.Contains(track.URI, "._01") {
+			t.Errorf("Resource-fork entry leaked into LooseTracks: %+v", track)
+		}
+		if track.Source == "" {
+			t.Errorf("Expected non-empty Source on loose track: %+v", track)
+		}
+	}
+	// Sorted by (Album, Disc, TrackNumber, Title): both share empty Album
+	// and Disc 0, so TrackNumber 1 ("First...") must sort before 2.
+	if resp.LooseTracks[0].Title != "First Loose Track" {
+		t.Errorf("Expected LooseTracks sorted by TrackNumber, got first=%q", resp.LooseTracks[0].Title)
+	}
+	if resp.LooseTracks[1].Title != "Second Loose Track" {
+		t.Errorf("Expected LooseTracks sorted by TrackNumber, got second=%q", resp.LooseTracks[1].Title)
+	}
+}
+
+// TestService_GetArtistAlbums_WithAlbums_LooseTracksNeverPopulated is the
+// non-regression half of D-09: when an artist DOES resolve to albums (the
+// normal case for all 45+ real artists), LooseTracks must stay empty even
+// if FindTracksByArtist would return data -- the fallback only fires when
+// Albums is empty.
+func TestService_GetArtistAlbums_WithAlbums_LooseTracksNeverPopulated(t *testing.T) {
+	mockMPD := &MockMPDClient{
+		GetAlbumDetailsResp: map[string][]AlbumDetails{
+			"INTERNAL": {
+				{Album: "Album 1", AlbumArtist: "Test Artist", TrackCount: 10, FirstTrack: "INTERNAL/Album1/track.flac"},
+			},
+		},
+		// Even though FindTracksByArtist has data configured for this
+		// artist, it must never be consulted because Albums is non-empty.
+		FindTracksByArtistResp: map[string][]map[string]string{
+			"Test Artist": {
+				{"file": "INTERNAL/Loose/should-not-appear.flac", "Artist": "Test Artist"},
+			},
+		},
+	}
+
+	service := NewService(mockMPD, &MockPathClassifier{})
+
+	resp := service.GetArtistAlbums(GetArtistAlbumsRequest{
+		Artist: "Test Artist",
+		Sort:   SortAlphabetical,
+	})
+
+	if len(resp.Albums) != 1 {
+		t.Fatalf("Expected 1 album, got %d", len(resp.Albums))
+	}
+	if len(resp.LooseTracks) != 0 {
+		t.Errorf("Expected LooseTracks empty when Albums is non-empty, got %d: %+v", len(resp.LooseTracks), resp.LooseTracks)
 	}
 }
 

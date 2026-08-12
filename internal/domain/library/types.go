@@ -131,6 +131,12 @@ type ArtistAlbumsResponse struct {
 	Artist     string     `json:"artist"`
 	Albums     []Album    `json:"albums"`
 	Pagination Pagination `json:"pagination"`
+	// LooseTracks is the ARTIST-04/BROWSE-04 defensive fallback: populated
+	// ONLY when Albums resolves to zero entries, with any tracks MPD's
+	// Artist tag credits to this artist (independent of the AlbumArtist
+	// grouping Albums is built from). Additive field, omitted in the normal
+	// case where the artist has at least one grouped album.
+	LooseTracks []Track `json:"looseTracks,omitempty"`
 }
 
 // GetAlbumTracksRequest is the request for listing tracks in an album.
