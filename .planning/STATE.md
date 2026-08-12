@@ -3,14 +3,14 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: completed
-stopped_at: Completed 03-04-PLAN.md
-last_updated: "2026-08-12T03:24:02.911Z"
+stopped_at: Completed 03-06-PLAN.md
+last_updated: "2026-08-12T03:36:57.089Z"
 last_activity: 2026-08-12
 progress:
   total_phases: 6
   completed_phases: 2
   total_plans: 21
-  completed_plans: 16
+  completed_plans: 17
   percent: 33
 ---
 
@@ -27,11 +27,12 @@ browse surface is honest about what it's showing.
 ## Current Position
 
 Phase: 3 (Browse Experience) — EXECUTING
-Plan: 03-05 complete (2/2 tasks; ARTIST-04/BROWSE-04 done). Next: 03-06.
-Status: Phase 3 plans 01-05 complete (discgroup + dupebadge wiring, wave 3, plus the GetArtistAlbums LooseTracks defensive fallback proven by a synthetic zero-album fixture). Next: 03-06.
+Plan: 03-06 complete (3/3 tasks; backend deployed to the Pi — schema v6, grouping+badging confirmed live over Socket.IO). Next: 03-07a/03-07b (Volumio2-UI frontend rendering).
+Status: Phase 3 plans 01-06 complete (discgroup + dupebadge wiring, cache schema v6, LooseTracks fallback, and the live Pi deploy checkpoint — badge/discCount/disc/looseTracks all confirmed against the real 66-album post-grouping library). Next: 03-07a/03-07b (Volumio2-UI), then 03-08a/03-08b (stellar-ios).
+Stopped At: Completed 03-06-PLAN.md
 Last activity: 2026-08-12
 
-Progress: [████████░░] 76%
+Progress: [████████░░] 81%
 
 ## Performance Metrics
 
@@ -65,6 +66,7 @@ Progress: [████████░░] 76%
 | Phase 03 P03 | 20min | 3 tasks | 6 files |
 | Phase 03 P04 | 8min | 2 tasks | 8 files |
 | Phase 03 P05 | 35min | 2 tasks | 6 files |
+| Phase 03 P06 | 25min | 3 tasks | 1 files |
 
 ## Accumulated Context
 
@@ -119,6 +121,8 @@ Recent decisions affecting current work:
 - [Phase 03-04]: formatQualityLabel duplicated byte-for-byte inside internal/infra/cache/builder.go (not imported) so dupebadge.Candidate.Quality has an already-formatted label at cache-build time, per the infra->domain layering rule
 - [Phase ?]: [Phase 03-05]: LooseTracks is additive/omitempty on ArtistAlbumsResponse — populated only when Albums resolves to zero, proven by synthetic MockMPDClient fixture per D-09 (no live artist has zero albums)
 - [Phase ?]: [Phase 03-05]: trackFromRawSong extracted from GetAlbumTracks into a shared Service helper, reused by the new loose-track fallback, to prevent title-fallback/duration/disc-parsing drift between the two call sites
+- [Phase 03-06]: docs/SOCKET-CONTRACT.md lives at the workspace root (not a git repo) — edited in place, no commit exists for it; this is the designed workspace layout, not an omission
+- [Phase 03-06]: Pi cache does not auto-rebuild on binary-only restart — schema migrates (v5->v6) but the old 80-row cache loads from disk as-is until library:cache:rebuild is triggered explicitly; triggered it live, dropping album count 80->66 as grouping collapsed 4 box sets (Mahler/Tosca/Rated R/Woody Allen)
 
 ### Verified Environment Facts (measured 2026-08-11, supersede earlier estimates)
 
@@ -160,6 +164,6 @@ Items acknowledged and carried forward from previous milestone close:
 
 ## Session Continuity
 
-Last session: 2026-08-12T03:23:58.201Z
+Last session: 2026-08-12T03:36:57.086Z
 Stopped at: Completed 03-05-PLAN.md
 Resume file: None
