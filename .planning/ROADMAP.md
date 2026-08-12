@@ -98,7 +98,7 @@ Plans:
 - [x] 03-02-PLAN.md — TDD: pure duplicate-disambiguation badge rule (dupebadge), quality->disc->source precedence (BROWSE-01, BROWSE-02, BROWSE-03)
 - [x] 03-03-PLAN.md — Backend contract (Album.badge/discCount, Track.disc) + wire grouping/badging into the MPD-direct GetAlbums/GetArtistAlbums path + disc-aware track sort (BROWSE-01, BROWSE-02, BROWSE-03, BROWSE-07)
 - [x] 03-04-PLAN.md — Cache schema v6 + wire grouping/badging into the cache-build path Builder.buildAlbums/CachedService.GetAlbums (BROWSE-01, BROWSE-02, BROWSE-03, BROWSE-07)
-- [ ] 03-05-PLAN.md — Loose-track fallback for GetArtistAlbums, proven by a synthetic zero-album fixture (ARTIST-04, BROWSE-04)
+- [x] 03-05-PLAN.md — Loose-track fallback for GetArtistAlbums, proven by a synthetic zero-album fixture (ARTIST-04, BROWSE-04)
 - [ ] 03-06-PLAN.md — docs/SOCKET-CONTRACT.md update + backend build/deploy/live Socket.IO verification against the real 81-album library (ARTIST-04, BROWSE-01, BROWSE-02, BROWSE-03, BROWSE-04, BROWSE-07)
 - [ ] 03-07a-PLAN.md — Volumio2-UI (LCD): badge render, disc-grouped track headers, loose-track fallback (ARTIST-04, BROWSE-01, BROWSE-03, BROWSE-04, BROWSE-07)
 - [ ] 03-07b-PLAN.md — Volumio2-UI deploy + CDP screenshot verification + human checkpoint (BROWSE-01, BROWSE-03, BROWSE-07)
@@ -252,5 +252,5 @@ Phases execute in numeric order: 1 → 2 → 3 → 4
 |-------|----------------|--------|-----------|
 | 1. Data Integrity Foundation | 5/7 | In Progress|  |
 | 2. Artist Identity & Artwork Migration | 3/4 | In Progress|  |
-| 3. Browse Experience — Duplicate Badges & Empty States | 4/10 | In Progress|  |
+| 3. Browse Experience — Duplicate Badges & Empty States | 5/10 | In Progress|  |
 | 4. Tail Cleanup — DSD Test File Conversion | 0/TBD | Not started | - |

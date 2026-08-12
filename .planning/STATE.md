@@ -4,14 +4,14 @@ milestone: v1.0
 milestone_name: milestone
 status: completed
 stopped_at: Completed 03-04-PLAN.md
-last_updated: "2026-08-11T22:35:41.976Z"
+last_updated: "2026-08-12T03:24:02.911Z"
 last_activity: 2026-08-12
 progress:
   total_phases: 6
   completed_phases: 2
   total_plans: 21
   completed_plans: 16
-  percent: 76
+  percent: 33
 ---
 
 # Project State
@@ -27,8 +27,8 @@ browse surface is honest about what it's showing.
 ## Current Position
 
 Phase: 3 (Browse Experience) — EXECUTING
-Plan: 03-04 complete (2/2 tasks). Next: 03-05 (loose-track fallback for GetArtistAlbums, ARTIST-04/BROWSE-04).
-Status: Phase 3 plans 01-04 complete (discgroup + dupebadge leaf packages wired into both the MPD-direct AND cache-served album-list paths, wave 3). Next: 03-05.
+Plan: 03-05 complete (2/2 tasks; ARTIST-04/BROWSE-04 done). Next: 03-06.
+Status: Phase 3 plans 01-05 complete (discgroup + dupebadge wiring, wave 3, plus the GetArtistAlbums LooseTracks defensive fallback proven by a synthetic zero-album fixture). Next: 03-06.
 Last activity: 2026-08-12
 
 Progress: [████████░░] 76%
@@ -64,6 +64,7 @@ Progress: [████████░░] 76%
 | Phase 03 P02 | 12min | 2 tasks | 2 files |
 | Phase 03 P03 | 20min | 3 tasks | 6 files |
 | Phase 03 P04 | 8min | 2 tasks | 8 files |
+| Phase 03 P05 | 35min | 2 tasks | 6 files |
 
 ## Accumulated Context
 
@@ -116,6 +117,8 @@ Recent decisions affecting current work:
 - [Phase 03-03]: Badging (dupebadge.Compute) runs once over the full merged album list across all basePaths, not per basePath as the plan's action text literally describes — Live duplicate groups like The Light For Days (LOCAL vs USB) span basePaths; per-basePath badging would silently miss them. Grouping (discgroup.GroupFolders) stays per-basePath since a box set's discs always share one root under one source.
 - [Phase 03-04]: DiscCount only written when discgroup.Group.DiscCount>1 (0 otherwise), mirroring Service.GetAlbums' albumFromGroup gate, for byte-for-byte cache/MPD-direct parity
 - [Phase 03-04]: formatQualityLabel duplicated byte-for-byte inside internal/infra/cache/builder.go (not imported) so dupebadge.Candidate.Quality has an already-formatted label at cache-build time, per the infra->domain layering rule
+- [Phase ?]: [Phase 03-05]: LooseTracks is additive/omitempty on ArtistAlbumsResponse — populated only when Albums resolves to zero, proven by synthetic MockMPDClient fixture per D-09 (no live artist has zero albums)
+- [Phase ?]: [Phase 03-05]: trackFromRawSong extracted from GetAlbumTracks into a shared Service helper, reused by the new loose-track fallback, to prevent title-fallback/duration/disc-parsing drift between the two call sites
 
 ### Verified Environment Facts (measured 2026-08-11, supersede earlier estimates)
 
@@ -157,7 +160,6 @@ Items acknowledged and carried forward from previous milestone close:
 
 ## Session Continuity
 
-Last session: 2026-08-11T22:35:32.115Z
-Stopped at: Completed 03-04-PLAN.md
-`/gsd:plan-phase 1`.
+Last session: 2026-08-12T03:23:58.201Z
+Stopped at: Completed 03-05-PLAN.md
 Resume file: None

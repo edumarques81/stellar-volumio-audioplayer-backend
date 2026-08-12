@@ -49,7 +49,7 @@ browse surface is honest about what it's showing.
 - [x] **ARTIST-03**: The empty artist value present in MPD's `list artist` output does not produce a
   blank row in the artist list on either client.
 
-- [ ] **ARTIST-04**: Tapping an artist always leads somewhere real — an artist that resolves to zero
+- [x] **ARTIST-04**: Tapping an artist always leads somewhere real — an artist that resolves to zero
   albums never renders as a silently empty grid (this was the reported symptom).
 
 ### Artwork Identity
@@ -82,7 +82,7 @@ browse surface is honest about what it's showing.
   MPD's `Disc` tag, corroborated by the `/CD nn/` path marker. `Miles Davis - Kind Of Blue` must NOT
   group (all tracks are `Disc: 1`; it is 3 distinct releases) — the negative test case.
 
-- [ ] **BROWSE-04**: An artist whose tracks belong to no album renders those tracks as a playable
+- [x] **BROWSE-04**: An artist whose tracks belong to no album renders those tracks as a playable
   song list rather than an empty album grid.
 
 ### Tail Cleanup
@@ -143,14 +143,14 @@ Which phases cover which requirements. Filled during roadmap creation.
 | ARTIST-01 | Phase 2 | In Progress (02-01 Collapse() rule implemented + corpus-tested; 02-02 wired it into buildArtists + Service.GetArtists with merged counts, unit-tested against real Pavarotti/Karajan/Moby cases — code-complete but unverified on the Pi. D-10 requires the artwork migration (02-03) to ship first; 02-04 deploys both together and captures the on-Pi before/after evidence this requirement's success criteria describe) |
 | ARTIST-02 | Phase 2 | Complete |
 | ARTIST-03 | Phase 2 | In Progress (02-01 Collapse("") returns "" without panicking; 02-02 wired the empty-value skip into both buildArtists and Service.GetArtists, unit-tested — code-complete but unverified on the Pi; gated on 02-04 same as ARTIST-01) |
-| ARTIST-04 | Phase 3 | Pending |
+| ARTIST-04 | Phase 3 | Complete |
 | ART-01 | Phase 2 | Complete |
 | ART-02 | Phase 2 | Complete (1/38 recovered; 39 of 40 unlinked albums already display covers via /albumart — see 02-04-SUMMARY) |
 | ART-03 | Phase 2 | Complete |
 | BROWSE-01 | Phase 3 | Complete |
 | BROWSE-02 | Phase 3 | Complete |
 | BROWSE-03 | Phase 3 | Complete |
-| BROWSE-04 | Phase 3 | Pending |
+| BROWSE-04 | Phase 3 | Complete |
 | BROWSE-07 | Phase 3 | Complete |
 | DATA-05 | Phase 4 | Pending |
 
