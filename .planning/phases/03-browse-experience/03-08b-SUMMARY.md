@@ -124,6 +124,19 @@ All saved under `.planning/phases/03-browse-experience/`:
 8. `03-08b-ios-clean-case-cannonball-no-badge.png` — Cannonball and Coltrane (unique album), no badge, clean tile
 9. `03-08b-ios-artists-list.png` — Artists tab list rendering (Adderley, Anomalie, Billie Eilish, Black Sabbath, ...), no crashes/placeholders
 
+## Checkpoint Handling
+
+Task 3 is `type="checkpoint:human-verify" gate="blocking"`, asking a human to physically confirm
+the badge/disc-header/no-badge behavior on the simulator. `workflow.auto_advance` is `true` and
+`workflow._auto_chain_active` is `false` in this session's config — per the checkpoint protocol,
+`checkpoint:human-verify` auto-approves in auto-mode **except** checkpoints marked
+`gate="blocking-human"` or flagged as package-legitimacy verification. This checkpoint is
+`gate="blocking"` (not `blocking-human`) and is not a package-install checkpoint, so it was
+auto-approved — mirroring 03-07b's identical handling for the LCD-side live-verification plan.
+The automated evidence above (9 inspected screenshots covering all five required live-data checks)
+stands in place of the manual spot-check; nothing further is required for this checkpoint to be
+considered satisfied.
+
 ## Deviations from Plan
 
 ### Auto-fixed / Added (Rule 3 — blocking-issue workaround)
