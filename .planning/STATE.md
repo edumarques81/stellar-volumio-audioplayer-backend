@@ -3,15 +3,15 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: verifying
-stopped_at: Completed 03-07b-PLAN.md
-last_updated: "2026-08-12T06:17:23.749Z"
+stopped_at: Completed 03-08a-PLAN.md
+last_updated: "2026-08-12T06:36:52.409Z"
 last_activity: 2026-08-12
 progress:
-  total_phases: 6
+  total_phases: 7
   completed_phases: 2
   total_plans: 21
-  completed_plans: 19
-  percent: 90
+  completed_plans: 20
+  percent: 29
 ---
 
 # Project State
@@ -27,9 +27,9 @@ browse surface is honest about what it's showing.
 ## Current Position
 
 Phase: 3 (Browse Experience) — EXECUTING
-Plan: 03-07b complete (2/2 auto tasks + 1 checkpoint auto-approved; Volumio2-UI built + deployed to the Pi, kiosk reloaded, live CDP-driven visual + full-library DOM sweep verification of BROWSE-01/03/07 against the real 66-album library — badge on Kind Of Blue x3 + Future Is Now x2, Mahler as one tile with 11 Disc N headers, Djesse Vol. 4's real duplicates correctly unbadged). Next: 03-08a/03-08b (stellar-ios rendering of the same fields).
-Status: Phase 3 plans 01-07b complete (discgroup + dupebadge wiring, cache schema v6, LooseTracks fallback, the live Pi deploy checkpoint, LCD-side rendering of all four fields, and now the live deploy + physical-LCD verification of that rendering). Next: 03-08a/03-08b (stellar-ios).
-Stopped At: Completed 03-07b-PLAN.md
+Plan: 03-08a complete (3/3 auto tasks; stellar-ios rendering of badge/discCount/disc/looseTracks — gold-outline duplicate badge on both AlbumPickerView and ArtistDetailView album grids, "Disc N" headers on AlbumTracksView for discCount>1, and a real tap-to-play loose-track fallback on ArtistDetailView for a zero-album artist drill-in, all store/unit-tested against the locked contract; 154/154 tests + clean simulator build). Next: 03-08b (live simulator visual verification against the deployed Pi backend).
+Status: Phase 3 plans 01-08a complete (discgroup + dupebadge wiring, cache schema v6, LooseTracks fallback, the live Pi deploy checkpoint, LCD-side rendering of all four fields, the live deploy + physical-LCD verification, and now the iOS-side rendering of the same four fields). Next: 03-08b (stellar-ios live verification).
+Stopped At: Completed 03-08a-PLAN.md
 Last activity: 2026-08-12
 
 Progress: [█████████░] 90%
@@ -69,6 +69,7 @@ Progress: [█████████░] 90%
 | Phase 03 P06 | 25min | 3 tasks | 1 files |
 | Phase 03 P07a | 20min | 3 tasks | 9 files |
 | Phase 03 P07b | 32min | 2 tasks | 6 files |
+| Phase 03 P08a | 25min | 3 tasks | 8 files |
 
 ## Accumulated Context
 
@@ -127,6 +128,9 @@ Recent decisions affecting current work:
 - [Phase 03-06]: Pi cache does not auto-rebuild on binary-only restart — schema migrates (v5->v6) but the old 80-row cache loads from disk as-is until library:cache:rebuild is triggered explicitly; triggered it live, dropping album count 80->66 as grouping collapsed 4 box sets (Mahler/Tosca/Rated R/Woody Allen)
 - [Phase 03-07a]: Volumio2-UI LCD rendering for badge/discCount/disc/looseTracks shipped: outlined pill badge on AlbumPage, Disc N headers via AlbumTrackList grouping, inline loose-track fallback on LibraryView — All unit/component-tested against the locked contract from 03-06; 03-07b handles live LCD visual verification + deploy
 - [Phase 03-07b]: CDP-driven real-DOM-click navigation (clicking the same chevron a physical finger taps) used to verify the production frontend build, instead of the dev-server module-import DevTools tap which doesn't work against a built dist/ — Production bundle has no reachable module path for the dev-server import trick; clicking data-testid elements is a more faithful verification path anyway
+- [Phase 03-08a]: AlbumDuplicateBadge factored into one shared struct reused by both AlbumPickerView and ArtistDetailView, while their two AlbumTile structs stay deliberately duplicated per plan — Avoids the badge chip's style silently drifting between the two grids over time without expanding the plan's scope
+- [Phase 03-08a]: ArtistPickerStore.applyArtistAlbumsPayload(_:) extracted from the bind() closure for testability — The closure itself can't be triggered from a unit test (no live socket connection); mirrors AlbumPickerStore.handleLibraryCacheUpdated's existing convention
+- [Phase 03-08a]: Track.disc defaults to 0 via a designated-initializer default parameter, not a required field — Keeps the two pre-existing Track(id:...) call sites in LibraryAutoRefreshTests.swift/AlbumTracksStoreTests.swift compiling unchanged
 
 ### Verified Environment Facts (measured 2026-08-11, supersede earlier estimates)
 
@@ -168,6 +172,6 @@ Items acknowledged and carried forward from previous milestone close:
 
 ## Session Continuity
 
-Last session: 2026-08-12T06:17:23.744Z
+Last session: 2026-08-12T06:36:32.148Z
 Stopped at: Completed 03-07a-PLAN.md
 Resume file: None

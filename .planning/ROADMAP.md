@@ -102,7 +102,7 @@ Plans:
 - [x] 03-06-PLAN.md — docs/SOCKET-CONTRACT.md update + backend build/deploy/live Socket.IO verification against the real 81-album library (ARTIST-04, BROWSE-01, BROWSE-02, BROWSE-03, BROWSE-04, BROWSE-07)
 - [x] 03-07a-PLAN.md — Volumio2-UI (LCD): badge render, disc-grouped track headers, loose-track fallback (ARTIST-04, BROWSE-01, BROWSE-03, BROWSE-04, BROWSE-07)
 - [x] 03-07b-PLAN.md — Volumio2-UI deploy + CDP screenshot verification + human checkpoint (BROWSE-01, BROWSE-03, BROWSE-07)
-- [ ] 03-08a-PLAN.md — stellar-ios: badge render on both album grids, disc-grouped track headers, loose-track fallback (ARTIST-04, BROWSE-02, BROWSE-03, BROWSE-04, BROWSE-07)
+- [x] 03-08a-PLAN.md — stellar-ios: badge render on both album grids, disc-grouped track headers, loose-track fallback (ARTIST-04, BROWSE-02, BROWSE-03, BROWSE-04, BROWSE-07)
 - [ ] 03-08b-PLAN.md — stellar-ios simulator build + screenshot verification + human checkpoint (BROWSE-02, BROWSE-03, BROWSE-07)
 
 **Note:** Phase 3 touches the Socket.IO contract shared by backend, `Volumio2-UI`, and `stellar-ios`
@@ -166,6 +166,7 @@ Plans:
 Unsequenced items. Not part of the v1.0 milestone phases; promote with `/gsd:review-backlog`.
 
 ### Phase 999.3: Player format strip shows wrong bit depth + wrong "HI-RES" + wrong bio (BACKLOG)
+
 **Captured:** 2026-08-12, observed directly in Plan 03-07b's live LCD screenshots. **Pre-existing —
 NOT a Phase 3 regression.** The new Phase 3 badge renders the same album correctly as
 `44.1kHz/16bit FLAC`, which is what proves the backend data is right and the fault is downstream.
@@ -176,8 +177,10 @@ Three distinct defects visible on one screen (`03-07b-lcd-duplicate-badge-visibl
    "44-bit / 44.1 kHz | FLAC". Reproduced on a second album (Mahler, also 44.1/16) in
    `03-07b-lcd-mahler-one-tile-with-disc-headers.png`, so it is systematic, not a one-off. Looks like
    the sample rate is being read into the bit-depth slot.
+
 2. **`HI-RES 44.1kHz` badge on CD-quality audio.** 44.1kHz/16bit is Red Book, not hi-res. The
    threshold for that badge is wrong or absent.
+
 3. **Wrong album bio.** For toe's *The Future Is Now*, the bio reads "*The Future Is Now* is Non
    Phixion's sole studio album, released in March 2002 on Uncle Howie/Landspeed Records…" — that is a
    different artist's album of the same name. The Wikipedia→LLM bio lookup matched on title alone
@@ -275,5 +278,5 @@ Phases execute in numeric order: 1 → 2 → 3 → 4
 |-------|----------------|--------|-----------|
 | 1. Data Integrity Foundation | 5/7 | In Progress|  |
 | 2. Artist Identity & Artwork Migration | 3/4 | In Progress|  |
-| 3. Browse Experience — Duplicate Badges & Empty States | 8/10 | In Progress|  |
+| 3. Browse Experience — Duplicate Badges & Empty States | 9/10 | In Progress|  |
 | 4. Tail Cleanup — DSD Test File Conversion | 0/TBD | Not started | - |
