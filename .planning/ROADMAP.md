@@ -165,6 +165,29 @@ Plans:
 
 Unsequenced items. Not part of the v1.0 milestone phases; promote with `/gsd:review-backlog`.
 
+### Phase 999.3: Player format strip shows wrong bit depth + wrong "HI-RES" + wrong bio (BACKLOG)
+**Captured:** 2026-08-12, observed directly in Plan 03-07b's live LCD screenshots. **Pre-existing —
+NOT a Phase 3 regression.** The new Phase 3 badge renders the same album correctly as
+`44.1kHz/16bit FLAC`, which is what proves the backend data is right and the fault is downstream.
+
+Three distinct defects visible on one screen (`03-07b-lcd-duplicate-badge-visible.png`):
+
+1. **Bit depth renders as `44-bit`.** The album is 44100 Hz / **16** bit. The format strip shows
+   "44-bit / 44.1 kHz | FLAC". Reproduced on a second album (Mahler, also 44.1/16) in
+   `03-07b-lcd-mahler-one-tile-with-disc-headers.png`, so it is systematic, not a one-off. Looks like
+   the sample rate is being read into the bit-depth slot.
+2. **`HI-RES 44.1kHz` badge on CD-quality audio.** 44.1kHz/16bit is Red Book, not hi-res. The
+   threshold for that badge is wrong or absent.
+3. **Wrong album bio.** For toe's *The Future Is Now*, the bio reads "*The Future Is Now* is Non
+   Phixion's sole studio album, released in March 2002 on Uncle Howie/Landspeed Records…" — that is a
+   different artist's album of the same name. The Wikipedia→LLM bio lookup matched on title alone
+   without disambiguating by artist.
+
+Defect 1 is the most embarrassing on an audiophile streamer — the device misreports the format of the
+music it is playing. Defects 1 and 2 are frontend format-strip logic; defect 3 is backend
+(`internal/domain/bios/`), where the lookup should include the artist and reject low-confidence
+matches rather than displaying a confident wrong answer.
+
 ### Phase 999.2: Ship files to the Pi — upload, unzip, land on the SSD, index in MPD (BACKLOG)
 
 **Captured:** 2026-08-12 (user: *"I need a way to send files to the pi so it can unzip and add those files to the ssd drive and to mpd"*)
