@@ -68,6 +68,17 @@ type Server struct {
 	clients             map[string]*socket.Socket
 	lastBroadcastMu     sync.Mutex
 	lastBroadcastState  map[string]interface{} // Last state sent via BroadcastState for diffing
+	// lastBroadcastSeekMs / lastBroadcastSeekAt anchor the seek value clients
+	// were last told about, and when. Together they let isStateSame predict
+	// the position a dead-reckoning client currently believes it is at, so a
+	// discontinuity (track restart, scrub) can be detected even though every
+	// field in stateCompareKeys is unchanged. See seekWithinPrediction.
+	lastBroadcastSeekMs  int
+	lastBroadcastSeekAt  time.Time
+	lastBroadcastHasSeek bool
+	// nowFn is the clock used for seek prediction. nil means time.Now; tests
+	// override it to advance time without sleeping.
+	nowFn func() time.Time
 	// tickerRecoveredBroadcasts counts state broadcasts emitted by the
 	// 1.5s defense-in-depth ticker (in StartMPDWatcher) where the diff
 	// said "state changed" but no MPD subsystem event arrived in the
@@ -2284,8 +2295,86 @@ var stateCompareKeys = []string{
 	"samplerate", "bitdepth", "trackType",
 }
 
+// seekResyncToleranceMs is how far MPD's reported position may deviate from
+// the position a dead-reckoning client is predicting before we force a resync
+// broadcast. Clients advance seek locally between broadcasts, so a
+// discontinuity — restarting the current track, scrubbing, or MPD applying a
+// seek requested by another client — is invisible to them unless the server
+// notices the jump. 2s is wider than any legitimate jitter between the 1.5s
+// watcher tick and MPD's own clock, and tight enough that a wrong progress
+// bar never survives long enough to be seen.
+const seekResyncToleranceMs = 2000
+
+// seekMaxStaleInterval caps how long a *playing* client may go without an
+// authoritative seek value. This bounds client-side timer drift — browser
+// background-tab throttling, iOS Task.sleep slippage — which the server
+// cannot observe and therefore cannot predict away.
+const seekMaxStaleInterval = 5 * time.Second
+
+// now returns the server's clock, defaulting to time.Now when unset so the
+// zero-value Server used across the tests keeps working.
+func (s *Server) now() time.Time {
+	if s.nowFn != nil {
+		return s.nowFn()
+	}
+	return time.Now()
+}
+
+// seekMillis extracts the seek field as milliseconds. GetState writes an int,
+// but the map is untyped and a JSON round-trip yields float64.
+func seekMillis(state map[string]interface{}) (int, bool) {
+	switch v := state["seek"].(type) {
+	case int:
+		return v, true
+	case int64:
+		return int(v), true
+	case float64:
+		return int(v), true
+	default:
+		return 0, false
+	}
+}
+
+// seekWithinPrediction reports whether the new state's seek matches what
+// clients would have dead-reckoned since the last broadcast. Returning false
+// forces a broadcast so clients can re-anchor.
+//
+// Caller must hold lastBroadcastMu.
+func (s *Server) seekWithinPrediction(state map[string]interface{}) bool {
+	if !s.lastBroadcastHasSeek {
+		return false
+	}
+	newSeek, ok := seekMillis(state)
+	if !ok {
+		// No seek to reconcile (e.g. stopped with no track loaded).
+		return true
+	}
+
+	status, _ := s.lastBroadcastState["status"].(string)
+	playing := status == "play"
+	elapsed := s.now().Sub(s.lastBroadcastSeekAt)
+
+	// Only playing clients are advancing a local clock, so only they need a
+	// periodic re-anchor. Heart-beating while paused would be pure churn.
+	if playing && elapsed >= seekMaxStaleInterval {
+		return false
+	}
+
+	predicted := s.lastBroadcastSeekMs
+	if playing {
+		predicted += int(elapsed.Milliseconds())
+	}
+
+	diff := newSeek - predicted
+	if diff < 0 {
+		diff = -diff
+	}
+	return diff <= seekResyncToleranceMs
+}
+
 // isStateSame returns true if the new state matches the last broadcast state
-// on all key fields.
+// on all key fields *and* its seek value is still consistent with what
+// clients are predicting locally.
 func (s *Server) isStateSame(state map[string]interface{}) bool {
 	s.lastBroadcastMu.Lock()
 	defer s.lastBroadcastMu.Unlock()
@@ -2304,7 +2393,7 @@ func (s *Server) isStateSame(state map[string]interface{}) bool {
 			return false
 		}
 	}
-	return true
+	return s.seekWithinPrediction(state)
 }
 
 // saveLastState stores a copy of the state for future diffing.
@@ -2318,6 +2407,11 @@ func (s *Server) saveLastState(state map[string]interface{}) {
 			s.lastBroadcastState[key] = v
 		}
 	}
+
+	// Anchor the seek clients are about to receive, so the next diff can tell
+	// "position advanced with the wall clock" from "position jumped".
+	s.lastBroadcastSeekMs, s.lastBroadcastHasSeek = seekMillis(state)
+	s.lastBroadcastSeekAt = s.now()
 }
 
 // BroadcastQueue sends queue to all connected clients.

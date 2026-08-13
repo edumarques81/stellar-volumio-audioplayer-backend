@@ -2,6 +2,7 @@ package socketio
 
 import (
 	"testing"
+	"time"
 )
 
 func TestStateCompareKeys_DoesNotIncludeSeek(t *testing.T) {
@@ -15,9 +16,17 @@ func TestStateCompareKeys_DoesNotIncludeSeek(t *testing.T) {
 	}
 }
 
-func TestIsStateSame_SeekOnlyChange_ReturnsTrue(t *testing.T) {
-	// Create a minimal server with just the fields needed for diffing
+func TestIsStateSame_SeekAdvancingNormally_ReturnsTrue(t *testing.T) {
+	// Seek is still excluded from the literal field comparison, so ordinary
+	// playback churn does not broadcast. What changed (2026-08-14) is that
+	// the seek must remain consistent with the wall clock: this test advances
+	// the clock by the same amount the position moved. A seek that *jumps*
+	// relative to elapsed time — a restarted track, a scrub — now forces a
+	// broadcast, because dead-reckoning clients cannot otherwise learn about
+	// it. See state_diff_seek_test.go.
+	now := time.Date(2026, 8, 14, 5, 0, 0, 0, time.UTC)
 	s := &Server{}
+	s.nowFn = func() time.Time { return now }
 
 	// Set initial state
 	baseState := map[string]interface{}{
@@ -34,7 +43,10 @@ func TestIsStateSame_SeekOnlyChange_ReturnsTrue(t *testing.T) {
 	}
 	s.saveLastState(baseState)
 
-	// Change only seek — should be considered "same" since seek is not diffed
+	// 4s of playback elapses and the position advances by the same 4s.
+	now = now.Add(4 * time.Second)
+
+	// Change only seek, in step with the clock — still "same", no broadcast.
 	seekOnlyChanged := map[string]interface{}{
 		"status":   "play",
 		"position": 0,
