@@ -244,19 +244,49 @@ matches rather than displaying a confident wrong answer.
 - **iOS needed no change** — `FormatBadgeStrip` reads the discrete `bitdepth` field from `pushState`,
   never the composite quality label, so it never had defects 1/2.
 
-### Phase 999.2: Ship files to the Pi — upload, unzip, land on the SSD, index in MPD (BACKLOG)
+### Phase 999.2: Ship files to the Pi — upload, unzip, land on the SSD, index in MPD (SHIPPED 2026-08-15)
 
 **Captured:** 2026-08-12 (user: *"I need a way to send files to the pi so it can unzip and add those files to the ssd drive and to mpd"*)
 
-**Status: deliberately un-designed.** The user asked to capture this and explicitly deferred all
-thinking about it until the v1.0 milestone phases finish. Do NOT start solving it here — promote it
-via `/gsd:review-backlog` when the milestone closes, then run it through discuss → plan properly.
+**Shipped as a Samba drop-box plus a Pi-side ingest script — no new backend code.**
+`deploy/stellar-ingest.py` (→ `/usr/local/bin/stellar-ingest`), documented in
+`deploy/README-ingest.md`. Workflow: drop an album folder or zip into `smb://stellar.local/Inbox`,
+run `stellar-ingest --dry-run` then `stellar-ingest`.
 
-**The ask, in the user's terms:** a way to send files (archives) to the Pi, have the Pi unzip them,
-place the contents on the SSD music drive, and get them into MPD's database.
+**The six design decisions the user locked:**
 
-**Already-established facts that any future design must respect** (recorded so they are not
-re-derived, not as design decisions):
+1. **Transport = Samba drop-box + ingest script.** A writable share on the SD card, staged and
+   separate from the library. The rejected alternative was a web upload inside `stellar-backend`,
+   which runs as `eduardo` — an account with passwordless sudo.
+2. **Trigger is explicit.** No watcher; nothing moves until the command runs.
+3. **Untagged files are auto-tagged** from MusicBrainz + Cover Art Archive, mirroring the backend's
+   existing enrichment principle (folder name → cleaned candidate → release lookup at score ≥ 90 →
+   canonical title/album artist/date/MBID → `folder.jpg`).
+4. **Tag scope = attempt every format, report what didn't stick** (FLAC → Vorbis comments,
+   DSF/WAV/DFF → ID3v2). The user explicitly declined the narrower FLAC+DSF-only option.
+5. **Collisions never overwrite** — refuse and report.
+6. **Cleanup done in the same pass:** the 12 returned `._` files deleted (plus 12 `.DS_Store` of the
+   same class), and `Qobuz/Import` moved out of the MPD root to `/mnt/ssd/_quarantine/Qobuz`.
+
+**Verified end to end on the Pi 2026-08-15.** Cleanup: `Music/` went 9,726 → 939 files with real
+audio unchanged at 812 and decoded-stream MD5 identical before/after; MPD 821/61/124 unchanged.
+Ingest: a 2-track untagged fixture matched *Kind of Blue*
+(`e32a3f0b-1c19-3170-bb1c-650893774744`, score 100), landed with `album`/`albumartist`/`date`/MBID
+written, `/albumart` served the 75 KB CAA cover HTTP 200, source retired to `.done/`, mount returned
+to `ro`. Refusal paths (collision, `segment-N` partial) and zip extraction confirmed. Fixtures and
+the test album removed afterwards; library back to baseline 821/61/124.
+
+**Two things that cost a debug cycle each, recorded so they are not re-derived:**
+
+- exFAT has **no per-file ownership** — the volume is mounted `uid=mpd` wholesale, so `remount,rw`
+  is necessary but *not* sufficient; the copy must run through `sudo`.
+- `cp -a` implies `--preserve=all` including ownership, which exFAT cannot represent, so the copy
+  fails outright. Use `cp -r --preserve=timestamps`.
+- MusicBrainz is a **tag lookup, not a fingerprint identifier**. The dominant `Artist - Album`
+  folder convention searched as a single release title returns zero results; the script emits up to
+  four candidate readings and breaks reissue ties by Official status then earliest date.
+
+**Facts the design had to respect** (recorded so they are not re-derived):
 
 - `/mnt/ssd` is mounted **read-only** (`ro,nofail,uid=mpd,gid=audio`). Any write needs a
   `remount,rw` → work → `remount,ro` round-trip, trap-guarded.
@@ -274,10 +304,9 @@ re-derived, not as design decisions):
 
 - The music library holds irreplaceable masters — any ingest path needs care around overwrite.
 
-**Open questions for the future discuss phase** (listed, not answered): transport (web upload in the
-existing UI vs scp/rsync vs a watched folder vs Samba), who unzips and where, how to handle
-name collisions and partial uploads, whether tagging is validated at ingest, and whether this
-belongs in the backend or as a separate small service.
+**Not carried forward:** booklet/PDF handling at ingest (see 999.1), and AcoustID/`fpcalc` audio
+fingerprinting for folders whose names give MusicBrainz nothing to work with (`fpcalc` is not
+installed on the Pi; the current fallback is to rename the folder `Artist - Album` and re-run).
 
 ### Phase 999.1: Miles Ahead — cover art FIXED 2026-08-12; booklet still BACKLOG
 
