@@ -22,6 +22,7 @@ import (
 	"github.com/edumarques81/stellar-volumio-audioplayer-backend/internal/domain/airplay"
 	"github.com/edumarques81/stellar-volumio-audioplayer-backend/internal/domain/artwork"
 	"github.com/edumarques81/stellar-volumio-audioplayer-backend/internal/domain/bios"
+	"github.com/edumarques81/stellar-volumio-audioplayer-backend/internal/domain/ingest"
 	"github.com/edumarques81/stellar-volumio-audioplayer-backend/internal/domain/lastplayed"
 	"github.com/edumarques81/stellar-volumio-audioplayer-backend/internal/domain/localmusic"
 	"github.com/edumarques81/stellar-volumio-audioplayer-backend/internal/domain/player"
@@ -271,6 +272,26 @@ func main() {
 	}
 	socketServer.SetSystemActionHandlers(systemActionHandlers)
 	log.Info().Strs("trusted_remotes", trustedRemotes).Bool("remote_exec", sysDeps.Shutdown != nil).Msg("System action handlers registered (shutdown / reboot)")
+
+	// Register the drop-box ingest handlers. Same auth shape as the power
+	// actions but its own allowlist: the LCD kiosk is loopback and needs no
+	// entry, while the iPhone does. Both paths default to the Pi install
+	// locations; on the Mac neither exists, so the service reports
+	// available=false and every event refuses cleanly.
+	ingestSvc := ingest.NewService(ingest.Config{
+		ScriptPath: envOr("STELLAR_INGEST_SCRIPT", "/usr/local/bin/stellar-ingest"),
+		InboxDir:   envOr("STELLAR_INGEST_INBOX", "/home/eduardo/inbox"),
+	}, nil)
+	ingestTrusted := strings.Split(os.Getenv("STELLAR_INGEST_TRUSTED_REMOTES"), ",")
+	ingestHandlers, err := socketio.NewIngestHandlers(ingestSvc, socketServer, ingestTrusted)
+	if err != nil {
+		log.Fatal().Err(err).Msg("Invalid STELLAR_INGEST_TRUSTED_REMOTES")
+	}
+	socketServer.SetIngestHandlers(ingestHandlers)
+	log.Info().
+		Strs("trusted_remotes", ingestTrusted).
+		Bool("available", ingestSvc.Available()).
+		Msg("Ingest handlers registered (ingest:status / preview / commit)")
 
 	// Start MPD watcher
 	ctx, cancel := context.WithCancel(context.Background())
@@ -791,6 +812,15 @@ func (a *mpdClientAdapter) GetAlbumDetails(basePath string) ([]localmusic.AlbumD
 		}
 	}
 	return result, nil
+}
+
+// envOr returns the environment variable's value, or fallback when it is unset
+// or empty.
+func envOr(key, fallback string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	return fallback
 }
 
 // attrsToMaps converts gompd Attrs slice to map slice.

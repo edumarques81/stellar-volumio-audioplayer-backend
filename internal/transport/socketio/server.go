@@ -56,6 +56,7 @@ type Server struct {
 	lastSeenAlbumKey     string
 	lastPlayedMu         sync.Mutex
 	systemActionHandlers *SystemActionHandlers
+	ingestHandlers       *IngestHandlers
 	cacheDB             *cache.DB
 	cacheDAO            *cache.DAO
 	audirvanaService    *audirvana.Service
@@ -293,6 +294,16 @@ func (s *Server) SetSystemActionHandlers(h *SystemActionHandlers) {
 	s.systemActionHandlers = h
 }
 
+// SetIngestHandlers registers the drop-box ingest handlers.
+// See IngestHandlers for the loopback + allowlist auth contract.
+//
+// Wiring contract: must be called BEFORE the HTTP server starts accepting
+// connections (same constraint as SetSystemActionHandlers). The connection
+// callback reads s.ingestHandlers without locking.
+func (s *Server) SetIngestHandlers(h *IngestHandlers) {
+	s.ingestHandlers = h
+}
+
 // CacheDB returns the cache database opened during NewServer (or nil if it
 // could not be opened). Used by main.go to build the bio service over the
 // same *cache.DB instance — re-opening would race the writer connection.
@@ -425,6 +436,11 @@ func (s *Server) setupHandlers() {
 		// Register system shutdown/reboot handlers (loopback-only auth)
 		if s.systemActionHandlers != nil {
 			s.systemActionHandlers.RegisterHandlers(client)
+		}
+
+		// Register drop-box ingest handlers (loopback + allowlist auth)
+		if s.ingestHandlers != nil {
+			s.ingestHandlers.RegisterHandlers(client)
 		}
 
 		// Register Volumio Connect compatibility handlers
