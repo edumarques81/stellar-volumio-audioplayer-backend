@@ -93,7 +93,7 @@ except ImportError:  # pragma: no cover - environment guard
 @dataclass
 class ItemReport:
     name: str
-    status: str = "pending"          # ingested | refused | skipped
+    status: str = "pending"          # ingested | would-ingest | refused | skipped
     reason: str = ""
     target: str = ""
     audio_files: int = 0
@@ -105,8 +105,14 @@ class ItemReport:
     notes: list[str] = field(default_factory=list)
 
 
+# In --json mode stdout carries the report document and nothing else, so the
+# running commentary is diverted to stderr. Callers that parse us (the backend's
+# ingest service) can therefore read stdout blind.
+JSON_MODE = False
+
+
 def log(msg: str = "") -> None:
-    print(msg, flush=True)
+    print(msg, file=sys.stderr if JSON_MODE else sys.stdout, flush=True)
 
 
 def run(cmd: list[str], check: bool = True) -> subprocess.CompletedProcess:
@@ -574,7 +580,9 @@ def process_item(entry: Path, staging: Path, args) -> ItemReport:
         return report
 
     if args.dry_run:
-        report.status = "skipped"
+        # Distinct from "skipped": this item passed every gate and would be
+        # written for real. The preview UI keys its confirm button off this.
+        report.status = "would-ingest"
         report.reason = f"dry run -- would land at {target}"
         log(f"    dry run: would land at {target}")
         return report
@@ -603,7 +611,8 @@ def process_item(entry: Path, staging: Path, args) -> ItemReport:
 # Main
 # --------------------------------------------------------------------------
 
-def mpd_update() -> None:
+def mpd_update() -> dict[str, int]:
+    """Trigger an MPD rescan and return the resulting Artists/Albums/Songs counts."""
     log("\nTriggering MPD update...")
     run(["mpc", "update"], check=False)
     for _ in range(120):
@@ -612,9 +621,70 @@ def mpd_update() -> None:
             break
         time.sleep(1)
     stats = run(["mpc", "stats"], check=False).stdout
+    counts: dict[str, int] = {}
     for line in stats.splitlines():
         if line.startswith(("Artists", "Albums", "Songs")):
             log(f"  {line}")
+            key, _, value = line.partition(":")
+            try:
+                counts[key.strip().lower()] = int(value.strip())
+            except ValueError:
+                pass
+    return counts
+
+
+SCHEMA_VERSION = 1
+
+
+def emit_json(reports: list[ItemReport], dry_run: bool, exit_code: int,
+              mpd_stats: dict[str, int] | None = None, error: str = "") -> None:
+    """Write the machine-readable report to stdout.
+
+    Every exit path calls this in --json mode, including the ones that never
+    reach an item, so the backend's ingest service can parse stdout blind and
+    never has to fall back on scraping human text.
+    """
+    if not JSON_MODE:
+        return
+
+    items = [
+        {
+            "name": r.name,
+            "status": r.status,
+            "reason": r.reason,
+            "target": r.target,
+            "audioFiles": r.audio_files,
+            "tagged": r.tagged,
+            "tagFailures": r.tag_failures,
+            "md5Mismatches": r.md5_mismatches,
+            "mbRelease": r.mb_release,
+            "art": r.art,
+            "notes": r.notes,
+        }
+        for r in reports
+    ]
+
+    def count(status: str) -> int:
+        return sum(1 for r in reports if r.status == status)
+
+    document = {
+        "schema": SCHEMA_VERSION,
+        "dryRun": dry_run,
+        "error": error,
+        "exitCode": exit_code,
+        "items": items,
+        "summary": {
+            "total": len(reports),
+            "ingested": count("ingested"),
+            "wouldIngest": count("would-ingest"),
+            "refused": count("refused"),
+            "skipped": count("skipped"),
+            "tagFailures": sum(len(r.tag_failures) for r in reports),
+            "audioAltered": sum(len(r.md5_mismatches) for r in reports),
+        },
+        "mpd": mpd_stats or {},
+    }
+    print(json.dumps(document, indent=2), flush=True)
 
 
 def print_report(reports: list[ItemReport], args) -> int:
@@ -623,10 +693,12 @@ def print_report(reports: list[ItemReport], args) -> int:
     log("=" * 66)
 
     ingested = [r for r in reports if r.status == "ingested"]
+    would = [r for r in reports if r.status == "would-ingest"]
     refused = [r for r in reports if r.status == "refused"]
     skipped = [r for r in reports if r.status == "skipped"]
 
-    for group, title in ((ingested, "INGESTED"), (refused, "REFUSED"), (skipped, "SKIPPED")):
+    for group, title in ((ingested, "INGESTED"), (would, "WOULD INGEST"),
+                         (refused, "REFUSED"), (skipped, "SKIPPED")):
         if not group:
             continue
         log(f"\n{title} ({len(group)})")
@@ -634,7 +706,7 @@ def print_report(reports: list[ItemReport], args) -> int:
             log(f"  - {r.name}")
             if r.reason:
                 log(f"      {r.reason}")
-            if r.status == "ingested":
+            if r.status in ("ingested", "would-ingest"):
                 log(f"      -> {r.target}  ({r.audio_files} track(s))")
             if r.mb_release:
                 log(f"      MusicBrainz: {r.mb_release}")
@@ -652,7 +724,8 @@ def print_report(reports: list[ItemReport], args) -> int:
     total_failures = sum(len(r.tag_failures) for r in reports)
     total_md5 = sum(len(r.md5_mismatches) for r in reports)
     log("")
-    log(f"Summary: {len(ingested)} ingested, {len(refused)} refused, {len(skipped)} skipped")
+    log(f"Summary: {len(ingested)} ingested, {len(would)} would ingest, "
+        f"{len(refused)} refused, {len(skipped)} skipped")
     if total_failures:
         log(f"         {total_failures} tag write(s) did not stick (see above)")
     if total_md5:
@@ -667,22 +740,35 @@ def main() -> int:
     parser.add_argument("--no-network", action="store_true", help="skip MusicBrainz and Cover Art Archive")
     parser.add_argument("--item", help="ingest only this inbox entry")
     parser.add_argument("--keep-staging", action="store_true", help="leave the staging tree for inspection")
+    parser.add_argument("--json", action="store_true",
+                        help="emit a machine-readable report on stdout (commentary goes to stderr)")
     args = parser.parse_args()
 
+    global JSON_MODE
+    JSON_MODE = args.json
+
+    def fail(message: str, code: int = 2) -> int:
+        log(message)
+        emit_json([], args.dry_run, code, error=message)
+        return code
+
     if not INBOX.is_dir():
-        return log(f"inbox not found: {INBOX}") or 2
+        return fail(f"inbox not found: {INBOX}")
     if not MUSIC_ROOT.is_dir():
-        return log(f"music root not found: {MUSIC_ROOT}") or 2
+        return fail(f"music root not found: {MUSIC_ROOT}")
 
     entries = [p for p in sorted(INBOX.iterdir())
                if not p.name.startswith(".") and p.name != "staging"]
     if args.item:
         entries = [p for p in entries if p.name == args.item]
         if not entries:
-            return log(f"no such inbox entry: {args.item}") or 2
+            return fail(f"no such inbox entry: {args.item}")
 
     if not entries:
+        # Not an error: an empty inbox is the resting state, and the preview
+        # button hits this constantly.
         log(f"Inbox is empty ({INBOX}). Nothing to do.")
+        emit_json([], args.dry_run, 0)
         return 0
 
     log(f"Inbox: {INBOX}  ({len(entries)} item(s))")
@@ -705,10 +791,13 @@ def main() -> int:
         if not args.keep_staging:
             shutil.rmtree(staging, ignore_errors=True)
 
+    mpd_stats: dict[str, int] = {}
     if any(r.status == "ingested" for r in reports):
-        mpd_update()
+        mpd_stats = mpd_update()
 
-    return print_report(reports, args)
+    code = print_report(reports, args)
+    emit_json(reports, args.dry_run, code, mpd_stats)
+    return code
 
 
 if __name__ == "__main__":
