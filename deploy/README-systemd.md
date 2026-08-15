@@ -27,6 +27,13 @@ STELLAR_SPECTRUM_KEY=<random-token>
 
 # Comma-separated IPs/CIDRs allowed to trigger shutdown/reboot
 STELLAR_POWER_TRUSTED_REMOTES=192.168.1.0/24
+
+# Comma-separated IPs/CIDRs allowed to trigger the drop-box ingest
+# (ingest:status / ingest:preview / ingest:commit). Loopback is always
+# allowed, so the LCD kiosk needs no entry here — this exists for the
+# iPhone remote. Set to the LAN subnet rather than the phone's address:
+# the phone is on DHCP and a pinned IP breaks on the next lease.
+STELLAR_INGEST_TRUSTED_REMOTES=192.168.1.0/24
 ```
 
 ### Keys that MUST be absent or blank on a Pi-resident deployment
