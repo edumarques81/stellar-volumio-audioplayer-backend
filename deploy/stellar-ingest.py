@@ -123,22 +123,41 @@ def run(cmd: list[str], check: bool = True) -> subprocess.CompletedProcess:
 # Junk / partial handling
 # --------------------------------------------------------------------------
 
+def is_junk(path: Path) -> bool:
+    """True for anything strip_junk would delete, including its contents.
+
+    Load-bearing for the preview, which inspects the inbox in place and so
+    still sees junk that a commit would have deleted first. `._Track01.wav`
+    is an AppleDouble file that ends in `.wav` -- counting it as audio would
+    inflate the track count and hand the tag probe a 4 KB stub to write to.
+    """
+    if path.name in JUNK_NAMES or path.name.startswith(JUNK_PREFIXES):
+        return True
+    return any(part in JUNK_DIRS for part in path.parts)
+
+
+def junk_paths(root: Path) -> list[Path]:
+    """Everything strip_junk would remove, deepest-first."""
+    return [p for p in sorted(root.rglob("*"), key=lambda p: len(p.parts), reverse=True)
+            if (p.is_dir() and p.name in JUNK_DIRS)
+            or (p.is_file() and (p.name in JUNK_NAMES or p.name.startswith(JUNK_PREFIXES)))]
+
+
 def strip_junk(root: Path) -> int:
     """Remove macOS and Windows metadata droppings. Returns count removed."""
     removed = 0
-    for path in sorted(root.rglob("*"), key=lambda p: len(p.parts), reverse=True):
-        name = path.name
-        if path.is_dir() and name in JUNK_DIRS:
+    for path in junk_paths(root):
+        if path.is_dir():
             shutil.rmtree(path, ignore_errors=True)
-            removed += 1
-        elif path.is_file() and (name in JUNK_NAMES or name.startswith(JUNK_PREFIXES)):
+        else:
             path.unlink(missing_ok=True)
-            removed += 1
+        removed += 1
     return removed
 
 
 def find_partials(root: Path) -> list[Path]:
-    return [p for p in root.rglob("*") if p.is_file() and PARTIAL_RE.match(p.name)]
+    return [p for p in root.rglob("*")
+            if p.is_file() and not is_junk(p) and PARTIAL_RE.match(p.name)]
 
 
 def extract_archive(archive: Path, dest: Path) -> bool:
@@ -250,6 +269,36 @@ def decoded_md5(path: Path) -> str:
     if proc.returncode != 0:
         return ""
     return proc.stdout.strip()
+
+
+def probe_tag_write(path: Path, fill: dict[str, str]) -> tuple[str, bool]:
+    """Write `fill` to `path` and read it back. Returns (problem, altered).
+
+    `problem` is "" when every field round-tripped; `altered` is True when the
+    write changed the decoded audio stream, which is the one outcome that must
+    never reach the SSD.
+    """
+    before = decoded_md5(path)
+    ok, err = write_tags(path, fill)
+    if not ok:
+        return err, False
+
+    after = decoded_md5(path)
+    altered = bool(before and after and before != after)
+
+    back = read_tags(path)
+    missed = [k for k, v in fill.items()
+              if k in FIELDS and back.get(k, "").strip() != v.strip()]
+    if missed:
+        return f"{', '.join(missed)} did not stick", altered
+    return "", altered
+
+
+def by_extension(paths: list[Path]) -> dict[str, list[Path]]:
+    grouped: dict[str, list[Path]] = {}
+    for path in paths:
+        grouped.setdefault(path.suffix.lower(), []).append(path)
+    return grouped
 
 
 # --------------------------------------------------------------------------
@@ -463,35 +512,53 @@ def process_item(entry: Path, staging: Path, args) -> ItemReport:
     if work.exists():
         shutil.rmtree(work)
 
+    # `tree` is what we inspect; `mutable` says whether we own it and may write
+    # to it. A preview of a plain folder inspects the inbox in place: copying
+    # the album first is what made the first real preview take three and a half
+    # minutes on a 5.2 GB import, and every byte of it was thrown away.
     if entry.is_file():
         if entry.suffix.lower() not in ARCHIVE_EXTS:
             report.status = "skipped"
             report.reason = f"loose file, not an archive ({entry.suffix or 'no extension'})"
             log(f"    skipped: {report.reason}")
             return report
+        # An archive has to be unpacked before anything can be said about it.
         log("    extracting archive")
         if not extract_archive(entry, work):
             report.status = "refused"
             report.reason = "archive could not be extracted"
             return report
-        work = collapse_single_dir(work)
+        tree = collapse_single_dir(work)
+        mutable = True
+    elif args.dry_run:
+        tree = collapse_single_dir(entry)
+        mutable = False
+        log("    preview: inspecting in place, no copy")
     else:
         shutil.copytree(entry, work)
-        work = collapse_single_dir(work)
+        tree = collapse_single_dir(work)
+        mutable = True
 
-    removed = strip_junk(work)
-    if removed:
-        report.notes.append(f"removed {removed} junk file(s)")
-        log(f"    stripped {removed} junk file(s)")
+    if mutable:
+        removed = strip_junk(tree)
+        if removed:
+            report.notes.append(f"removed {removed} junk file(s)")
+            log(f"    stripped {removed} junk file(s)")
+    else:
+        removed = len(junk_paths(tree))
+        if removed:
+            report.notes.append(f"would remove {removed} junk file(s)")
+            log(f"    would strip {removed} junk file(s)")
 
-    partials = find_partials(work)
+    partials = find_partials(tree)
     if partials:
         report.status = "refused"
         report.reason = f"contains {len(partials)} partial/incomplete download(s), e.g. {partials[0].name}"
         log(f"    refused: {report.reason}")
         return report
 
-    audio = sorted(p for p in work.rglob("*") if p.is_file() and p.suffix.lower() in AUDIO_EXTS)
+    audio = sorted(p for p in tree.rglob("*")
+                   if p.is_file() and not is_junk(p) and p.suffix.lower() in AUDIO_EXTS)
     if not audio:
         report.status = "refused"
         report.reason = "no audio files found"
@@ -508,13 +575,13 @@ def process_item(entry: Path, staging: Path, args) -> ItemReport:
 
     fill: dict[str, str] = {}
     if not album:
-        candidate = candidate_album_title(work.name)
+        candidate = candidate_album_title(tree.name)
         log(f"    no Album tag; candidate from folder name: {candidate!r}")
         if args.no_network:
             fill["album"] = candidate
             report.notes.append("offline: album taken from folder name, not verified")
         else:
-            match = search_release(artist or albumartist, candidate, folder_name=work.name)
+            match = search_release(artist or albumartist, candidate, folder_name=tree.name)
             if match:
                 fill["album"] = match["title"]
                 report.mb_release = f"{match['title']} ({match['id']}, score {match.get('score')})"
@@ -536,33 +603,59 @@ def process_item(entry: Path, staging: Path, args) -> ItemReport:
         fill["albumartist"] = artist
 
     # ---- write, and check what stuck --------------------------------------
-    if fill:
+    if fill and mutable:
         log(f"    writing tags: {', '.join(sorted(fill))}")
         for path in audio:
-            before = decoded_md5(path)
-            ok, err = write_tags(path, fill)
-            if not ok:
-                report.tag_failures.append(f"{path.name}: {err}")
-                continue
-            after = decoded_md5(path)
-            if before and after and before != after:
+            problem, altered = probe_tag_write(path, fill)
+            if altered:
                 report.md5_mismatches.append(path.name)
-
-            back = read_tags(path)
-            missed = [k for k, v in fill.items()
-                      if k in FIELDS and back.get(k, "").strip() != v.strip()]
-            if missed:
-                report.tag_failures.append(f"{path.name}: {', '.join(missed)} did not stick")
+            if problem:
+                report.tag_failures.append(f"{path.name}: {problem}")
             else:
                 report.tagged.append(path.name)
+    elif fill:
+        # Preview. Whether a tag sticks is a property of the container format,
+        # not of the individual file, so one file per extension answers the
+        # question for the whole album -- and the smallest one answers it
+        # fastest. The inbox is never written to: the probe runs on a copy in
+        # staging, which is thrown away with the rest of it.
+        grouped = by_extension(audio)
+        log(f"    preview: probing tag writes on {len(grouped)} file(s), "
+            f"one per format ({', '.join(sorted(grouped))})")
+        work.mkdir(parents=True, exist_ok=True)
+        for ext, members in sorted(grouped.items()):
+            rep = min(members, key=lambda p: p.stat().st_size)
+            probe = work / f"probe{ext}"
+            shutil.copy2(rep, probe)
+            try:
+                problem, altered = probe_tag_write(probe, fill)
+            finally:
+                probe.unlink(missing_ok=True)
+
+            names = sorted(m.name for m in members)
+            if altered:
+                report.md5_mismatches.extend(names)
+            if problem:
+                report.tag_failures.append(
+                    f"{ext} ({len(members)} file(s)): {problem} -- probed on {rep.name}")
+            else:
+                report.tagged.extend(names)
+        report.notes.append(
+            f"preview probed {len(grouped)} file(s), one per format; "
+            f"the import will tag all {len(audio)}")
 
     # ---- cover art --------------------------------------------------------
-    has_art = any((work / n).exists() for n in ART_NAMES)
+    has_art = any((tree / n).exists() for n in ART_NAMES)
     if not has_art and not args.no_network and fill.get("musicbrainz_albumid"):
         data = fetch_front_cover(fill["musicbrainz_albumid"])
         if data:
-            (work / "folder.jpg").write_bytes(data)
-            report.art = "folder.jpg from Cover Art Archive"
+            if mutable:
+                (tree / "folder.jpg").write_bytes(data)
+                report.art = "folder.jpg from Cover Art Archive"
+            else:
+                # Confirmed available, but a preview writes nothing. The import
+                # fetches it again for real.
+                report.art = "folder.jpg from Cover Art Archive (on import)"
             log(f"    cover art: {report.art} ({len(data) // 1024} KB)")
         else:
             log("    cover art: none on Cover Art Archive")
@@ -570,7 +663,7 @@ def process_item(entry: Path, staging: Path, args) -> ItemReport:
         report.art = "already present"
 
     # ---- collision check --------------------------------------------------
-    final_name = safe_dirname(fill.get("album") or album or work.name)
+    final_name = safe_dirname(fill.get("album") or album or tree.name)
     target = MUSIC_ROOT / final_name
     report.target = str(target)
     if target.exists():
@@ -589,7 +682,7 @@ def process_item(entry: Path, staging: Path, args) -> ItemReport:
 
     # ---- land it ----------------------------------------------------------
     log(f"    copying to {target}")
-    ok, err = copy_to_ssd(work, target)
+    ok, err = copy_to_ssd(tree, target)
     if not ok:
         report.status = "refused"
         report.reason = err
