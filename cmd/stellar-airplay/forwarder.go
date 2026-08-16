@@ -13,6 +13,8 @@ import (
 	"time"
 
 	"github.com/rs/zerolog/log"
+
+	"github.com/edumarques81/stellar-volumio-audioplayer-backend/internal/infra/fifo"
 )
 
 // forwarder POSTs airplay state + heartbeat payloads to the Mac backend.
@@ -51,7 +53,10 @@ type forwarderConfig struct {
 
 	queueSize int
 
-	sleep func(time.Duration)
+	// sleep paces retry backoff. It must honour cancellation — a plain
+	// time.Sleep here would hold shutdown for up to maxBackoff — and
+	// returns false when ctx was cancelled before the delay elapsed.
+	sleep func(context.Context, time.Duration) bool
 }
 
 func newForwarder(cfg forwarderConfig) *forwarder {
@@ -68,7 +73,7 @@ func newForwarder(cfg forwarderConfig) *forwarder {
 		cfg.queueSize = 4
 	}
 	if cfg.sleep == nil {
-		cfg.sleep = time.Sleep
+		cfg.sleep = fifo.Sleep
 	}
 	cfg.baseURL = strings.TrimRight(cfg.baseURL, "/")
 	return &forwarder{
@@ -136,7 +141,9 @@ func (f *forwarder) deliverWithRetry(ctx context.Context, op postOp) {
 			return
 		}
 		log.Debug().Err(err).Str("path", op.path).Dur("delay", backoff).Msg("airplay forward failed; retrying")
-		f.cfg.sleep(backoff)
+		if !f.cfg.sleep(ctx, backoff) {
+			return
+		}
 		backoff = nextBackoff(backoff, f.cfg.maxBackoff)
 	}
 }

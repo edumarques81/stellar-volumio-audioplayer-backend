@@ -18,6 +18,7 @@ package spectrum
 import (
 	"context"
 	"encoding/binary"
+	"errors"
 	"io"
 	"log"
 	"math"
@@ -27,6 +28,8 @@ import (
 	"time"
 
 	"github.com/madelynnblue/go-dsp/fft"
+
+	"github.com/edumarques81/stellar-volumio-audioplayer-backend/internal/infra/fifo"
 )
 
 // Config controls the spectrum analyzer parameters.
@@ -148,12 +151,39 @@ func (s *Streamer) Start(ctx context.Context, emitter SocketEmitter) {
 	go s.run(ctx, emitter)
 }
 
-// Stop shuts down the spectrum streamer and waits for it to finish.
+const (
+	// fifoReadPoll bounds a single read on the FIFO. See fifo.DefaultPollInterval.
+	fifoReadPoll = fifo.DefaultPollInterval
+
+	// fifoRetryInterval is the pause before reopening after the writer goes
+	// away, so a permanently absent FIFO does not spin.
+	fifoRetryInterval = 2 * time.Second
+
+	// stopGrace bounds Stop's wait for the reader. The reader checks its
+	// context every fifoReadPoll, so reaching this timeout means something
+	// is genuinely stuck — and a stuck reader must not be able to hold up
+	// process exit again. See the fifo package comment for the history.
+	stopGrace = 5 * time.Second
+)
+
+// Stop shuts down the spectrum streamer and waits for it to finish, giving up
+// after stopGrace so it can never block the caller indefinitely.
 func (s *Streamer) Stop() {
 	if s.cancel != nil {
 		s.cancel()
 	}
-	s.wg.Wait()
+
+	done := make(chan struct{})
+	go func() {
+		s.wg.Wait()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(stopGrace):
+		log.Printf("[Spectrum] Reader did not stop within %s — abandoning it", stopGrace)
+	}
 }
 
 func (s *Streamer) run(ctx context.Context, emitter SocketEmitter) {
@@ -168,34 +198,34 @@ func (s *Streamer) run(ctx context.Context, emitter SocketEmitter) {
 		default:
 		}
 
-		// Open the FIFO — this blocks until a writer (MPD) opens the other end
-		log.Printf("[Spectrum] Opening FIFO %s ...", s.cfg.FIFOPath)
-		fifo, err := os.Open(s.cfg.FIFOPath)
+		pipe, err := fifo.Open(s.cfg.FIFOPath)
 		if err != nil {
-			log.Printf("[Spectrum] Failed to open FIFO: %v (retrying in 5s)", err)
-			select {
-			case <-ctx.Done():
+			log.Printf("[Spectrum] Failed to open FIFO %s: %v (retrying in %s)", s.cfg.FIFOPath, err, fifoRetryInterval)
+			if !fifo.Sleep(ctx, fifoRetryInterval) {
 				return
-			case <-time.After(5 * time.Second):
-				continue
 			}
+			continue
 		}
 
-		log.Printf("[Spectrum] FIFO opened, streaming at %d fps", s.cfg.FPS)
-		s.streamFromFIFO(ctx, fifo, emitter, frameInterval)
-		_ = fifo.Close()
+		frames := s.streamFromFIFO(ctx, pipe, emitter, frameInterval)
+		_ = pipe.Close()
 
-		// FIFO closed (MPD stopped?) — wait and retry
-		log.Printf("[Spectrum] FIFO closed, retrying in 2s")
-		select {
-		case <-ctx.Done():
+		// Only report the transition when audio was actually flowing. A
+		// non-blocking open succeeds even with no writer attached, so the
+		// no-MPD case would otherwise log every retry forever.
+		if frames > 0 {
+			log.Printf("[Spectrum] FIFO writer closed after %d frames", frames)
+		}
+
+		if !fifo.Sleep(ctx, fifoRetryInterval) {
 			return
-		case <-time.After(2 * time.Second):
 		}
 	}
 }
 
-func (s *Streamer) streamFromFIFO(ctx context.Context, fifo *os.File, emitter SocketEmitter, frameInterval time.Duration) {
+// streamFromFIFO reads and emits until the writer goes away or ctx is
+// cancelled, returning the number of frames emitted.
+func (s *Streamer) streamFromFIFO(ctx context.Context, pipe *os.File, emitter SocketEmitter, frameInterval time.Duration) int {
 	// Each PCM frame is 4 bytes: 2 bytes left + 2 bytes right (16-bit stereo)
 	bytesPerFrame := 4
 	bufSize := s.cfg.FFTSize * bytesPerFrame
@@ -203,25 +233,38 @@ func (s *Streamer) streamFromFIFO(ctx context.Context, fifo *os.File, emitter So
 	left := make([]float64, s.cfg.FFTSize)
 	right := make([]float64, s.cfg.FFTSize)
 
+	reader := fifo.NewReader(ctx, pipe, fifoReadPoll)
+
 	ticker := time.NewTicker(frameInterval)
 	defer ticker.Stop()
 
+	frames := 0
 	for {
 		select {
 		case <-ctx.Done():
-			return
+			return frames
 		case <-ticker.C:
 		}
 
-		// Read enough PCM data for one FFT window
-		n, err := io.ReadFull(fifo, buf)
+		// Read enough PCM data for one FFT window. ReadFull keeps the bytes
+		// it has already collected when an individual read comes back short,
+		// which is what preserves frame alignment: the stream is interleaved
+		// L/R, so restarting a partly-filled window would shift it by a
+		// non-frame-aligned amount and swap the channels for good.
+		n, err := io.ReadFull(reader, buf)
 		if err != nil {
-			if err == io.EOF || err == io.ErrUnexpectedEOF {
+			switch {
+			case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
+			case errors.Is(err, io.EOF), errors.Is(err, io.ErrUnexpectedEOF):
 				// FIFO writer (MPD) closed — return to retry loop
-				return
+			default:
+				log.Printf("[Spectrum] Read error: %v", err)
 			}
-			log.Printf("[Spectrum] Read error: %v", err)
-			return
+			return frames
+		}
+
+		if frames == 0 {
+			log.Printf("[Spectrum] FIFO %s streaming at %d fps", s.cfg.FIFOPath, s.cfg.FPS)
 		}
 
 		// Split 16-bit stereo PCM into normalised L/R float channels.
@@ -230,6 +273,7 @@ func (s *Streamer) streamFromFIFO(ctx context.Context, fifo *os.File, emitter So
 
 		data := s.Process(left, right)
 		emitter.BroadcastToAll("pushSpectrum", data)
+		frames++
 	}
 }
 

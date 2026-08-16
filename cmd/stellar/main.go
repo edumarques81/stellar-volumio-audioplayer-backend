@@ -42,6 +42,12 @@ import (
 	"github.com/edumarques81/stellar-volumio-audioplayer-backend/internal/version"
 )
 
+// shutdownDeadline is how long the process gives itself to wind down after a
+// SIGINT/SIGTERM before exiting unconditionally. It has to stay comfortably
+// under systemd's TimeoutStopSec (unset in stellar-backend.service, so the
+// 90s default applies) for a stop to count as clean rather than a SIGKILL.
+const shutdownDeadline = 10 * time.Second
+
 func main() {
 	// Command line flags
 	port := flag.String("port", "3001", "HTTP server port")
@@ -718,6 +724,24 @@ func main() {
 		<-sigCh
 
 		log.Info().Msg("Shutting down...")
+
+		// Tell systemd the stop is deliberate, so it stops expecting watchdog
+		// pings from a process that is on its way out. No-op off systemd.
+		if err := sdnotify.Notify("STOPPING=1"); err != nil {
+			log.Warn().Err(err).Msg("sd_notify STOPPING failed")
+		}
+
+		// Backstop. Everything below, plus main's deferred cleanup, is
+		// third-party-adjacent code that can block on a syscall no context can
+		// interrupt — the spectrum FIFO reader used to do exactly that, and
+		// systemd answered by SIGKILLing the service after its 90s stop
+		// timeout on every single deploy. Exit under our own power well before
+		// that, so a stop is always clean and a restart is never a hard kill.
+		time.AfterFunc(shutdownDeadline, func() {
+			log.Warn().Dur("after", shutdownDeadline).Msg("Shutdown did not complete in time; forcing exit")
+			os.Exit(0)
+		})
+
 		cancel()
 
 		if advertiser != nil {

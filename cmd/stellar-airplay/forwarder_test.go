@@ -140,8 +140,9 @@ func TestForwarderRetriesOnFailure(t *testing.T) {
 		client:         &http.Client{Transport: rt},
 		initialBackoff: 1 * time.Millisecond,
 		maxBackoff:     4 * time.Millisecond,
-		sleep: func(d time.Duration) {
+		sleep: func(_ context.Context, d time.Duration) bool {
 			observed = append(observed, d)
+			return true
 		},
 	})
 
@@ -167,7 +168,7 @@ func TestForwarderDropsWhenQueueFull(t *testing.T) {
 		client:         &http.Client{Transport: rt},
 		initialBackoff: time.Hour, // ensure retries park
 		queueSize:      2,
-		sleep:          func(d time.Duration) { /* don't sleep */ },
+		sleep:          func(context.Context, time.Duration) bool { return true },
 	})
 
 	// Don't drain; push 5 payloads. Queue is 2 → 3 must be dropped.

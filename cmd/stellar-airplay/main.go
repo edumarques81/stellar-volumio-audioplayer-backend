@@ -42,7 +42,6 @@ package main
 import (
 	"context"
 	"flag"
-	"io"
 	"os"
 	"os/signal"
 	"syscall"
@@ -52,6 +51,7 @@ import (
 	"github.com/rs/zerolog/log"
 
 	"github.com/edumarques81/stellar-volumio-audioplayer-backend/internal/infra/airplay"
+	"github.com/edumarques81/stellar-volumio-audioplayer-backend/internal/infra/fifo"
 )
 
 // (Heartbeat gating was tried via a pipe-activity timeout but proved
@@ -110,62 +110,69 @@ func main() {
 	// shairport.
 	go heartbeatLoop(ctx, fw, *hbInterval)
 
-	// Tail the pipe forever. Re-open on EOF (shairport closes the writer
-	// side when the sender disconnects; we want to immediately re-block
-	// for the next session).
 	b := newBundler(func(p map[string]interface{}) {
 		fw.PostState(p)
 	})
-	for {
-		if err := ctx.Err(); err != nil {
-			break
-		}
-		if err := tailPipe(ctx, *pipePath, b); err != nil {
-			log.Warn().Err(err).Str("pipe", *pipePath).Msg("pipe tail terminated; will reopen")
-			select {
-			case <-ctx.Done():
-				break
-			case <-time.After(500 * time.Millisecond):
-			}
-		}
-	}
+	tailLoop(ctx, *pipePath, b)
 
 	log.Info().Msg("draining forwarder")
 	fw.wait()
 	log.Info().Int64("dropped", fw.droppedFrames()).Msg("stellar-airplay stopped")
 }
 
-func tailPipe(ctx context.Context, path string, b *bundler) error {
-	// Opening a FIFO read-only blocks until a writer is attached. That
-	// matches what we want — shairport launches with the pipe enabled
-	// and we want to wait for it on cold boot.
-	f, err := os.OpenFile(path, os.O_RDONLY, 0)
-	if err != nil {
-		return err
+// reopenInterval paces reopening the metadata pipe. The open no longer waits
+// for a writer to attach, so a pipe with nobody on the far end — shairport
+// stopped, or this daemon started first on a cold boot — reads EOF straight
+// away and would spin without this.
+const reopenInterval = 500 * time.Millisecond
+
+// tailLoop tails the metadata pipe until ctx is cancelled, reopening each time
+// the writer side closes so the next AirPlay session is picked up immediately.
+func tailLoop(ctx context.Context, path string, b *bundler) {
+	for ctx.Err() == nil {
+		chunks, err := tailPipe(ctx, path, b)
+
+		switch {
+		case ctx.Err() != nil:
+			return
+		case err != nil:
+			log.Warn().Err(err).Str("pipe", path).Msg("pipe tail terminated; will reopen")
+		case chunks > 0:
+			log.Info().Str("pipe", path).Int("chunks", chunks).Msg("pipe writer closed; will reopen")
+		default:
+			// Nobody is writing. Expected whenever shairport-sync is not
+			// running, so reopening quietly beats logging twice a second.
+			log.Debug().Str("pipe", path).Msg("no writer on pipe; will reopen")
+		}
+
+		if !fifo.Sleep(ctx, reopenInterval) {
+			return
+		}
 	}
-	defer func() { _ = f.Close() }()
-	log.Info().Str("pipe", path).Msg("pipe opened; tailing")
-
-	// ParseStream blocks until EOF. We hand it a wrapper that calls our
-	// bundler.Feed for each chunk.
-	stream := contextReader{ctx: ctx, r: f}
-	return airplay.ParseStream(stream, b.Feed)
 }
 
-// contextReader wraps an io.Reader so reads are interrupted on ctx
-// cancel via Close (we close the underlying FD in a goroutine). Simpler
-// shape: the outer loop relies on the Read returning io.EOF when
-// shairport closes the writer side.
-type contextReader struct {
-	ctx context.Context
-	r   io.Reader
-}
-
-func (c contextReader) Read(p []byte) (int, error) {
-	if err := c.ctx.Err(); err != nil {
+// tailPipe reads one writer session off the pipe, returning the number of
+// metadata chunks parsed.
+//
+// The pipe is silent for long stretches — shairport-sync writes at track
+// boundaries and on volume/pause events, not continuously — so the read has to
+// be interruptible or a cancelled context is never observed and shutdown hangs
+// until systemd SIGKILLs the daemon. See the fifo package for the mechanism.
+func tailPipe(ctx context.Context, path string, b *bundler) (int, error) {
+	f, err := fifo.Open(path)
+	if err != nil {
 		return 0, err
 	}
-	return c.r.Read(p)
+	defer func() { _ = f.Close() }()
+
+	chunks := 0
+	feed := func(c airplay.Chunk) {
+		chunks++
+		b.Feed(c)
+	}
+
+	err = airplay.ParseStream(fifo.NewReader(ctx, f, 0), feed)
+	return chunks, err
 }
 
 func heartbeatLoop(ctx context.Context, fw *forwarder, interval time.Duration) {
@@ -186,12 +193,26 @@ func heartbeatLoop(ctx context.Context, fw *forwarder, interval time.Duration) {
 	}
 }
 
+// shutdownDeadline is how long the daemon gives itself to wind down after a
+// SIGINT/SIGTERM before exiting unconditionally. It has to stay comfortably
+// under systemd's TimeoutStopSec (unset in stellar-airplay.service, so the 90s
+// default applies) for a stop to count as clean rather than a SIGKILL.
+const shutdownDeadline = 10 * time.Second
+
 func handleSignals(cancel context.CancelFunc) {
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 	sig := <-sigCh
 	log.Info().Str("signal", sig.String()).Msg("shutdown signal received")
 	cancel()
+
+	// Backstop. Everything on the shutdown path is now cancellable, but a
+	// blocked syscall here used to cost a 90s stop timeout and a SIGKILL on
+	// every deploy. Exit under our own power well before that.
+	time.AfterFunc(shutdownDeadline, func() {
+		log.Warn().Dur("after", shutdownDeadline).Msg("shutdown did not complete in time; forcing exit")
+		os.Exit(0)
+	})
 }
 
 func envOr(key, fallback string) string {
