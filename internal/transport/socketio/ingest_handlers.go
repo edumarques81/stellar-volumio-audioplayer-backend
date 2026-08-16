@@ -25,6 +25,9 @@ type IngestService interface {
 	Status() ingest.Status
 	Preview(ctx context.Context) (ingest.Report, error)
 	Commit(ctx context.Context, token string) (ingest.Report, error)
+	// PendingPreview returns a plan that is still confirmable, for replay to
+	// a client that missed the broadcast.
+	PendingPreview() (ingest.Report, bool)
 }
 
 // ingestEmitter is the one method these handlers need from a connected client.
@@ -91,6 +94,42 @@ func (h *IngestHandlers) RegisterHandlers(client *socket.Socket) {
 	client.On("ingest:commit", func(args ...any) {
 		go h.handleCommit(client, extractRemoteIP(client), ingestToken(args...))
 	})
+}
+
+// PushTo hydrates a freshly-connected client with the ingest state it would
+// otherwise only learn from a broadcast it was not around for.
+//
+// A preview runs for minutes. A phone that locks its screen or loses Wi-Fi
+// during one misses `pushIngestPreview` entirely and comes back with no plan
+// on screen, no Import button, and no way to recover except paying for a
+// second full run — which is exactly what a user does not want to do after
+// waiting for the first. Replaying here mirrors what the connect-time batch
+// already does for AirPlay state.
+//
+// Nothing is sent when there is no plan to confirm, and the same auth gate as
+// the interactive events applies: an unauthorized controller must not learn
+// the inbox's filenames just by connecting. Refusals are silent — this is a
+// push nobody asked for, so an error banner would be noise.
+func (h *IngestHandlers) PushTo(client *socket.Socket) {
+	if h == nil || client == nil {
+		return
+	}
+	h.pushTo(client, extractRemoteIP(client))
+}
+
+func (h *IngestHandlers) pushTo(em ingestEmitter, ip string) {
+	if !h.isAuthorized(ip) {
+		return
+	}
+	report, ok := h.svc.PendingPreview()
+	if !ok {
+		return
+	}
+	// Status first: the clients derive "a run is in flight" from it, and a
+	// plan arriving before that would flash a confirmable button on a surface
+	// that is actually mid-commit.
+	h.emit(em, "pushIngestStatus", h.svc.Status())
+	h.emit(em, "pushIngestPreview", report)
 }
 
 // IngestErrorEvent is the payload of pushIngestError.

@@ -387,6 +387,90 @@ func TestCommit_RefusesWhenInboxChanged(t *testing.T) {
 }
 
 // --------------------------------------------------------------------------
+// Retained plan (connect-time replay)
+// --------------------------------------------------------------------------
+
+// A preview takes minutes and its result reaches clients as a broadcast, so a
+// phone that locks its screen mid-run never sees the plan. The service holds
+// onto it for exactly as long as the token is spendable.
+func TestPendingPreview_RetainsTheConfirmablePlan(t *testing.T) {
+	t.Parallel()
+
+	runner := &fakeRunner{stdout: []byte(previewJSON)}
+	svc, _ := newService(t, runner, "Album A")
+
+	if _, ok := svc.PendingPreview(); ok {
+		t.Fatal("no preview has run yet; there is nothing to confirm")
+	}
+
+	preview, err := svc.Preview(context.Background())
+	if err != nil {
+		t.Fatalf("Preview: %v", err)
+	}
+
+	got, ok := svc.PendingPreview()
+	if !ok {
+		t.Fatal("expected the plan to be retained after Preview")
+	}
+	// The token is what arms the client's confirm button; a replay without it
+	// would show a plan the user cannot act on.
+	if got.Token != preview.Token || got.Token == "" {
+		t.Fatalf("retained token = %q, want %q", got.Token, preview.Token)
+	}
+	if got.Summary.WouldIngest != preview.Summary.WouldIngest {
+		t.Fatalf("retained WouldIngest = %d, want %d",
+			got.Summary.WouldIngest, preview.Summary.WouldIngest)
+	}
+	// Reading the plan must not re-run the script.
+	if runner.callCount() != 1 {
+		t.Fatalf("script ran %d times, want 1", runner.callCount())
+	}
+}
+
+func TestPendingPreview_DroppedOnceTheTokenIsSpent(t *testing.T) {
+	t.Parallel()
+
+	runner := &fakeRunner{stdouts: [][]byte{[]byte(previewJSON), []byte(commitJSON)}}
+	svc, _ := newService(t, runner, "Album A")
+
+	preview, err := svc.Preview(context.Background())
+	if err != nil {
+		t.Fatalf("Preview: %v", err)
+	}
+	if _, err := svc.Commit(context.Background(), preview.Token); err != nil {
+		t.Fatalf("Commit: %v", err)
+	}
+
+	if _, ok := svc.PendingPreview(); ok {
+		t.Fatal("a committed plan must not be replayed; the inbox has moved on")
+	}
+}
+
+// A plan whose files changed would be refused by Commit anyway. Handing it to
+// a reconnecting client would arm a button that can only fail, so it is
+// dropped here on the same terms Commit drops it.
+func TestPendingPreview_DropsAStalePlan(t *testing.T) {
+	t.Parallel()
+
+	runner := &fakeRunner{stdout: []byte(previewJSON)}
+	svc, inbox := newService(t, runner, "Album A")
+
+	if _, err := svc.Preview(context.Background()); err != nil {
+		t.Fatalf("Preview: %v", err)
+	}
+
+	addEntry(t, inbox, "Late Arrival", "more audio")
+
+	if _, ok := svc.PendingPreview(); ok {
+		t.Fatal("expected a changed inbox to invalidate the retained plan")
+	}
+	// And it stays gone — the stale plan is cleared, not merely hidden.
+	if _, err := svc.Commit(context.Background(), "whatever"); !errors.Is(err, ingest.ErrNoPlan) {
+		t.Fatalf("err = %v, want ErrNoPlan", err)
+	}
+}
+
+// --------------------------------------------------------------------------
 // Single-flight
 // --------------------------------------------------------------------------
 

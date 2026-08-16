@@ -390,6 +390,11 @@ func (s *Server) setupHandlers() {
 			// metadata frame (which may be tens of seconds away for steady
 			// playback).
 			s.pushAirplayStateTo(client)
+			// Same reasoning for a drop-box ingest: a preview takes minutes
+			// and its result is a broadcast, so a client that reconnects
+			// mid-run would otherwise be stranded with no plan and no Import
+			// button. No-op unless a confirmable plan is actually pending.
+			s.ingestHandlers.PushTo(client)
 		}()
 
 		// Handle disconnect

@@ -68,6 +68,13 @@ type Service struct {
 	mu      sync.Mutex
 	running bool
 	token   string
+	// pending is the report that issued token, kept for as long as the token
+	// is spendable. Preview and commit results reach clients as broadcasts, so
+	// a controller that was backgrounded or off-network while the dry run
+	// finished never saw the plan and has no way to ask for it again without
+	// paying for a second full run. Retaining it here lets a reconnecting
+	// client be handed the plan its token would confirm.
+	pending Report
 }
 
 // NewService constructs a Service. Passing a nil runner installs the real
@@ -120,12 +127,45 @@ func (s *Service) Preview(ctx context.Context) (Report, error) {
 	if err != nil {
 		return report, fmt.Errorf("ingest: fingerprinting the inbox: %w", err)
 	}
+	report.Token = token
+
 	s.mu.Lock()
 	s.token = token
+	s.pending = report
 	s.mu.Unlock()
 
-	report.Token = token
 	return report, nil
+}
+
+// PendingPreview returns the plan a client could still confirm, if any.
+//
+// It re-fingerprints the inbox rather than trusting the stored token: a plan
+// whose files have since changed would be refused by Commit anyway, and
+// handing it to a reconnecting client would arm a confirm button that can only
+// fail. A plan found stale here is dropped, exactly as Commit drops it.
+func (s *Service) PendingPreview() (Report, bool) {
+	s.mu.Lock()
+	expected := s.token
+	report := s.pending
+	s.mu.Unlock()
+
+	if expected == "" {
+		return Report{}, false
+	}
+
+	current, err := s.planToken()
+	if err != nil || current != expected {
+		s.clearPlan()
+		return Report{}, false
+	}
+	return report, true
+}
+
+func (s *Service) clearPlan() {
+	s.mu.Lock()
+	s.token = ""
+	s.pending = Report{}
+	s.mu.Unlock()
 }
 
 // Commit runs the real ingest, but only if token still describes the inbox.
@@ -148,9 +188,7 @@ func (s *Service) Commit(ctx context.Context, token string) (Report, error) {
 		return Report{}, fmt.Errorf("ingest: fingerprinting the inbox: %w", err)
 	}
 	if current != expected {
-		s.mu.Lock()
-		s.token = ""
-		s.mu.Unlock()
+		s.clearPlan()
 		return Report{}, ErrStalePlan
 	}
 
@@ -160,9 +198,7 @@ func (s *Service) Commit(ctx context.Context, token string) (Report, error) {
 	}
 
 	// The plan has been spent either way — the inbox has moved on.
-	s.mu.Lock()
-	s.token = ""
-	s.mu.Unlock()
+	s.clearPlan()
 
 	return report, nil
 }

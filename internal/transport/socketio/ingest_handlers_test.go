@@ -54,6 +54,10 @@ type fakeIngest struct {
 	previewErr    error
 	commitReport  ingest.Report
 	commitErr     error
+	// pending is what PendingPreview hands back on a connect-time replay. Zero
+	// value means "no plan on file", which is the common case.
+	pending    ingest.Report
+	hasPending bool
 
 	mu           sync.Mutex
 	previewCalls int
@@ -78,6 +82,10 @@ func (f *fakeIngest) Commit(_ context.Context, token string) (ingest.Report, err
 	f.commitTokens = append(f.commitTokens, token)
 	f.mu.Unlock()
 	return f.commitReport, f.commitErr
+}
+
+func (f *fakeIngest) PendingPreview() (ingest.Report, bool) {
+	return f.pending, f.hasPending
 }
 
 func (f *fakeIngest) calls() (preview, commit int) {
@@ -371,6 +379,146 @@ func TestIngest_CommitOperationalErrorIsNotRetryable(t *testing.T) {
 	if payload := ev.payload.(IngestErrorEvent); payload.Retryable {
 		t.Fatal("an operational failure must not be advertised as retryable")
 	}
+}
+
+// --- connect-time replay ---------------------------------------------------
+
+func TestIngestPushTo(t *testing.T) {
+	t.Parallel()
+
+	plan := ingest.Report{
+		Token:   "plan-token",
+		Summary: ingest.Summary{WouldIngest: 2},
+		Items:   []ingest.Item{},
+	}
+
+	for _, tc := range []struct {
+		name    string
+		svc     *fakeIngest
+		ip      string
+		trusted []string
+		// want is the exact event sequence the client should receive. Order
+		// matters: status establishes "is a run in flight" before the plan
+		// arrives, so an empty slice means "say nothing at all".
+		want []string
+	}{
+		{
+			name: "pending plan is replayed status-first",
+			svc: &fakeIngest{
+				status:     ingest.Status{Available: true, Count: 2},
+				pending:    plan,
+				hasPending: true,
+			},
+			ip:   "127.0.0.1",
+			want: []string{"pushIngestStatus", "pushIngestPreview"},
+		},
+		{
+			name: "no plan on file is silent",
+			svc: &fakeIngest{
+				status: ingest.Status{Available: true, Count: 2},
+			},
+			ip:   "127.0.0.1",
+			want: nil,
+		},
+		{
+			// The inbox filenames come off a private share; a controller that
+			// may not ingest must not learn them just by connecting.
+			name: "unauthorized client learns nothing",
+			svc: &fakeIngest{
+				status:     ingest.Status{Available: true, Count: 2},
+				pending:    plan,
+				hasPending: true,
+			},
+			ip:   "192.168.86.30",
+			want: nil,
+		},
+		{
+			name: "allowlisted remote gets the replay",
+			svc: &fakeIngest{
+				status:     ingest.Status{Available: true, Count: 2},
+				pending:    plan,
+				hasPending: true,
+			},
+			ip:      "192.168.86.30",
+			trusted: []string{"192.168.86.0/24"},
+			want:    []string{"pushIngestStatus", "pushIngestPreview"},
+		},
+	} {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			h, broadcasts, mu := newHandlers(t, tc.svc, tc.trusted...)
+			client := &recorder{}
+
+			h.pushTo(client, tc.ip)
+
+			got := make([]string, 0, 2)
+			for _, e := range client.events() {
+				got = append(got, e.event)
+			}
+			if len(got) != len(tc.want) {
+				t.Fatalf("emitted %v, want %v", got, tc.want)
+			}
+			for i, ev := range tc.want {
+				if got[i] != ev {
+					t.Fatalf("emitted %v, want %v", got, tc.want)
+				}
+			}
+
+			// A replay is addressed to one client. Broadcasting it would make
+			// every other surface redraw a plan it did not ask for.
+			if _, ok := hasEvent(mu, broadcasts, "pushIngestPreview"); ok {
+				t.Fatal("replay must not broadcast")
+			}
+			// Refusals are silent: this is an unsolicited push, so an error
+			// banner on connect would be pure noise.
+			if _, ok := client.find("pushIngestError"); ok {
+				t.Fatal("replay must never emit pushIngestError")
+			}
+		})
+	}
+}
+
+func TestIngestPushTo_ReplaysTheRetainedPlan(t *testing.T) {
+	t.Parallel()
+
+	plan := ingest.Report{
+		Token:   "plan-token",
+		Summary: ingest.Summary{WouldIngest: 3},
+		Items:   []ingest.Item{},
+	}
+	svc := &fakeIngest{
+		status:     ingest.Status{Available: true, Count: 3},
+		pending:    plan,
+		hasPending: true,
+	}
+	h, _, _ := newHandlers(t, svc)
+	client := &recorder{}
+
+	h.pushTo(client, "127.0.0.1")
+
+	ev, ok := client.find("pushIngestPreview")
+	if !ok {
+		t.Fatal("expected the retained plan to be replayed")
+	}
+	// The token is what arms the client's Import button; a replay that dropped
+	// it would leave the user looking at a plan they cannot confirm.
+	got := ev.payload.(ingest.Report)
+	if got.Token != plan.Token {
+		t.Fatalf("replayed token = %q, want %q", got.Token, plan.Token)
+	}
+	if got.Summary.WouldIngest != plan.Summary.WouldIngest {
+		t.Fatalf("replayed WouldIngest = %d, want %d",
+			got.Summary.WouldIngest, plan.Summary.WouldIngest)
+	}
+}
+
+func TestIngestPushTo_NilSafe(t *testing.T) {
+	t.Parallel()
+	// The connect-time batch calls this unconditionally; a host without an
+	// ingest service must not panic every client that connects.
+	var h *IngestHandlers
+	h.PushTo(nil)
 }
 
 // --- token parsing ---------------------------------------------------------
