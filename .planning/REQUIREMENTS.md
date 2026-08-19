@@ -114,8 +114,10 @@ Deferred. Tracked but not in this roadmap.
 
 ### Browse
 
-- **BROWSE-05**: `sort=year` and `sort=recently_added` actually work (today no `Year` is mapped from
-  MPD and `AddedAt` is set to cache-build time, so both silently degrade to title sort).
+- **BROWSE-05**: `sort=year` and `sort=recently_added` actually work (no `Year` was mapped from MPD
+  and `AddedAt` was set to cache-build time, so both silently degraded to title sort).
+  **DELIVERED out-of-band on 2026-08-19, commit `6e627f4`** — deployed and verified live on the Pi
+  (65 of 71 albums carry a year; `recently_added` orders by newest per-album file mtime).
 
 - **BROWSE-06**: A dedicated Composer browse axis for the classical-heavy portion of the library.
 

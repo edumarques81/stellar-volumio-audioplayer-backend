@@ -66,9 +66,12 @@ regress; this milestone is about the path to pressing play.
 - **A separate Composer browse axis** — considered for this classical-heavy library, rejected for
   now in favour of the simpler uniform "first credited performer" rule. Revisit if the artist list
   still reads badly after R3.
-- **Fixing `sort=year` / `sort=recently_added`** — both are effectively broken today (no `Year` is
-  ever mapped from MPD; `AddedAt` is set to build time). Real, but a separate concern from this
-  milestone's browse-correctness goal.
+- **Fixing `sort=year` / `sort=recently_added`** — both were effectively broken (no `Year` was ever
+  mapped from MPD; `AddedAt` was set to build time). Real, but a separate concern from this
+  milestone's browse-correctness goal. **FIXED out-of-band on 2026-08-19 (commit `6e627f4`)**: MPD's
+  `Date` tag and newest per-album `Last-Modified` now populate both fields through the discgroup and
+  cache paths, and `AddedAt` is normalised to UTC because `albums.added_at` is a TEXT column and
+  `ORDER BY added_at DESC` is therefore a lexical compare. Deployed and verified on the Pi.
 - **Anything touching the bit-perfect audio chain** — permanently out of scope without an explicit
   separate decision.
 
