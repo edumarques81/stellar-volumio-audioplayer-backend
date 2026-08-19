@@ -59,14 +59,16 @@ func (a *LibraryMPDAdapter) GetAlbumDetails(basePath string) ([]library.AlbumDet
 	result := make([]library.AlbumDetails, len(details))
 	for i, d := range details {
 		result[i] = library.AlbumDetails{
-			Album:       d.Album,
-			AlbumArtist: d.AlbumArtist,
-			TrackCount:  d.TrackCount,
-			FirstTrack:  d.FirstTrack,
-			TotalTime:   d.TotalTime,
-			Format:      d.Format,
-			Genre:       d.Genre,
-			Disc:        d.Disc,
+			Album:        d.Album,
+			AlbumArtist:  d.AlbumArtist,
+			TrackCount:   d.TrackCount,
+			FirstTrack:   d.FirstTrack,
+			TotalTime:    d.TotalTime,
+			Format:       d.Format,
+			Genre:        d.Genre,
+			Disc:         d.Disc,
+			Year:         d.Year,
+			LastModified: d.LastModified,
 		}
 	}
 	return result, nil

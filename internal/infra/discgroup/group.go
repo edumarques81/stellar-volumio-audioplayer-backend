@@ -18,7 +18,7 @@
 //     in this codebase.
 //  2. internal/infra/discgroup is a new leaf package with zero internal
 //     dependencies (only the standard library "path", "regexp", "strconv",
-//     and "strings" packages), matching the existing
+//     "strings", and "time" packages), matching the existing
 //     internal/infra/{cache,mpd,musicfile,artistidentity,paths,...} sibling
 //     pattern -- importable by both internal/infra/cache and
 //     internal/domain/library without creating a cycle either way.
@@ -29,6 +29,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // Folder is one physical MPD-song-directory's worth of an album -- the unit
@@ -36,15 +37,17 @@ import (
 // (Album, AlbumArtist, Directory) tuple. Each disc of a box set, and each
 // distinct quality/source version of a normal duplicate, is one Folder.
 type Folder struct {
-	Album       string
-	AlbumArtist string
-	Directory   string // parent directory of the tracks, e.g. "USB/Mahler The Symphonies/CD 01"
-	Disc        string // MPD Disc tag from a representative track in this folder; "" if absent
-	FirstTrack  string
-	TrackCount  int
-	TotalTime   int
-	Format      string
-	Genre       string
+	Album        string
+	AlbumArtist  string
+	Directory    string // parent directory of the tracks, e.g. "USB/Mahler The Symphonies/CD 01"
+	Disc         string // MPD Disc tag from a representative track in this folder; "" if absent
+	FirstTrack   string
+	TrackCount   int
+	TotalTime    int
+	Format       string
+	Genre        string
+	Year         int       // release year from the MPD Date tag; 0 when absent
+	LastModified time.Time // newest file mtime in this folder; zero when unknown
 }
 
 // Group is the output unit: either a single ungrouped Folder (DiscCount 0 or
@@ -60,6 +63,14 @@ type Group struct {
 	Format      string // representative folder's Format
 	Genre       string // representative folder's Genre
 	DiscCount   int    // 0 or 1 = not a box set; >1 = folders merged
+	// Year is the first non-zero Year among the member folders, matching the
+	// first-non-zero-wins rule mpd.groupAlbumDetails uses within a folder: a
+	// box set whose disc 1 happens to be untagged still gets the year its
+	// other discs carry.
+	Year int
+	// LastModified is the NEWEST mtime across all member folders -- a box set
+	// arrived once its last disc did.
+	LastModified time.Time
 }
 
 // cdMarker matches the "/CD ?\d+/" path segment marker (case-insensitive),
@@ -192,23 +203,32 @@ func mergeBoxSet(members []Folder) Group {
 		}
 	}
 
-	var trackCount, totalTime int
+	var trackCount, totalTime, year int
+	var lastModified time.Time
 	for _, f := range members {
 		trackCount += f.TrackCount
 		totalTime += f.TotalTime
+		if year == 0 {
+			year = f.Year
+		}
+		if f.LastModified.After(lastModified) {
+			lastModified = f.LastModified
+		}
 	}
 
 	return Group{
-		Album:       rep.Album,
-		AlbumArtist: rep.AlbumArtist,
-		RootDir:     path.Dir(rep.Directory),
-		Disc:        rep.Disc,
-		FirstTrack:  rep.FirstTrack,
-		TrackCount:  trackCount,
-		TotalTime:   totalTime,
-		Format:      rep.Format,
-		Genre:       rep.Genre,
-		DiscCount:   len(members),
+		Album:        rep.Album,
+		AlbumArtist:  rep.AlbumArtist,
+		RootDir:      path.Dir(rep.Directory),
+		Disc:         rep.Disc,
+		FirstTrack:   rep.FirstTrack,
+		TrackCount:   trackCount,
+		TotalTime:    totalTime,
+		Format:       rep.Format,
+		Genre:        rep.Genre,
+		DiscCount:    len(members),
+		Year:         year,
+		LastModified: lastModified,
 	}
 }
 
@@ -217,16 +237,18 @@ func mergeBoxSet(members []Folder) Group {
 // value; see the Group.DiscCount field doc).
 func passthrough(f Folder) Group {
 	return Group{
-		Album:       f.Album,
-		AlbumArtist: f.AlbumArtist,
-		RootDir:     f.Directory,
-		Disc:        f.Disc,
-		FirstTrack:  f.FirstTrack,
-		TrackCount:  f.TrackCount,
-		TotalTime:   f.TotalTime,
-		Format:      f.Format,
-		Genre:       f.Genre,
-		DiscCount:   1,
+		Album:        f.Album,
+		AlbumArtist:  f.AlbumArtist,
+		RootDir:      f.Directory,
+		Disc:         f.Disc,
+		FirstTrack:   f.FirstTrack,
+		TrackCount:   f.TrackCount,
+		TotalTime:    f.TotalTime,
+		Format:       f.Format,
+		Genre:        f.Genre,
+		DiscCount:    1,
+		Year:         f.Year,
+		LastModified: f.LastModified,
 	}
 }
 

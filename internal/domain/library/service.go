@@ -7,6 +7,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/rs/zerolog/log"
 
@@ -34,6 +35,10 @@ type AlbumDetails struct {
 	Format      string // Audio format from MPD, e.g. "44100:16:2"
 	Genre       string // Album-level genre (first track's Genre tag, normalized)
 	Disc        string // MPD Disc tag from a representative track, first-track-wins; "" when absent
+	Year        int    // Release year from the MPD Date tag, first-non-zero-wins; 0 when absent
+	// LastModified is the newest file mtime in the album -- MPD 0.23's only
+	// "when did this arrive" signal (`added` is 0.24+). Zero when unknown.
+	LastModified time.Time
 }
 
 // MPDClient interface for MPD operations needed by this service.
@@ -221,15 +226,17 @@ func foldersFromAlbumDetails(albumDetails []AlbumDetails) []discgroup.Folder {
 			directory = path.Dir(details.FirstTrack)
 		}
 		folders = append(folders, discgroup.Folder{
-			Album:       details.Album,
-			AlbumArtist: details.AlbumArtist,
-			Directory:   directory,
-			Disc:        details.Disc,
-			FirstTrack:  details.FirstTrack,
-			TrackCount:  details.TrackCount,
-			TotalTime:   details.TotalTime,
-			Format:      details.Format,
-			Genre:       details.Genre,
+			Album:        details.Album,
+			AlbumArtist:  details.AlbumArtist,
+			Directory:    directory,
+			Disc:         details.Disc,
+			FirstTrack:   details.FirstTrack,
+			TrackCount:   details.TrackCount,
+			TotalTime:    details.TotalTime,
+			Format:       details.Format,
+			Genre:        details.Genre,
+			Year:         details.Year,
+			LastModified: details.LastModified,
 		})
 	}
 	return folders
@@ -287,6 +294,8 @@ func albumFromGroup(g discgroup.Group, sourceType SourceType, includeGenre bool)
 		Quality:    quality,
 		TrackType:  trackType,
 		DiscCount:  discCount,
+		Year:       g.Year,
+		AddedAt:    g.LastModified,
 	}
 	if includeGenre {
 		album.Genre = g.Genre

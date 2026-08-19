@@ -347,14 +347,16 @@ func (a *mpdDataProviderAdapter) GetAlbumDetails(basePath string) ([]cache.Album
 	result := make([]cache.AlbumDetailsData, 0, len(details))
 	for _, d := range details {
 		result = append(result, cache.AlbumDetailsData{
-			Album:       d.Album,
-			AlbumArtist: d.AlbumArtist,
-			TrackCount:  d.TrackCount,
-			FirstTrack:  d.FirstTrack,
-			TotalTime:   d.TotalTime,
-			Format:      d.Format,
-			Genre:       d.Genre,
-			Disc:        d.Disc,
+			Album:        d.Album,
+			AlbumArtist:  d.AlbumArtist,
+			TrackCount:   d.TrackCount,
+			FirstTrack:   d.FirstTrack,
+			TotalTime:    d.TotalTime,
+			Format:       d.Format,
+			Genre:        d.Genre,
+			Disc:         d.Disc,
+			Year:         d.Year,
+			LastModified: d.LastModified,
 		})
 	}
 	return result, nil

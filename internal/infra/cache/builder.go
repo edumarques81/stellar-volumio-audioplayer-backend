@@ -44,9 +44,12 @@ type AlbumDetailsData struct {
 	FirstTrack  string
 	TotalTime   int
 	Year        int
-	Format      string // Audio format from MPD, e.g. "44100:16:2"
-	Genre       string // Album-level genre (first track's Genre tag, normalized)
-	Disc        string // MPD Disc tag from a representative track, first-track-wins; "" when absent
+	// LastModified is the newest file mtime in the album -- MPD 0.23's only
+	// "when did this arrive" signal (`added` is 0.24+). Zero when unknown.
+	LastModified time.Time
+	Format       string // Audio format from MPD, e.g. "44100:16:2"
+	Genre        string // Album-level genre (first track's Genre tag, normalized)
+	Disc         string // MPD Disc tag from a representative track, first-track-wins; "" when absent
 }
 
 // TrackData represents track data from MPD.
@@ -244,15 +247,17 @@ func (b *Builder) buildAlbums() error {
 				continue
 			}
 			folders = append(folders, discgroup.Folder{
-				Album:       album.Album,
-				AlbumArtist: album.AlbumArtist,
-				Directory:   filepath.Dir(album.FirstTrack),
-				Disc:        album.Disc,
-				FirstTrack:  album.FirstTrack,
-				TrackCount:  album.TrackCount,
-				TotalTime:   album.TotalTime,
-				Format:      album.Format,
-				Genre:       album.Genre,
+				Album:        album.Album,
+				AlbumArtist:  album.AlbumArtist,
+				Directory:    filepath.Dir(album.FirstTrack),
+				Disc:         album.Disc,
+				FirstTrack:   album.FirstTrack,
+				TrackCount:   album.TrackCount,
+				TotalTime:    album.TotalTime,
+				Format:       album.Format,
+				Genre:        album.Genre,
+				Year:         album.Year,
+				LastModified: album.LastModified,
 			})
 		}
 
@@ -317,7 +322,22 @@ func (b *Builder) buildAlbums() error {
 				TrackType:     trackType,
 				Genre:         g.Genre,
 				DiscCount:     discCount,
-				AddedAt:       time.Now(), // Would be better to get from file mtime
+				Year:          g.Year,
+				// The newest file mtime in the album, not time.Now(): a
+				// FullBuild does Clear() then repopulate, which defeats the
+				// DAO's `added_at = COALESCE(albums.added_at, ?)` preservation
+				// and would otherwise stamp every album with the same rebuild
+				// timestamp, making sort=recently_added arbitrary. Caveat:
+				// stellar-ingest copies with `cp -r --preserve=timestamps`, so
+				// an old rip landing today keeps its old mtime -- still
+				// strictly better than every album sharing one timestamp.
+				// Falls back to now when MPD reported no usable Last-Modified.
+				// Normalised to UTC because albums.added_at is a TEXT column
+				// and `ORDER BY added_at DESC` is therefore a LEXICAL compare:
+				// a local-zone fallback ("... 20:06:22+10:00") would sort above
+				// an earlier-but-UTC mtime ("... 12:00:00+00:00"). Uniform
+				// offsets make the string order the chronological order.
+				AddedAt: firstNonZeroTime(g.LastModified, time.Now()).UTC(),
 			}
 
 			cachedAlbums = append(cachedAlbums, cachedAlbum)
@@ -634,4 +654,14 @@ func generateArtistID(name string) string {
 
 func generateTrackID(uri string) string {
 	return fmt.Sprintf("%x", md5.Sum([]byte(uri)))
+}
+
+// firstNonZeroTime returns ts when it is set, otherwise fallback. Used for
+// AddedAt so an album MPD reported no Last-Modified for still gets a
+// timestamp rather than sorting as the epoch.
+func firstNonZeroTime(ts, fallback time.Time) time.Time {
+	if ts.IsZero() {
+		return fallback
+	}
+	return ts
 }

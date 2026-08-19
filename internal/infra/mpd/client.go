@@ -722,6 +722,44 @@ type AlbumDetails struct {
 	// Disc is the MPD Disc tag from a representative track, first-track-wins
 	// (same convention as Format/Genre). "" when absent.
 	Disc string
+	// Year is the release year parsed from the MPD Date tag, 0 when no track
+	// carries a parseable one. First-NON-ZERO-wins rather than the
+	// first-track-wins convention above: several albums in the library have a
+	// Date on some tracks and not others, and a gap on track 1 must not blank
+	// the whole album's year (which would drop it out of sort=year).
+	Year int
+	// LastModified is the NEWEST file mtime across the album's songs -- MPD
+	// 0.23's only "when did this album arrive" signal, since the `added` tag
+	// is 0.24+. Newest rather than oldest because a partially re-ripped or
+	// repaired album has arrived as late as its newest file. Zero when MPD
+	// reported no usable Last-Modified.
+	LastModified time.Time
+}
+
+// ParseTagYear extracts the release year from an MPD Date tag value. MPD
+// passes the tag through verbatim, so the real library holds both bare years
+// ("1959") and full dates ("2020-11-09"); ID3 TDRC and Vorbis DATE also permit
+// "2019/08/17" and a trailing time. Only a leading four-digit year immediately
+// followed by end-of-string or a date separator is accepted, so a stray
+// "19th Century Recordings" or "20199" reads as "no year" (0) rather than
+// sorting an album to one end of the list.
+func ParseTagYear(raw string) int {
+	trimmed := strings.TrimSpace(raw)
+	if len(trimmed) < 4 {
+		return 0
+	}
+	if len(trimmed) > 4 {
+		switch trimmed[4] {
+		case '-', '/', '.', ' ', 'T':
+		default:
+			return 0
+		}
+	}
+	year, err := strconv.Atoi(trimmed[:4])
+	if err != nil || year < 1000 {
+		return 0
+	}
+	return year
 }
 
 // NormalizeGenre converts MPD's Genre tag value into the form the Library UI
@@ -826,6 +864,16 @@ func groupAlbumDetails(songs []mpd.Attrs) (albums []AlbumDetails, skipped int) {
 
 		details := albumMap[key]
 		details.TrackCount++
+
+		// First-non-zero-wins (see AlbumDetails.Year).
+		if details.Year == 0 {
+			details.Year = ParseTagYear(song["Date"])
+		}
+		// Newest mtime wins (see AlbumDetails.LastModified).
+		if ts, err := time.Parse(time.RFC3339, song["Last-Modified"]); err == nil &&
+			ts.After(details.LastModified) {
+			details.LastModified = ts
+		}
 
 		// Parse duration
 		if dur, err := strconv.Atoi(song["Time"]); err == nil {
