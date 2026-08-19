@@ -77,6 +77,8 @@ CAA_ROOT = "https://coverartarchive.org"
 USER_AGENT = "stellar-ingest/1.0 ( https://github.com/edumarques81/stellar-volumio-audioplayer-backend )"
 MB_RATE_LIMIT_S = 1.1  # MusicBrainz allows 1 req/s; leave headroom.
 HTTP_TIMEOUT_S = 20
+MB_MIN_SCORE = 90      # Necessary, nowhere near sufficient -- see choose_release.
+MB_SEARCH_ATTEMPTS = 3  # A blip must not degrade into a weaker query's answer.
 
 try:
     import mutagen
@@ -314,29 +316,75 @@ def by_extension(paths: list[Path]) -> dict[str, list[Path]]:
 _last_mb_call = 0.0
 
 
-def _http_json(url: str) -> dict | None:
+class SearchUnavailable(Exception):
+    """MusicBrainz could not be reached.
+
+    Distinct from "MusicBrainz has no such release", and the distinction is
+    load-bearing: search_release walks progressively weaker queries, so a
+    transient blip on a well-constrained query used to degrade silently into a
+    match from a weaker one. An unreachable server must abort the search, not
+    advance it.
+    """
+
+
+def _http_json(url: str, attempts: int = 1) -> dict | None:
+    """Rate-limited JSON GET. Returns None only when every attempt failed."""
     global _last_mb_call
-    wait = MB_RATE_LIMIT_S - (time.monotonic() - _last_mb_call)
-    if wait > 0:
-        time.sleep(wait)
-    _last_mb_call = time.monotonic()
+    for _ in range(attempts):
+        wait = MB_RATE_LIMIT_S - (time.monotonic() - _last_mb_call)
+        if wait > 0:
+            time.sleep(wait)
+        _last_mb_call = time.monotonic()
 
-    req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT, "Accept": "application/json"})
-    try:
-        with urllib.request.urlopen(req, timeout=HTTP_TIMEOUT_S) as resp:
-            return json.load(resp)
-    except Exception:
-        return None
+        req = urllib.request.Request(
+            url, headers={"User-Agent": USER_AGENT, "Accept": "application/json"})
+        try:
+            with urllib.request.urlopen(req, timeout=HTTP_TIMEOUT_S) as resp:
+                return json.load(resp)
+        except Exception:
+            continue
+    return None
 
 
-QUALITY_TAIL_RE = re.compile(
-    r"[\s\-_]*(?:__)?(?:"
-    r"flac|dsf|dff|wav|aiff|alac|ape|"
-    r"\d{2,4}k(?:hz)?|\d{1,2}b(?:it)?|\d{2,3}-\d{2,3}|hd|hi-?res|dsd\d*|sacd|remaster(?:ed)?"
-    r")\b",
+# A self-evident quality decoration: a container/encoding name, a sample rate or
+# a bit depth. Safe to strip wherever it appears, so long as it is a whole token.
+_QUALITY_WORD = (
+    # Container / encoding names, optionally carrying the DSD rate (DSF256).
+    r"flac|dsf\d*|dff\d*|dfs\d*|wav|aiff|alac|ape|hd|hi-?res|dsd\d*|sacd"
+    r"|remaster(?:ed)?"
+    r"|\d{2,6}(?:\.\d+)?k(?:hz)?"   # 352k, 11289k, 88.2kHz
+    r"|\d{1,2}b(?:it)?"             # 24b, 1bit
+)
+# A bare number is only decoration by association -- inside a run of other
+# decorations, as in "-096-HD-176-WAV". On its own it is part of the title:
+# "Miles Davis + 19", "Symphony No 8", "(1962 Recording)".
+_QUALITY_ANY = rf"(?:{_QUALITY_WORD}|\d{{2,4}})"
+
+# Never strip out of the middle of a word. "NativeDSD" is a record label, not a
+# DSD decoration, and would otherwise be truncated to "Native". The dot keeps
+# the pattern off the tail of a decimal, and the digits off the tail of a longer
+# number -- without that, `11289k` matched only its last four digits and left a
+# `-1` stub glued to the album title.
+_TOKEN_START = r"(?<![A-Za-z0-9.])"
+
+# A trailing run of decorations, taken as a whole so that bare numbers inside it
+# go with it. The run may only *begin* on a bare number when a hyphen or
+# underscore introduces it ("Dances-096-HD-176-WAV"): a space-separated number
+# reads as prose, and consuming it would turn "Miles Davis + 19-DSF-11289k-1b"
+# into "Miles Davis +".
+QUALITY_RUN_RE = re.compile(
+    rf"(?:[\s\-_]+|^){_TOKEN_START}(?:{_QUALITY_WORD}|(?<=[-_])\d{{2,4}})"
+    rf"(?:[\s\-_]+{_QUALITY_ANY})*[\s\-_]*$",
     re.I,
 )
+# The same decorations mid-name, for folders that append a qualifier after them
+# ("Kind Of Blue-FLAC-352k-24b Corrected Speed").
+QUALITY_WORD_RE = re.compile(rf"[\s\-_]*{_TOKEN_START}(?:{_QUALITY_WORD})\b", re.I)
+
 CATALOGUE_PREFIX_RE = re.compile(r"^[A-Z]{2,6}\d{3,6}[\s\-_]+")
+
+# The `Artist - Album` separator, spelled with a hyphen, en dash or em dash.
+SEPARATOR_RE = re.compile(r"\s+[-–—]\s+")
 
 
 def candidate_album_title(folder_name: str) -> str:
@@ -350,14 +398,22 @@ def candidate_album_title(folder_name: str) -> str:
             -> RStrauss Also Sprach Zarathustra ... VPO
         HDTT13879 Miles Davis - Kind Of Blue-DSF-11289k-1b
             -> Miles Davis - Kind Of Blue
+        Rachmaninoff-Sumphonic-Dances-096-HD-176-WAV
+            -> Rachmaninoff-Sumphonic-Dances
     """
     name = folder_name
     name = name.split("__")[0]
     name = CATALOGUE_PREFIX_RE.sub("", name)
+    # The trailing run first: bare numbers are only recognisable as decoration
+    # while their neighbours are still there to vouch for them.
     prev = None
     while prev != name:
         prev = name
-        name = QUALITY_TAIL_RE.sub(" ", name).strip(" -_")
+        name = QUALITY_RUN_RE.sub("", name).strip(" -_")
+    prev = None
+    while prev != name:
+        prev = name
+        name = QUALITY_WORD_RE.sub(" ", name).strip(" -_")
     name = re.sub(r"[\s_]+", " ", name).strip(" -_")
     return name
 
@@ -383,8 +439,12 @@ def candidate_queries(folder_name: str, artist_tag: str) -> list[tuple[str, str]
     add(artist_tag, cleaned)
     # `Artist - Album` (and `Artist - Album - Extra`): treat the first segment
     # as the artist and the remainder as the title, then the reverse split.
-    if " - " in cleaned:
-        head, _, tail = cleaned.partition(" - ")
+    # The separator may be a hyphen, en dash or em dash -- one real folder is
+    # "Nat King Cole – Just One Of Those Things", and on a plain hyphen split it
+    # yielded no artist at all.
+    parts = SEPARATOR_RE.split(cleaned, maxsplit=1)
+    if len(parts) == 2:
+        head, tail = parts
         add(head, tail)
         add(artist_tag, tail)
         add("", tail)
@@ -395,9 +455,14 @@ def candidate_queries(folder_name: str, artist_tag: str) -> list[tuple[str, str]
 def _release_sort_key(release: dict) -> tuple:
     """Rank releases: score desc, Official first, earliest date first.
 
-    Reissues of a well-known album all score 100, so score alone breaks ties
+    Reissues of one album all score 100, so score alone breaks ties
     arbitrarily. Preferring the earliest Official pressing gives a stable
     answer and a `date` worth writing into the tag.
+
+    This orders *reissues of the same album*, and nothing else. It is only ever
+    applied inside a single corroborated group (see _group_key); applying it
+    across unrelated releases is what filed daoud's "ok" (2025) as
+    "Ok ok ok ok ok ok ok" by The Bombhappies (2007).
     """
     date = release.get("date") or "9999"
     return (
@@ -407,20 +472,169 @@ def _release_sort_key(release: dict) -> tuple:
     )
 
 
-def search_release(artist: str, album: str, folder_name: str = "") -> dict | None:
-    """Return the best MusicBrainz release across candidate readings, or None."""
+def normalise_name(text: str) -> str:
+    """Casefold, strip accents and punctuation, collapse whitespace.
+
+    For comparing a MusicBrainz value against a folder-derived one, where
+    "L'Oeil de Jules" and "l oeil de jules" must compare equal.
+
+    "&" folds to "and" because the two spellings of the same conjunction are the
+    single most common difference between a folder name and MusicBrainz's
+    canonical form ("Cannonball and Coltrane" vs "Cannonball & Coltrane"). That
+    is an orthographic equivalence, not fuzzy matching -- everything else here
+    stays strict, because loose title comparison is what admitted the wrong
+    album in the first place.
+    """
+    decomposed = unicodedata.normalize("NFKD", text or "")
+    stripped = "".join(c for c in decomposed if not unicodedata.combining(c))
+    stripped = stripped.replace("&", " and ")
+    return " ".join(re.sub(r"[^\w\s]+", " ", stripped).casefold().split())
+
+
+def release_artist_credit(release: dict) -> str:
+    """Join a search result's artist-credit into its display string."""
+    parts = []
+    for credit in release.get("artist-credit") or []:
+        parts.append(credit.get("name") or "")
+        parts.append(credit.get("joinphrase") or "")
+    return "".join(parts).strip()
+
+
+def _is_token_prefix(shorter: str, longer: str) -> bool:
+    a, b = shorter.split(), longer.split()
+    return bool(a) and len(a) <= len(b) and b[:len(a)] == a
+
+
+def artist_matches(release: dict, queried: str) -> bool:
+    """Does this release's credit plausibly name the artist we asked for?
+
+    MusicBrainz treats `artist:"..."` as a *scoring* term, not a filter, so a
+    result set is not guaranteed to be by the artist requested. Accepts an
+    exact normalised match or a leading-token-run match in either direction, so
+    that "Herbert von Karajan  Wiener Philharmoniker" matches the credit
+    "Herbert von Karajan", and "Miles Davis" matches "Miles Davis Quintet".
+    Deliberately not a substring test: "Ella Fitzgerald" must not match
+    "Louis Armstrong & Ella Fitzgerald" as the album artist.
+    """
+    want = normalise_name(queried)
+    if not want:
+        return False
+    got = normalise_name(release_artist_credit(release))
+    if not got:
+        return False
+    return got == want or _is_token_prefix(want, got) or _is_token_prefix(got, want)
+
+
+def titles_equivalent(release_title: str, queried: str) -> bool:
+    """Exact normalised title equality — no containment, no fuzz.
+
+    Containment is what makes short titles dangerous: "ok" is contained in
+    "Ok ok ok ok ok ok ok", and in "OK Computer".
+    """
+    return bool(normalise_name(queried)) and \
+        normalise_name(release_title) == normalise_name(queried)
+
+
+def release_is_corroborated(release: dict, queried_artist: str, queried_album: str) -> bool:
+    """Is there positive evidence this release is the album in the folder?
+
+    A high score is not evidence. `release:"ok"` returns ten unrelated albums
+    all scoring >=90, one of them at 100. Require either:
+
+      * the artist we asked for matches the credit -- the query was constrained
+        and the constraint held, so the canonical title may be adopted even
+        when it differs from the folder name (this is how a folder called
+        "RStrauss Also Sprach Zarathustra ... VPO" acquires a real title); or
+      * the title matches exactly -- the only corroboration available when the
+        folder name yields no artist to constrain on.
+
+    An artist-less query whose title does not match exactly is rejected. That
+    is the fallback that produced the Bombhappies match.
+    """
+    return artist_matches(release, queried_artist) or \
+        titles_equivalent(release.get("title", ""), queried_album)
+
+
+def _group_key(release: dict) -> tuple[str, str]:
+    """Identity of "the same album" for ambiguity detection.
+
+    Prefer MusicBrainz's own release-group id: it is precisely "these releases
+    are the same album", which is the question being asked, and it is present in
+    search results. Comparing title+credit instead reads reissues as different
+    albums whenever the credit is spelled differently -- the three pressings of
+    "Cannonball & Coltrane" are credited to both "Cannonball Adderley & John
+    Coltrane" and "Cannonball Adderley Quintet", and would look like a genuine
+    three-way ambiguity. Fall back to title+credit only if the field is absent.
+    """
+    group_id = (release.get("release-group") or {}).get("id")
+    if group_id:
+        return ("mbrg", group_id)
+    return (normalise_name(release.get("title", "")),
+            normalise_name(release_artist_credit(release)))
+
+
+def choose_release(releases: list[dict], queried_artist: str,
+                   queried_album: str) -> tuple[dict | None, str]:
+    """Pick one release from a search result set, or explain the refusal."""
+    scored = [r for r in releases if r.get("score", 0) >= MB_MIN_SCORE]
+    if not scored:
+        return None, "no result scored >= %d" % MB_MIN_SCORE
+
+    corroborated = [r for r in scored
+                    if release_is_corroborated(r, queried_artist, queried_album)]
+    if not corroborated:
+        top = sorted(scored, key=_release_sort_key)[0]
+        return None, (
+            f"{len(scored)} result(s) scored >= {MB_MIN_SCORE} but none is "
+            f"corroborated by artist or exact title (best was "
+            f"{top.get('title')!r} by {release_artist_credit(top)!r})")
+
+    best_score = max(r.get("score", 0) for r in corroborated)
+    top_set = [r for r in corroborated if r.get("score", 0) == best_score]
+    groups = {_group_key(r) for r in top_set}
+    if len(groups) > 1:
+        names = ", ".join(sorted(f"{r.get('title')!r} by {release_artist_credit(r)!r}"
+                                 for r in top_set)[:3])
+        return None, (f"ambiguous: {len(groups)} different releases tie at score "
+                      f"{best_score} ({names})")
+
+    # One album, possibly several pressings of it: now the reissue tie-break
+    # is the right tool.
+    return sorted(top_set, key=_release_sort_key)[0], ""
+
+
+def search_release(artist: str, album: str,
+                   folder_name: str = "") -> tuple[dict | None, str]:
+    """Best MusicBrainz release across candidate readings, plus a reason.
+
+    Returns (release, "") on a confident match, or (None, reason). Walks the
+    candidate readings most-specific-first and stops at the first one that
+    yields a corroborated, unambiguous answer; a query that returns hits but
+    no confident answer does not stop the walk, but an unreachable server does.
+    """
     candidates = candidate_queries(folder_name or album, artist) if folder_name else [(artist, album)]
 
+    reasons: list[str] = []
     for cand_artist, cand_album in candidates:
         terms = [f'release:"{escape_lucene(cand_album)}"']
         if cand_artist:
             terms.append(f'artist:"{escape_lucene(cand_artist)}"')
-        url = f"{MB_ROOT}/release?query={urllib.parse.quote(' AND '.join(terms))}&fmt=json&limit=10"
-        releases = (_http_json(url) or {}).get("releases") or []
-        releases = [r for r in releases if r.get("score", 0) >= 90]
-        if releases:
-            return sorted(releases, key=_release_sort_key)[0]
-    return None
+        query = " AND ".join(terms)
+        url = f"{MB_ROOT}/release?query={urllib.parse.quote(query)}&fmt=json&limit=10"
+
+        payload = _http_json(url, attempts=MB_SEARCH_ATTEMPTS)
+        if payload is None:
+            raise SearchUnavailable(
+                f"MusicBrainz unreachable after {MB_SEARCH_ATTEMPTS} attempts "
+                f"({query})")
+
+        match, reason = choose_release(payload.get("releases") or [],
+                                      cand_artist, cand_album)
+        if match:
+            return match, ""
+        reasons.append(f"{query} -> {reason}")
+
+    return None, "; ".join(reasons) if reasons else "no candidate queries"
 
 
 def escape_lucene(text: str) -> str:
@@ -581,11 +795,26 @@ def process_item(entry: Path, staging: Path, args) -> ItemReport:
             fill["album"] = candidate
             report.notes.append("offline: album taken from folder name, not verified")
         else:
-            match = search_release(artist or albumartist, candidate, folder_name=tree.name)
+            try:
+                match, why = search_release(artist or albumartist, candidate,
+                                            folder_name=tree.name)
+            except SearchUnavailable as exc:
+                match, why = None, str(exc)
+
             if match:
                 fill["album"] = match["title"]
-                report.mb_release = f"{match['title']} ({match['id']}, score {match.get('score')})"
+                credit = release_artist_credit(match)
+                report.mb_release = (f"{match['title']} by {credit} "
+                                     f"({match['id']}, score {match.get('score')})")
                 log(f"    MusicBrainz: {report.mb_release}")
+                if not titles_equivalent(match["title"], candidate):
+                    # The canonical title differs from the folder name. Legitimate
+                    # and often desirable, but it is the shape a misidentification
+                    # takes, so say so out loud rather than only in the tag.
+                    note = (f"adopted MusicBrainz title {match['title']!r} over "
+                            f"folder-derived {candidate!r}")
+                    report.notes.append(note)
+                    log(f"    note: {note}")
                 mb_artist = ((match.get("artist-credit") or [{}])[0].get("name")) or ""
                 if mb_artist and not albumartist:
                     fill["albumartist"] = mb_artist
@@ -593,9 +822,13 @@ def process_item(entry: Path, staging: Path, args) -> ItemReport:
                     fill["date"] = match["date"][:4]
                 fill["musicbrainz_albumid"] = match["id"]
             else:
+                # Refusing to guess is the safe branch: the folder name is what
+                # the human who assembled the album called it.
                 fill["album"] = candidate
-                report.notes.append("no MusicBrainz match; album taken from folder name")
-                log("    MusicBrainz: no confident match, using folder name")
+                report.notes.append(
+                    f"no confident MusicBrainz match; album taken from folder name ({why})")
+                log(f"    MusicBrainz: no confident match, using folder name")
+                log(f"      why: {why}")
 
     if not albumartist and not fill.get("albumartist") and artist:
         # MPD groups on AlbumArtist and falls back to Artist; making it

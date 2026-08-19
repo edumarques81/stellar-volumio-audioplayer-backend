@@ -46,10 +46,11 @@ mounted read-only at every other moment.
 4. **Extract archives.** `.zip`, `.7z`, `.tar*` are unpacked; a single wrapping directory
    is collapsed away.
 5. **Tag.** Files with no `Album` tag get one. The album title is guessed from the folder
-   name, cleaned of quality suffixes (`__FLAC_192k-24b`, `_DSD64`, catalogue prefixes),
-   then looked up on MusicBrainz. A match at score ≥ 90 supplies the canonical album
-   title, album artist, release date, and MusicBrainz release ID. Ties between reissues
-   break toward Official status and the earliest release date.
+   name, cleaned of quality suffixes (`__FLAC_192k-24b`, `-DSF-11289k-1b`, `-096-HD-176-WAV`,
+   catalogue prefixes like `HDTT13879`), then looked up on MusicBrainz. A match supplies the
+   canonical album title, album artist, release date, and MusicBrainz release ID. See
+   *How the MusicBrainz match is decided* below — it refuses to guess, and refusing is a
+   normal outcome, not a failure.
 6. **Cover art.** If the folder has no `folder.jpg`/`cover.jpg`, the front cover is fetched
    from the Cover Art Archive using the matched release ID. MPD's `albumart` reads
    `folder.jpg` directly, so this is all the artwork plumbing needed.
@@ -69,6 +70,64 @@ mounted read-only at every other moment.
 - **Tagging is best-effort, per format.** FLAC gets Vorbis comments; DSF/WAV/DFF get ID3v2
   frames. Any format where the write does not stick is reported rather than silently passed
   over — the audio bitstream itself is never touched, only the metadata block.
+
+## How the MusicBrainz match is decided
+
+Ingesting a folder called `daoud - ok` on 2026-08-19 tagged 14 files as
+*Ok ok ok ok ok ok ok* by **The Bombhappies** (2007). The matcher was rewritten in
+response, around one fact:
+
+> **A high score is not evidence of a match.** `release:"ok"` returns ten unrelated albums,
+> *all* scoring ≥ 90, topped at **100** by the Bombhappies record. And `artist:"..."` in a
+> MusicBrainz query is a **scoring term, not a filter** — results are not guaranteed to be by
+> the artist you asked for. The credit has to be checked afterwards.
+
+The folder name is read as several progressively weaker queries — `Artist - Album` first,
+then the title alone. Each result set is then filtered:
+
+1. **Score ≥ 90** — necessary, nowhere near sufficient.
+2. **Corroboration.** A release survives only with positive evidence that it is the album in
+   the folder, being *either*
+   - the **artist matches** the release's `artist-credit` — the query was constrained and the
+     constraint held, so the canonical title may be adopted even when it differs from the
+     folder name (this is how a folder named `RStrauss Also Sprach Zarathustra ... VPO`
+     could acquire a real album title); *or*
+   - the **title matches exactly** after normalisation — the only corroboration available
+     when the folder name yields no artist to constrain on.
+
+   Exact equality, never containment: `"ok"` is contained in both `"Ok ok ok ok ok ok ok"`
+   and `"OK Computer"`. An artist-less query whose title does not match exactly is rejected,
+   and that is precisely the fallback that produced the Bombhappies match.
+3. **Ambiguity.** Among the corroborated releases tied at the top score, releases are grouped
+   by MusicBrainz **release-group id** — its own answer to "these are the same album".
+   More than one group means a genuine ambiguity and the match is refused. (Grouping on
+   title+credit instead read the three pressings of *Cannonball & Coltrane* as three
+   different albums, because two of them are credited `Cannonball Adderley & John Coltrane`
+   and one `Cannonball Adderley Quintet`.)
+4. **Reissue tie-break** — Official status, then earliest release date. This only ever runs
+   *inside* one release group, which is what it was always designed for: choosing between
+   pressings of a single album.
+
+Two behaviours worth knowing:
+
+- **Refusing to guess is the safe branch, not a failure.** With no confident match the album
+  title falls back to the folder name — what the human who assembled the album called it —
+  and the report says why, listing every query tried. The ingest still completes.
+- **A network blip cannot be mistaken for "no such release".** An unreachable MusicBrainz
+  (after 3 attempts) aborts the whole search rather than letting the candidate walk advance,
+  which would otherwise let a transient failure on a well-constrained query silently degrade
+  into a weaker query's answer.
+- **Adopting a different title is announced.** When the canonical title differs from the
+  folder name, the report carries an `adopted MusicBrainz title '<x>' over folder-derived
+  '<y>'` note. That is usually desirable — but it is also the shape a misidentification
+  takes, so it is stated out loud rather than only in the tag.
+
+Regression tests: `deploy/test_stellar_ingest.py` (stdlib `unittest`, offline — every payload
+is a trimmed capture of a real response). Run from the repo root:
+
+```bash
+python3 -m unittest discover -s deploy -p 'test_*.py' -v
+```
 
 ## Why the copy runs through `sudo`
 
@@ -130,6 +189,9 @@ the SSD must never be mounted on the Mac for the same reason.
 |---|---|
 | `refused: target already exists` | Album is already on the SSD. Rename or remove by hand. |
 | `refused: partial download` | A `segment-N` / `.part` file is present. Finish the download. |
-| `no confident MusicBrainz match` | Folder name is too far from the release title. Rename the folder to `Artist - Album` and re-run, or tag it yourself. |
+| `no confident MusicBrainz match` | Expected outcome, not an error — the album is filed under the folder name. The reason lists every query tried. Rename the folder to `Artist - Album` and re-run if you want the canonical metadata. |
+| `ambiguous: N different releases tie` | Two genuinely different albums scored equally. Rename the folder to disambiguate, or tag it yourself. |
+| `MusicBrainz unreachable after 3 attempts` | Network, not metadata. Re-run; nothing was guessed. |
+| `adopted MusicBrainz title 'x' over folder-derived 'y'` | Informational. Usually correct, but it is also what a misidentification looks like — worth a glance for short or generic album titles. |
 | `WARNING: SSD did not return to read-only` | Investigate before playing anything. `findmnt -no OPTIONS /mnt/ssd` should start with `ro,`. |
 | Album lands but does not appear in the UI | Check `mpc stats`; if MPD sees it, the backend cache is the issue — `curl localhost:3000/ready`. |
