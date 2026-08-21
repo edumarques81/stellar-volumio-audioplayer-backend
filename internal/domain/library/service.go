@@ -486,6 +486,18 @@ func (s *Service) GetArtistAlbums(req GetArtistAlbumsRequest) ArtistAlbumsRespon
 	albums := make([]Album, 0)
 	var discs []string
 
+	// The artist LIST surfaces collapsed names (GetArtists here, and
+	// buildArtists on the cache-primary path), so req.Artist is normally
+	// already collapsed while the AlbumArtist tag it is compared against is
+	// raw. Collapsing BOTH sides is what makes drill-in agree with listing
+	// by construction: a raw tag is reduced to its primary performer, and
+	// an already-collapsed request is left unchanged (Collapse is
+	// idempotent -- its output contains none of the four delimiters it
+	// scans for). Comparing the raw tag directly used to filter out every
+	// album whose tag carried extra credits, so 13 of 71 live albums were
+	// unreachable and 9 artists opened completely empty.
+	wantArtist := artistidentity.Collapse(req.Artist)
+
 	// Scope to all sources — artist filtering at this layer is by name only.
 	basePaths := s.getBasePathsForScope(ScopeAll)
 
@@ -505,8 +517,11 @@ func (s *Service) GetArtistAlbums(req GetArtistAlbumsRequest) ArtistAlbumsRespon
 		groups := discgroup.GroupFolders(foldersFromAlbumDetails(albumDetails))
 
 		for _, g := range groups {
-			// Case-insensitive AlbumArtist match — MPD tag casing is unreliable.
-			if !strings.EqualFold(g.AlbumArtist, req.Artist) {
+			// Case-insensitive AlbumArtist match — MPD tag casing is
+			// unreliable. Both sides are collapsed (see wantArtist above);
+			// this stays an EQUALITY test, never a prefix/substring one, so
+			// distinct artists sharing a first word stay separate.
+			if !strings.EqualFold(artistidentity.Collapse(g.AlbumArtist), wantArtist) {
 				continue
 			}
 
@@ -569,8 +584,12 @@ func (s *Service) GetArtistAlbums(req GetArtistAlbumsRequest) ArtistAlbumsRespon
 			for _, song := range rawSongs {
 				// MPD's "search" command is a case-insensitive SUBSTRING
 				// match -- filter to an exact Artist-tag match before any
-				// track reaches the response (T-03-08).
-				if !strings.EqualFold(song["Artist"], req.Artist) {
+				// track reaches the response (T-03-08). Collapsed on both
+				// sides for the same reason as the AlbumArtist comparison
+				// above: the substring search legitimately returns
+				// multi-credit Artist tags, and exact-matching the raw
+				// value dropped every one of them.
+				if !strings.EqualFold(artistidentity.Collapse(song["Artist"]), wantArtist) {
 					continue
 				}
 				track, ok := s.trackFromRawSong(song)
