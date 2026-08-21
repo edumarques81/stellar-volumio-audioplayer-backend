@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+	"sync"
 
 	"github.com/rs/zerolog/log"
 )
@@ -291,75 +292,144 @@ func setLCDPowerWayland(on bool) error {
 	return nil
 }
 
-// setLCDPower turns the LCD display on or off.
+// setLCDPower turns the LCD display on or off using the one mechanism this
+// host actually supports (see detectPowerMethod).
 func setLCDPower(on bool) error {
-	// Try backlight sysfs first — this is the best method because it only
-	// turns off the backlight while keeping the touch digitizer active.
-	// This enables touch-to-wake on the official Pi touchscreen.
-	if err := setLCDPowerBacklight(on); err == nil {
-		return nil
-	}
-	log.Debug().Msg("Backlight sysfs not available, trying DRM DPMS")
+	switch method := detectPowerMethod(); method {
+	case methodBacklight:
+		return setLCDPowerBacklight(on)
 
-	// Try DRM DPMS — keeps the display connected to the compositor,
-	// allowing the browser to stay running.
-	if err := setLCDPowerDPMS(on); err == nil {
-		return nil
-	}
-	log.Debug().Msg("DRM DPMS failed, trying other methods")
+	case methodDPMS:
+		return setLCDPowerDPMS(on)
 
-	// Try vcgencmd for older Pi models (this also keeps display connected)
-	value := "0"
-	if on {
-		value = "1"
-	}
-	cmd := exec.Command("vcgencmd", "display_power", value)
-	if err := cmd.Run(); err == nil {
+	case methodVcgencmd:
+		value := "0"
+		if on {
+			value = "1"
+		}
+		if err := exec.Command("vcgencmd", "display_power", value).Run(); err != nil {
+			log.Error().Err(err).Bool("on", on).Msg("vcgencmd display_power failed")
+			return err
+		}
 		log.Info().Bool("on", on).Msg("LCD power changed via vcgencmd")
 		return nil
-	}
-	log.Debug().Msg("vcgencmd failed, trying Wayland methods")
 
-	// Try Wayland (wlr-randr) as last resort
-	// WARNING: This disconnects the display from Cage, breaking touch-to-wake!
+	case methodWayland:
+		// Wake forces a modeset; standby is a plain --off. See
+		// wakeWaylandForced for why the asymmetry matters.
+		if on {
+			return wakeWaylandForced()
+		}
+		return setLCDPowerWayland(false)
+
+	default:
+		log.Error().Bool("on", on).Msg("No usable LCD power method on this host")
+		return os.ErrNotExist
+	}
+}
+
+// sysfsIsWritableByAnyone reports whether a sysfs attribute has a write bit
+// set for *anybody*.
+//
+// This is deliberately a mode check rather than an access check. The Pi 5
+// exposes /sys/class/drm/card1-HDMI-A-1/dpms as r--r--r--, root included, so
+// escalating to `sudo sh -c 'echo On > …'` cannot help — it just forks a
+// process to produce "Permission denied" and an ERR line on every toggle.
+// Checking our *own* access instead would wrongly skip hosts where the
+// attribute is root-writable and the sudo fallback genuinely works.
+func sysfsIsWritableByAnyone(path string) bool {
+	if path == "" {
+		return false
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		return false
+	}
+	return info.Mode().Perm()&0o222 != 0
+}
+
+// powerMethod is the mechanism that actually moves this host's panel.
+type powerMethod int
+
+const (
+	methodNone powerMethod = iota
+	methodBacklight
+	methodDPMS
+	methodVcgencmd
+	methodWayland
+)
+
+func (m powerMethod) String() string {
+	switch m {
+	case methodBacklight:
+		return "backlight-sysfs"
+	case methodDPMS:
+		return "drm-dpms"
+	case methodVcgencmd:
+		return "vcgencmd"
+	case methodWayland:
+		return "wlr-randr"
+	default:
+		return "none"
+	}
+}
+
+var (
+	detectOnce     sync.Once
+	detectedMethod powerMethod
+)
+
+// detectPowerMethod picks the one mechanism that works on this host, once.
+//
+// The old code tried all four on every call. On a Pi 5 driving an HDMI panel
+// the first three are all dead — no DSI backlight, a read-only DPMS attribute,
+// and firmware that dropped `vcgencmd display_power` ("Command not
+// registered") — so every toggle forked a doomed sudo and logged an ERR before
+// reaching the only method that works.
+func detectPowerMethod() powerMethod {
+	detectOnce.Do(func() {
+		detectedMethod = probePowerMethod()
+		log.Info().Str("method", detectedMethod.String()).Msg("LCD power method detected")
+	})
+	return detectedMethod
+}
+
+func probePowerMethod() powerMethod {
+	if sysfsIsWritableByAnyone(getBacklightPath()) {
+		return methodBacklight
+	}
+	if sysfsIsWritableByAnyone(getDRMDisplayPath()) {
+		return methodDPMS
+	}
+	if err := exec.Command("vcgencmd", "display_power").Run(); err == nil {
+		return methodVcgencmd
+	}
 	if isWaylandSession() {
-		if err := setLCDPowerWayland(on); err == nil {
-			return nil
-		}
-		log.Debug().Msg("Wayland wlr-randr failed")
+		return methodWayland
 	}
+	return methodNone
+}
 
-	// Try X11 methods (xrandr, xset) for non-Wayland systems
-	drmPath := getDRMDisplayPath()
-	if drmPath != "" {
-		display := "HDMI-A-1"
-		mode := "off"
-		if on {
-			mode = "on"
-		}
-
-		dpmsMode := "Off"
-		if on {
-			dpmsMode = "On"
-		}
-		cmd := exec.Command("xrandr", "--output", display, "--set", "DPMS", dpmsMode)
-		cmd.Env = append(os.Environ(), "DISPLAY=:0")
-		if err := cmd.Run(); err != nil {
-			// Try alternative: use xset for DPMS
-			cmd = exec.Command("xset", "dpms", "force", mode)
-			cmd.Env = append(os.Environ(), "DISPLAY=:0")
-			if err := cmd.Run(); err != nil {
-				log.Debug().Err(err).Bool("on", on).Msg("X11 methods failed")
-			} else {
-				log.Info().Bool("on", on).Msg("LCD power changed via xset")
-				return nil
-			}
-		} else {
-			log.Info().Bool("on", on).Msg("LCD power changed via xrandr")
-			return nil
-		}
+// wakeWaylandForced re-enables the output *with an explicit mode set*.
+//
+// Load-bearing on the Pi's 1920x440 bar panel. `wlr-randr --on` against an
+// output that is already enabled is a no-op at the KMS level: no modeset
+// happens, so a panel that failed to re-lock after the last --off gets no
+// fresh signal to lock onto and stays dark. The backend then truthfully
+// reports isOn:true (wlr-randr says "Enabled: yes") while the user is staring
+// at a black screen with no way to recover from the phone — tapping LCD just
+// re-sends a no-op.
+//
+// Asking for --preferred alongside --on forces the modeset unconditionally,
+// which is what makes wake a real recovery action rather than a status flip.
+func wakeWaylandForced() error {
+	cmd := exec.Command("wlr-randr", "--output", "HDMI-A-1", "--on", "--preferred")
+	cmd.Env = getWaylandEnv()
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		log.Error().Err(err).Str("output", string(output)).Msg("wlr-randr forced wake failed")
+		return err
 	}
-
-	log.Error().Bool("on", on).Msg("All LCD power methods failed")
-	return os.ErrNotExist
+	log.Info().Msg("LCD woken via wlr-randr with forced modeset")
+	return nil
 }
