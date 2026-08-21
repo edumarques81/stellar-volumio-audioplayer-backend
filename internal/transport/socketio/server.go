@@ -38,15 +38,15 @@ import (
 
 // Server handles Socket.io connections and events.
 type Server struct {
-	io                  *socket.Server
-	playerService       *player.Service
-	mpdClient           *mpdclient.Client
-	audioController     *audio.Controller
-	sourcesService      *sources.Service
-	qobuzService        *qobuz.Service
-	localMusicService   *localmusic.Service
-	libraryService      *library.Service
-	cachedService       *library.CachedService
+	io                   *socket.Server
+	playerService        *player.Service
+	mpdClient            *mpdclient.Client
+	audioController      *audio.Controller
+	sourcesService       *sources.Service
+	qobuzService         *qobuz.Service
+	localMusicService    *localmusic.Service
+	libraryService       *library.Service
+	cachedService        *library.CachedService
 	libraryHandlers      *LibraryHandlers
 	cacheHandlers        *CacheHandlers
 	enrichmentHandlers   *EnrichmentHandlers
@@ -57,18 +57,18 @@ type Server struct {
 	lastPlayedMu         sync.Mutex
 	systemActionHandlers *SystemActionHandlers
 	ingestHandlers       *IngestHandlers
-	cacheDB             *cache.DB
-	cacheDAO            *cache.DAO
-	audirvanaService    *audirvana.Service
-	deviceService       *device.Service    // Volumio device identity
-	volumioHandlers     *VolumioHandlers   // Volumio Connect compatibility
-	remoteAudio         RemoteAudioClient   // nil on Linux/Pi-resident build; set via UseRemoteAudio (M1.E)
-	remoteSources       RemoteSourcesClient // nil on Linux/Pi-resident build; set via UseRemoteSources (M1.E.2)
-	connLimiter         *ConnectionLimiter  // Limits concurrent external connections
-	mu                  sync.RWMutex
-	clients             map[string]*socket.Socket
-	lastBroadcastMu     sync.Mutex
-	lastBroadcastState  map[string]interface{} // Last state sent via BroadcastState for diffing
+	cacheDB              *cache.DB
+	cacheDAO             *cache.DAO
+	audirvanaService     *audirvana.Service
+	deviceService        *device.Service     // Volumio device identity
+	volumioHandlers      *VolumioHandlers    // Volumio Connect compatibility
+	remoteAudio          RemoteAudioClient   // nil on Linux/Pi-resident build; set via UseRemoteAudio (M1.E)
+	remoteSources        RemoteSourcesClient // nil on Linux/Pi-resident build; set via UseRemoteSources (M1.E.2)
+	connLimiter          *ConnectionLimiter  // Limits concurrent external connections
+	mu                   sync.RWMutex
+	clients              map[string]*socket.Socket
+	lastBroadcastMu      sync.Mutex
+	lastBroadcastState   map[string]interface{} // Last state sent via BroadcastState for diffing
 	// lastBroadcastSeekMs / lastBroadcastSeekAt anchor the seek value clients
 	// were last told about, and when. Together they let isStateSame predict
 	// the position a dead-reckoning client currently believes it is at, so a
@@ -89,8 +89,12 @@ type Server struct {
 	// "pushDiagnostics" Socket.IO event each time it increments.
 	tickerRecoveredBroadcasts atomic.Int64
 	lcdController             lcd.Controller
-	netReporter               netinfo.Reporter
-	airplay                   *airplayBundle
+	// lcdViewState is which screen the LCD kiosk is showing. Unlike
+	// lcdController it touches no hardware — it exists so remotes and the
+	// kiosk agree on one answer for "what is on the panel right now".
+	lcdViewState *lcd.ViewState
+	netReporter  netinfo.Reporter
+	airplay      *airplayBundle
 }
 
 // serverBroadcaster adapts the Socket.IO server to the lcd.Broadcaster (and
@@ -228,8 +232,9 @@ func NewServer(playerService *player.Service, mpdClient *mpdclient.Client, sourc
 		// generous 100 to keep the limiter as a runaway-defense rather than
 		// a user-facing cap. Override via STELLAR_MAX_EXTERNAL_CLIENTS when
 		// the deployment topology calls for stricter limits.
-		connLimiter:       NewConnectionLimiter(maxExternalClientsFromEnv(100)),
-		clients:           make(map[string]*socket.Socket),
+		connLimiter:  NewConnectionLimiter(maxExternalClientsFromEnv(100)),
+		clients:      make(map[string]*socket.Socket),
+		lcdViewState: lcd.NewViewState(),
 	}
 
 	// Initialize Volumio handlers (must be after s is created)
@@ -376,6 +381,10 @@ func (s *Server) setupHandlers() {
 				status, _ := s.lcdController.Status()
 				client.Emit("pushLcdStatus", status)
 			}
+			// Which screen the kiosk is on. A reconnecting remote needs this
+			// to render its VU-meter control in the right state instead of
+			// assuming the panel is on the player view.
+			client.Emit("pushLcdView", s.lcdViewState.Status())
 			client.Emit("pushAudioStatus", s.audioController.GetStatus())
 			// Broadcast actual audio engine state (MPD vs Audirvana)
 			s.pushAudioEngineState(client)
@@ -725,6 +734,43 @@ func (s *Server) setupHandlers() {
 				return
 			}
 			lcd.BroadcastStatus(s.Broadcaster(), s.lcdController)
+		})
+
+		// LCD view events — which screen the kiosk shows, as opposed to
+		// whether the panel is powered. Both the kiosk (reporting its own
+		// local navigation) and remotes (driving it) speak these.
+		client.On("getLcdView", func(args ...any) {
+			log.Debug().Str("id", clientID).Msg("getLcdView")
+			client.Emit("pushLcdView", s.lcdViewState.Status())
+		})
+
+		client.On("lcdSetView", func(args ...any) {
+			view, wake, err := parseLcdSetView(args)
+			if err != nil {
+				log.Warn().Err(err).Str("id", clientID).Msg("lcdSetView rejected")
+				return
+			}
+			log.Debug().Str("id", clientID).Str("view", string(view)).Bool("wake", wake).Msg("lcdSetView")
+
+			// Waking is opt-in and requested by the caller, not inferred:
+			// a remote asking for the VU meter wants to see it, whereas the
+			// kiosk reporting its own navigation is by definition already lit.
+			if wake {
+				if status, statusErr := s.lcdController.Status(); statusErr == nil && !status.IsOn {
+					if setErr := s.lcdController.Set(true); setErr != nil {
+						log.Error().Err(setErr).Msg("lcdSetView wake failed")
+					} else {
+						lcd.BroadcastStatus(s.Broadcaster(), s.lcdController)
+					}
+				}
+			}
+
+			// Skip the broadcast when nothing moved, so the kiosk's own
+			// report doesn't echo back and re-enter its listener.
+			if _, changed := s.lcdViewState.Set(view); !changed {
+				return
+			}
+			lcd.BroadcastView(s.Broadcaster(), s.lcdViewState)
 		})
 
 		// Audio status events
@@ -2457,8 +2503,8 @@ const watcherTickerInterval = 1500 * time.Millisecond
 // Extracted as a struct so the loop can be exercised in tests with stubs in
 // place of the real debouncer / database-update / state-broadcast paths.
 type watcherLoopHooks struct {
-	onSubsystem func(subsystem string) // run for non-database MPD subsystem events
-	onDatabase  func()                  // run for the "database" subsystem (cache rebuild)
+	onSubsystem func(subsystem string)   // run for non-database MPD subsystem events
+	onDatabase  func()                   // run for the "database" subsystem (cache rebuild)
 	onTick      func(subsystemSeen bool) // run on each ticker tick; subsystemSeen reports whether any non-database event arrived since the previous tick
 }
 
@@ -2820,4 +2866,3 @@ func (s *Server) Close() error {
 func (s *Server) Emit(event string, data interface{}) {
 	s.io.Emit(event, data)
 }
-
