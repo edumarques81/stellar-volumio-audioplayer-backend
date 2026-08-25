@@ -256,3 +256,59 @@ func TestStreamerStartStopWithFakeEmitter(t *testing.T) {
 		t.Fatal("Streamer did not stop within 2s after ctx cancel")
 	}
 }
+
+// --- FIFO drain-rate invariant -------------------------------------------
+//
+// Regression guard for the audio dropouts diagnosed 2026-08-26. See
+// Config.frameInterval for the mechanism.
+
+func TestFrameIntervalNeverStarvesTheFIFO(t *testing.T) {
+	tests := []struct {
+		name       string
+		fps        int
+		fftSize    int
+		sampleRate int
+	}{
+		{"the shipped config that caused dropouts", 20, 2048, 44100},
+		{"the pre-M1.B config", 30, 2048, 44100},
+		{"a pathologically slow frame rate", 1, 2048, 44100},
+		{"a frame rate faster than the data", 1000, 2048, 44100},
+		{"a larger FFT window", 20, 8192, 44100},
+		{"a higher FIFO rate", 20, 2048, 192000},
+		{"a tiny window", 60, 256, 44100},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := Config{FPS: tt.fps, FFTSize: tt.fftSize, SampleRate: tt.sampleRate}
+			interval := cfg.frameInterval()
+
+			if interval <= 0 {
+				t.Fatalf("frameInterval() = %v, want a positive duration", interval)
+			}
+
+			// One FFT window is read per tick, so this is how many samples
+			// per second the reader takes out of the pipe.
+			consumed := float64(tt.fftSize) / interval.Seconds()
+			produced := float64(tt.sampleRate)
+
+			if consumed < produced {
+				t.Errorf(
+					"reader consumes %.0f samples/s but MPD produces %.0f — "+
+						"the pipe fills at %.0f bytes/s, MPD's fifo output blocks, "+
+						"and the DAC underruns",
+					consumed, produced, (produced-consumed)*4,
+				)
+			}
+		})
+	}
+}
+
+func TestFrameIntervalHonoursFPSWhenItIsSafe(t *testing.T) {
+	// A frame rate that already drains faster than MPD writes must not be
+	// sped up — the clamp is a floor on throughput, not a fixed cadence.
+	cfg := Config{FPS: 1000, FFTSize: 2048, SampleRate: 44100}
+	if got, want := cfg.frameInterval(), time.Millisecond; got != want {
+		t.Errorf("frameInterval() = %v, want %v", got, want)
+	}
+}

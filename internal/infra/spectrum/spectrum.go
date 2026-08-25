@@ -50,8 +50,9 @@ type Config struct {
 // so any pre-M1.B frontend consumer that subscribes to `pushSpectrum`
 // does not crash on missing fields. Deprecated — remove once M1.E ships.
 //
-//nolint:revive // SpectrumData stutters with package name but is the
 // established public type and renaming would break callers.
+//
+//nolint:revive // SpectrumData stutters with package name but is the
 type SpectrumData struct {
 	// Per-channel data (M1.B+)
 	BinsL      []float64 `json:"binsL"`
@@ -159,6 +160,15 @@ const (
 	// away, so a permanently absent FIFO does not spin.
 	fifoRetryInterval = 2 * time.Second
 
+	// writerGrace is how long a freshly opened FIFO is held open waiting for
+	// a writer before giving up and reopening. See the EOF branch in
+	// streamFromFIFO.
+	writerGrace = 2 * time.Second
+
+	// writerPoll is how often the writerless FIFO is re-tested during
+	// writerGrace.
+	writerPoll = 10 * time.Millisecond
+
 	// stopGrace bounds Stop's wait for the reader. The reader checks its
 	// context every fifoReadPoll, so reaching this timeout means something
 	// is genuinely stuck — and a stuck reader must not be able to hold up
@@ -186,10 +196,50 @@ func (s *Streamer) Stop() {
 	}
 }
 
+// frameInterval is how often one FFT window is pulled off the FIFO.
+//
+// FPS sets the *desired* cadence, but it cannot be honoured blindly. One tick
+// consumes exactly FFTSize samples, so ticking every 1/FPS seconds consumes
+// FFTSize*FPS samples per second — and MPD writes the FIFO at SampleRate
+// samples per second regardless. When FFTSize*FPS < SampleRate the reader is
+// permanently slower than the writer and the pipe fills without bound.
+//
+// That is not a dropped-frames-on-the-VU-meter problem, it is an audio
+// problem. MPD's fifo output shares the `player` thread's pipeline, and
+// MultipleOutputs makes `player` wait for every enabled output to accept each
+// chunk. Once the pipe saturates MPD stalls there draining it, the ALSA ring
+// buffer runs down, and the DAC underruns.
+//
+// The shipped config did exactly this: FPS 20 x 2048 samples = 40,960
+// samples/s against MPD's 44,100, a 3,140 samples/s deficit. Measured on the
+// Pi 2026-08-26 the pipe grew +12,480 bytes/s, saturated every ~15 s, and MPD
+// dumped ~210 KB at a time. On 192 kHz material the ALSA buffer has 4x less
+// slack, so those stalls surfaced as audible dropouts. (It was FPS 30 before
+// M1.B, which consumed 61,440 samples/s and left the pipe drained — hence
+// "this did not happen before".)
+//
+// So the interval is clamped to at most the time it takes MPD to *produce*
+// one window, halved for headroom to work off any backlog. Ticking faster
+// than the data arrives costs nothing: the read blocks until a full window is
+// there, so the FIFO itself remains the clock and the loop cannot spin.
+func (cfg Config) frameInterval() time.Duration {
+	requested := time.Duration(float64(time.Second) / float64(cfg.FPS))
+
+	// How long MPD takes to write one FFT window.
+	windowInterval := time.Duration(
+		float64(cfg.FFTSize) / float64(cfg.SampleRate) * float64(time.Second),
+	)
+
+	if requested > windowInterval/2 {
+		return windowInterval / 2
+	}
+	return requested
+}
+
 func (s *Streamer) run(ctx context.Context, emitter SocketEmitter) {
 	defer s.wg.Done()
 
-	frameInterval := time.Duration(float64(time.Second) / float64(s.cfg.FPS))
+	frameInterval := s.cfg.frameInterval()
 
 	for {
 		select {
@@ -235,6 +285,9 @@ func (s *Streamer) streamFromFIFO(ctx context.Context, pipe *os.File, emitter So
 
 	reader := fifo.NewReader(ctx, pipe, fifoReadPoll)
 
+	// How long to hold a writerless FIFO open waiting for MPD to attach.
+	writerDeadline := time.Now().Add(writerGrace)
+
 	ticker := time.NewTicker(frameInterval)
 	defer ticker.Stop()
 
@@ -256,7 +309,23 @@ func (s *Streamer) streamFromFIFO(ctx context.Context, pipe *os.File, emitter So
 			switch {
 			case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
 			case errors.Is(err, io.EOF), errors.Is(err, io.ErrUnexpectedEOF):
-				// FIFO writer (MPD) closed — return to retry loop
+				// A non-blocking O_RDONLY open succeeds with no writer
+				// attached, and reading a writerless FIFO reports EOF
+				// immediately. Returning on that would close the read end
+				// and leave us blind for fifoRetryInterval, so a writer
+				// that attaches in between is missed for up to 2s.
+				//
+				// Before any frame has been seen, treat EOF as "MPD has not
+				// opened its end yet" and keep the descriptor open, polling
+				// until it does or the grace period expires. Once audio has
+				// flowed, EOF means the writer really did go away and the
+				// caller should reopen.
+				if frames == 0 && time.Now().Before(writerDeadline) {
+					if !fifo.Sleep(ctx, writerPoll) {
+						return frames
+					}
+					continue
+				}
 			default:
 				log.Printf("[Spectrum] Read error: %v", err)
 			}
