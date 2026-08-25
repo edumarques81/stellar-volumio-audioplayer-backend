@@ -132,7 +132,21 @@ func (s *Streamer) precomputeBinEdges() {
 	// Map bins logarithmically across the useful FFT range
 	// Skip DC (index 0) and start from index 1
 	minFreqIdx := 1.0
+
+	// Bins are laid out across FFT indices, which span 0..Nyquist — so the
+	// displayed range follows the sample rate. At 44.1/48 kHz that is the
+	// whole spectrum and the mapping is unchanged. Above 48 kHz it would
+	// stretch to 96 kHz and crush every audible bar into the low fifth of the
+	// meter, so the top of the display is held at the 48 kHz Nyquist and the
+	// ultrasonic remainder is simply not drawn. Nothing musical lives there
+	// and the meter looks the same whatever the album's rate.
 	maxFreqIdx := float64(halfFFT)
+	if s.cfg.SampleRate > displayMaxRate {
+		maxFreqIdx *= float64(displayMaxRate) / float64(s.cfg.SampleRate)
+	}
+	if maxFreqIdx < minFreqIdx {
+		maxFreqIdx = minFreqIdx
+	}
 
 	for i := 0; i <= s.cfg.NumBins; i++ {
 		t := float64(i) / float64(s.cfg.NumBins)
@@ -155,6 +169,9 @@ func (s *Streamer) Start(ctx context.Context, emitter SocketEmitter) {
 const (
 	// fifoReadPoll bounds a single read on the FIFO. See fifo.DefaultPollInterval.
 	fifoReadPoll = fifo.DefaultPollInterval
+
+	// displayMaxRate caps the spectrum's drawn range. See precomputeBinEdges.
+	displayMaxRate = 48000
 
 	// fifoRetryInterval is the pause before reopening after the writer goes
 	// away, so a permanently absent FIFO does not spin.
@@ -196,44 +213,87 @@ func (s *Streamer) Stop() {
 	}
 }
 
-// frameInterval is how often one FFT window is pulled off the FIFO.
+// frameInterval is the shortest gap between two emitted spectrum frames.
 //
-// FPS sets the *desired* cadence, but it cannot be honoured blindly. One tick
-// consumes exactly FFTSize samples, so ticking every 1/FPS seconds consumes
-// FFTSize*FPS samples per second — and MPD writes the FIFO at SampleRate
-// samples per second regardless. When FFTSize*FPS < SampleRate the reader is
-// permanently slower than the writer and the pipe fills without bound.
-//
-// That is not a dropped-frames-on-the-VU-meter problem, it is an audio
-// problem. MPD's fifo output shares the `player` thread's pipeline, and
-// MultipleOutputs makes `player` wait for every enabled output to accept each
-// chunk. Once the pipe saturates MPD stalls there draining it, the ALSA ring
-// buffer runs down, and the DAC underruns.
-//
-// The shipped config did exactly this: FPS 20 x 2048 samples = 40,960
-// samples/s against MPD's 44,100, a 3,140 samples/s deficit. Measured on the
-// Pi 2026-08-26 the pipe grew +12,480 bytes/s, saturated every ~15 s, and MPD
-// dumped ~210 KB at a time. On 192 kHz material the ALSA buffer has 4x less
-// slack, so those stalls surfaced as audible dropouts. (It was FPS 30 before
-// M1.B, which consumed 61,440 samples/s and left the pipe drained — hence
-// "this did not happen before".)
-//
-// So the interval is clamped to at most the time it takes MPD to *produce*
-// one window, halved for headroom to work off any backlog. Ticking faster
-// than the data arrives costs nothing: the read blocks until a full window is
-// there, so the FIFO itself remains the clock and the loop cannot spin.
+// It caps how often a frame is broadcast; it does NOT gate how often the FIFO
+// is read. streamFromFIFO drains a window every iteration and applies this by
+// discarding windows, so the pipe is drained at whatever rate MPD writes it
+// even when FPS is low. Gating the *read* on a fixed cadence is what caused
+// the 2026-08-26 dropouts — see the comment in streamFromFIFO.
 func (cfg Config) frameInterval() time.Duration {
-	requested := time.Duration(float64(time.Second) / float64(cfg.FPS))
+	return time.Duration(float64(time.Second) / float64(cfg.FPS))
+}
 
-	// How long MPD takes to write one FFT window.
-	windowInterval := time.Duration(
-		float64(cfg.FFTSize) / float64(cfg.SampleRate) * float64(time.Second),
-	)
+// rateEstimator recovers the FIFO's actual sample rate from how fast windows
+// arrive, so the analyser does not have to be told when MPD's output format
+// changes. It matters because the FIFO may carry the source rate rather than a
+// fixed one, and the bin mapping has to follow.
+type rateEstimator struct {
+	current  int
+	windowed int
+	since    time.Time
+}
 
-	if requested > windowInterval/2 {
-		return windowInterval / 2
+// standardRates are the rates an observation is snapped to. Measuring gives a
+// noisy number; music does not play at 43,918 Hz.
+var standardRates = []int{44100, 48000, 88200, 96000, 176400, 192000, 352800, 384000}
+
+func newRateEstimator(current int) *rateEstimator {
+	return &rateEstimator{current: current}
+}
+
+// observe records that fftSize samples arrived at now, and reports the rate
+// when a new measurement disagrees with the one in force.
+func (r *rateEstimator) observe(fftSize int, now time.Time) (int, bool) {
+	if r.since.IsZero() {
+		r.since = now
+		return r.current, false
 	}
-	return requested
+
+	r.windowed += fftSize
+
+	// Average over at least a second: shorter windows are dominated by
+	// scheduling jitter and MPD's own chunking.
+	elapsed := now.Sub(r.since)
+	if elapsed < time.Second {
+		return r.current, false
+	}
+
+	measured := float64(r.windowed) / elapsed.Seconds()
+	r.windowed = 0
+	r.since = now
+
+	snapped := snapToStandardRate(measured)
+	if snapped == r.current {
+		return r.current, false
+	}
+	r.current = snapped
+	return snapped, true
+}
+
+// snapToStandardRate picks the nearest standard rate, in relative terms so the
+// tolerance scales with the rate.
+func snapToStandardRate(measured float64) int {
+	best, bestErr := standardRates[0], math.Inf(1)
+	for _, candidate := range standardRates {
+		err := math.Abs(measured-float64(candidate)) / float64(candidate)
+		if err < bestErr {
+			best, bestErr = candidate, err
+		}
+	}
+	return best
+}
+
+// setSampleRate adopts a newly observed rate and remaps the frequency bins to
+// match. Called only from the reader goroutine, which is also the only reader
+// of binEdges, so it needs no synchronisation.
+func (s *Streamer) setSampleRate(rate int) {
+	if rate == s.cfg.SampleRate {
+		return
+	}
+	log.Printf("[Spectrum] FIFO sample rate is %d Hz (was %d) — remapping bins", rate, s.cfg.SampleRate)
+	s.cfg.SampleRate = rate
+	s.precomputeBinEdges()
 }
 
 func (s *Streamer) run(ctx context.Context, emitter SocketEmitter) {
@@ -288,15 +348,31 @@ func (s *Streamer) streamFromFIFO(ctx context.Context, pipe *os.File, emitter So
 	// How long to hold a writerless FIFO open waiting for MPD to attach.
 	writerDeadline := time.Now().Add(writerGrace)
 
-	ticker := time.NewTicker(frameInterval)
-	defer ticker.Stop()
+	// The FIFO is drained unconditionally, one window per iteration, and the
+	// frame rate is applied by *discarding* windows rather than by declining
+	// to read them. That distinction is the whole point.
+	//
+	// MPD's MultipleOutputs only returns a decoded chunk to the shared
+	// MusicBuffer pool once every enabled output has consumed it, so this
+	// reader sits on the DAC's critical path. Reading slower than MPD writes
+	// backs the pipe up, MPD's fifo output stalls, the decoder cannot get
+	// chunks ("Decoder is too slow" in MPD's log), the ALSA ring buffer runs
+	// down and the DAC underruns. Measured on the Pi 2026-08-26: a fixed
+	// 20 fps x 2048-sample cadence consumed 40,960 samples/s against MPD's
+	// 44,100, the pipe grew +12,480 bytes/s to saturation, and high-res
+	// playback dropped out audibly.
+	//
+	// Draining unconditionally makes the loop correct at any rate MPD writes,
+	// including when the FIFO carries the source rate rather than a fixed one.
+	// ReadFull blocks until a full window has arrived, so the data itself is
+	// the clock and the loop can never spin.
+	var lastEmit time.Time
+	rate := newRateEstimator(s.cfg.SampleRate)
 
 	frames := 0
 	for {
-		select {
-		case <-ctx.Done():
+		if ctx.Err() != nil {
 			return frames
-		case <-ticker.C:
 		}
 
 		// Read enough PCM data for one FFT window. ReadFull keeps the bytes
@@ -333,8 +409,21 @@ func (s *Streamer) streamFromFIFO(ctx context.Context, pipe *os.File, emitter So
 		}
 
 		if frames == 0 {
-			log.Printf("[Spectrum] FIFO %s streaming at %d fps", s.cfg.FIFOPath, s.cfg.FPS)
+			log.Printf("[Spectrum] FIFO %s streaming, emitting at up to %d fps", s.cfg.FIFOPath, s.cfg.FPS)
 		}
+
+		// The window is already out of the pipe, so the rate can be measured
+		// from how fast windows arrive rather than assumed from config.
+		if observed, changed := rate.observe(s.cfg.FFTSize, time.Now()); changed {
+			s.setSampleRate(observed)
+		}
+
+		// Frame-rate limiting happens here, after the read, so skipping a
+		// frame costs a discarded window and never a byte left in the pipe.
+		if !lastEmit.IsZero() && time.Since(lastEmit) < frameInterval {
+			continue
+		}
+		lastEmit = time.Now()
 
 		// Split 16-bit stereo PCM into normalised L/R float channels.
 		numFrames := n / bytesPerFrame

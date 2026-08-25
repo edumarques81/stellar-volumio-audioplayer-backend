@@ -3,7 +3,9 @@ package spectrum
 import (
 	"context"
 	"encoding/binary"
+	"errors"
 	"math"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -257,58 +259,117 @@ func TestStreamerStartStopWithFakeEmitter(t *testing.T) {
 	}
 }
 
-// --- FIFO drain-rate invariant -------------------------------------------
+// --- FIFO drain invariant ------------------------------------------------
 //
-// Regression guard for the audio dropouts diagnosed 2026-08-26. See
-// Config.frameInterval for the mechanism.
+// Regression guard for the audio dropouts diagnosed 2026-08-26. The reader
+// sits on the DAC's critical path: MPD only returns a decoded chunk to its
+// shared pool once every enabled output has consumed it, so a reader that
+// falls behind stalls MPD's decoder and underruns the DAC.
 
-func TestFrameIntervalNeverStarvesTheFIFO(t *testing.T) {
+func TestReaderDrainsIndependentlyOfTheFrameRate(t *testing.T) {
+	// FPS 1 with a 64-sample window emits at most one frame per second. If
+	// the reader gated its *reads* on that cadence it would take 256 bytes/s
+	// out of the pipe, the pipe would saturate, and MPD's fifo output would
+	// block. Draining must not depend on the emit rate.
+	path := makeFIFO(t)
+	s := New(Config{FIFOPath: path, SampleRate: 44100, FFTSize: 64, NumBins: 8, FPS: 1})
+	s.Start(context.Background(), &safeEmitter{})
+	defer s.Stop()
+
+	w := openWriter(t, path)
+	chunk := make([]byte, 256)
+
+	written := 0
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		n, err := w.Write(chunk)
+		if err != nil {
+			if errors.Is(err, syscall.EAGAIN) {
+				time.Sleep(time.Millisecond)
+				continue
+			}
+			t.Fatalf("write to FIFO: %v", err)
+		}
+		written += n
+	}
+
+	// A pipe buffer is 64 KiB. Accepting only about that much means the
+	// reader stopped draining and we measured the buffer, not throughput.
+	const minBytes = 512 * 1024
+	if written < minBytes {
+		t.Errorf(
+			"reader accepted only %d bytes in 2s at FPS 1, want > %d — reads are "+
+				"gated on the frame rate, so the FIFO backs up, MPD's fifo output "+
+				"stalls and the DAC underruns",
+			written, minBytes,
+		)
+	}
+}
+
+func TestRateEstimatorSnapsToTheObservedRate(t *testing.T) {
 	tests := []struct {
 		name       string
-		fps        int
-		fftSize    int
-		sampleRate int
+		start      int
+		actualRate int
+		want       int
+		wantChange bool
 	}{
-		{"the shipped config that caused dropouts", 20, 2048, 44100},
-		{"the pre-M1.B config", 30, 2048, 44100},
-		{"a pathologically slow frame rate", 1, 2048, 44100},
-		{"a frame rate faster than the data", 1000, 2048, 44100},
-		{"a larger FFT window", 20, 8192, 44100},
-		{"a higher FIFO rate", 20, 2048, 192000},
-		{"a tiny window", 60, 256, 44100},
+		{"steady at the configured rate", 44100, 44100, 44100, false},
+		{"source rate is 192k", 44100, 192000, 192000, true},
+		{"source rate is 96k", 44100, 96000, 96000, true},
+		{"dropping back to 44.1k", 192000, 44100, 44100, true},
+		{"48k is distinguished from 44.1k", 44100, 48000, 48000, true},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			cfg := Config{FPS: tt.fps, FFTSize: tt.fftSize, SampleRate: tt.sampleRate}
-			interval := cfg.frameInterval()
+			const fftSize = 2048
+			r := newRateEstimator(tt.start)
+			now := time.Now()
+			r.observe(fftSize, now) // seeds the clock
 
-			if interval <= 0 {
-				t.Fatalf("frameInterval() = %v, want a positive duration", interval)
+			// Feed two seconds of windows at the real rate.
+			var got int
+			var changed bool
+			perWindow := time.Duration(float64(fftSize) / float64(tt.actualRate) * float64(time.Second))
+			for elapsed := time.Duration(0); elapsed < 2*time.Second; elapsed += perWindow {
+				now = now.Add(perWindow)
+				if rate, ch := r.observe(fftSize, now); ch {
+					got, changed = rate, true
+				}
 			}
 
-			// One FFT window is read per tick, so this is how many samples
-			// per second the reader takes out of the pipe.
-			consumed := float64(tt.fftSize) / interval.Seconds()
-			produced := float64(tt.sampleRate)
-
-			if consumed < produced {
-				t.Errorf(
-					"reader consumes %.0f samples/s but MPD produces %.0f — "+
-						"the pipe fills at %.0f bytes/s, MPD's fifo output blocks, "+
-						"and the DAC underruns",
-					consumed, produced, (produced-consumed)*4,
-				)
+			if changed != tt.wantChange {
+				t.Fatalf("changed = %v, want %v (rate now %d)", changed, tt.wantChange, r.current)
+			}
+			if tt.wantChange && got != tt.want {
+				t.Errorf("observed rate = %d, want %d", got, tt.want)
 			}
 		})
 	}
 }
 
-func TestFrameIntervalHonoursFPSWhenItIsSafe(t *testing.T) {
-	// A frame rate that already drains faster than MPD writes must not be
-	// sped up — the clamp is a floor on throughput, not a fixed cadence.
-	cfg := Config{FPS: 1000, FFTSize: 2048, SampleRate: 44100}
-	if got, want := cfg.frameInterval(), time.Millisecond; got != want {
-		t.Errorf("frameInterval() = %v, want %v", got, want)
+func TestBinsCoverTheAudibleRangeAtEveryRate(t *testing.T) {
+	// The meter must look the same whatever the album's rate: at 44.1/48 kHz
+	// the bins span the whole spectrum, and above that the ultrasonic part is
+	// dropped rather than squeezing every audible bar into the low bins.
+	baseline := New(Config{SampleRate: 44100, FFTSize: 2048, NumBins: 64, FPS: 20})
+	top := func(s *Streamer) int { return s.binEdges[len(s.binEdges)-1] }
+
+	if got, want := top(baseline), 1024; got != want {
+		t.Fatalf("44.1kHz top bin edge = %d, want %d (full Nyquist)", got, want)
+	}
+
+	for _, rate := range []int{96000, 192000, 352800} {
+		s := New(Config{SampleRate: rate, FFTSize: 2048, NumBins: 64, FPS: 20})
+
+		// Top edge should track 48kHz-equivalent Nyquist, not the full one.
+		wantTop := int(float64(1024) * float64(48000) / float64(rate))
+		if got := top(s); got > wantTop+1 || got < wantTop-1 {
+			t.Errorf("%dHz top bin edge = %d, want ~%d", rate, got, wantTop)
+		}
+		if top(s) >= top(baseline) {
+			t.Errorf("%dHz spans %d bins, should be narrower than 44.1kHz's %d", rate, top(s), top(baseline))
+		}
 	}
 }

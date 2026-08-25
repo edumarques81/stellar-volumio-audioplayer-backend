@@ -113,53 +113,50 @@ Real-time scheduling is reserved for the `mpd.service` unit so audio wins CPU
 time during periods of contention. The backend is capped at `Nice=5` and
 `CPUWeight=50`.
 
-## The Spectrum FIFO must be drained at the rate MPD writes it
+## The Spectrum FIFO and the DAC are the same pipeline
 
-`/etc/mpd.conf` declares two outputs. `USB DAC` is the real one; `Spectrum FIFO`
-only feeds the LCD VU meter. They are **not** independent: MPD's
-`MultipleOutputs` makes the `player` thread wait for *every* enabled output to
-accept each chunk, so whatever happens on the FIFO happens to the DAC.
+`/etc/mpd.conf` declares two outputs: `USB DAC` and `Spectrum FIFO` (the LCD VU
+meter). They are **not** independent. MPD only returns a decoded chunk to its
+shared `MusicBuffer` pool once *every* enabled output has consumed it, so
+anything that slows the FIFO output stalls the decoder feeding the DAC. MPD
+reports this as the misleading `alsa_output: Decoder is too slow; playing
+silence to avoid xrun`.
 
-The backend's spectrum reader (`internal/infra/spectrum`) used to pull one FFT
-window per tick at a fixed frame rate. At the shipped `FFTSize 2048` x `FPS 20`
-that is 40,960 samples/s, against the 44,100 samples/s MPD writes — a permanent
-3,140 samples/s deficit. Measured on the Pi 2026-08-26:
+The FIFO used to be pinned to `format "44100:16:2"`. On a 192 kHz album that put
+a resampler in its filter chain, which holds chunks — and produced audible
+dropouts (2026-08-25/26). Measured, and each **rejected**: pinning or demoting
+the `output:Spectrum` thread made it *worse* (3 XRUNs/11 min, a slower consumer
+stalls `player` longer); a cheaper `samplerate_converter` did not help
+(5.3% -> 0.92% of a core, still failing); `audio_buffer_size "32768"` did not
+help. At 44.1 kHz — where no conversion happens — the same setup ran clean for
+10 minutes. The resampler was the trigger, not CPU, priority or buffer size.
 
-```
-  0s   77680 bytes queued in the pipe
-  3s  115120        (+12,480 bytes/s, monotonic)
- 12s  228368
- 15s   18400        <- MPD's fifo output dumps ~210 KB to make room
-```
+Two coordinated changes fix it:
 
-Every ~15 s the pipe saturated and MPD stalled draining it, the ALSA ring buffer
-ran down, and on 192 kHz material (4x less slack) some of those stalls surfaced
-as **audible dropouts**. It was `FPS 30` before M1.B, which consumed 61,440
-samples/s and kept the pipe empty — hence "this never used to happen".
+1. `format "*:16:2"` on the FIFO output — `*` keeps the source rate, so there is
+   **no resampler in that chain at any rate**.
+2. The backend drains the FIFO unconditionally and applies the frame rate by
+   discarding windows, never by declining to read (`internal/infra/spectrum`).
+   It recovers the actual rate from how fast windows arrive and remaps its bins,
+   holding the drawn range at the 48 kHz Nyquist so the meter looks identical
+   whatever the album's rate.
 
-`Config.frameInterval()` now clamps the tick to at most half the time MPD takes
-to produce one window, so consumption can never fall below production. After the
-fix the pipe sits flat at 0 bytes.
+Verified: 192 kHz + VU meter, 9 min, 0 XRUNs, 0 `too slow`, pipe flat at 0 bytes
+while carrying 768 KB/s. The DAC is untouched — `hw_params` still reads
+`S32_LE / 192000`.
 
-**If you change `FFTSize`, `FPS`, or the FIFO's `format` in `mpd.conf`, the
-invariant `FFTSize/frameInterval >= SampleRate` must still hold.**
-`TestFrameIntervalNeverStarvesTheFIFO` guards it.
+**If you change the FIFO `format`, `FFTSize` or `FPS`, the reader must still
+drain at the full write rate.** `TestReaderDrainsIndependentlyOfTheFrameRate`
+guards it.
 
-Diagnosing a suspected recurrence:
+Diagnosing a suspected recurrence — anything but a flat near-zero line is the bug:
 
 ```bash
-# Watch the pipe. Anything other than a flat near-zero line is the bug.
 BE=$(sudo lsof /tmp/mpd_spectrum.fifo | awk '/^stellar/{print $2; exit}')
 FD=$(sudo lsof /tmp/mpd_spectrum.fifo | awk '/^stellar/{print $4; exit}' | tr -d rw)
-sudo python3 -c "import fcntl,termios,array,os,time,sys
+sudo python3 -c "import fcntl,termios,array,os,time
 f=os.open(f'/proc/$BE/fd/$FD',os.O_RDONLY|os.O_NONBLOCK)
 while True:
     b=array.array('i',[0]); fcntl.ioctl(f,termios.FIONREAD,b,True); print(b[0]); time.sleep(1)"
+sudo journalctl -u mpd -f | grep "too slow"
 ```
-
-Note that scheduling is **not** the lever here, and two plausible-sounding fixes
-were measured and rejected: pinning the Spectrum thread to a different core and
-demoting it out of `SCHED_FIFO` made things *worse* (3 XRUNs in 11 min), because
-a slower FIFO consumer stalls `player` for longer. Making the resample cheaper
-(`samplerate_converter "internal"`, 5.3% -> 0.92% of a core) did not fix it
-either. The deficit is a *rate* mismatch, not a speed problem.
