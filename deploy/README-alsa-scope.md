@@ -77,6 +77,18 @@ ssh eduardo@stellar.local 'cd /tmp/alsa-scope && make && sudo make install'
 `make install` drops `libasound_module_scope_stellar_vu.so` into
 `/usr/lib/aarch64-linux-gnu/alsa-lib/`.
 
+Also install the tmpfiles rule, which creates the FIFO node at boot:
+
+```bash
+sudo cp deploy/alsa-scope/stellar-spectrum-fifo.conf /etc/tmpfiles.d/
+sudo systemd-tmpfiles --create /etc/tmpfiles.d/stellar-spectrum-fifo.conf
+```
+
+Without it the node does not exist between a reboot and the first track played —
+`/tmp` is a tmpfs and the scope only `mkfifo()`s on first PCM open — so the
+backend's spectrum reader retries every 2s and logs a failure each time. The old
+MPD `fifo` output used to create the node at startup; nothing does now.
+
 ## Configuration
 
 `/etc/asound.conf` — **all three stanzas are required.** Unlike PCM plugins, the meter
