@@ -113,41 +113,37 @@ Real-time scheduling is reserved for the `mpd.service` unit so audio wins CPU
 time during periods of contention. The backend is capped at `Nice=5` and
 `CPUWeight=50`.
 
-## The Spectrum FIFO and the DAC are the same pipeline
+## The VU meter tap is not an MPD output any more
 
-`/etc/mpd.conf` declares two outputs: `USB DAC` and `Spectrum FIFO` (the LCD VU
-meter). They are **not** independent. MPD only returns a decoded chunk to its
-shared `MusicBuffer` pool once *every* enabled output has consumed it, so
-anything that slows the FIFO output stalls the decoder feeding the DAC. MPD
-reports this as the misleading `alsa_output: Decoder is too slow; playing
-silence to avoid xrun`.
+`/etc/mpd.conf` used to declare two outputs: `USB DAC` and `Spectrum FIFO` (the
+LCD VU meter). They were **not** independent. MPD returns a decoded chunk to its
+shared `MusicBuffer` pool only once *every* enabled output has consumed it, so a
+second output sits on the DAC's critical path **by construction** and stalls the
+decoder feeding it. MPD reports that as the misleading `alsa_output: Decoder is
+too slow; playing silence to avoid xrun`.
 
-The FIFO used to be pinned to `format "44100:16:2"`. On a 192 kHz album that put
-a resampler in its filter chain, which holds chunks — and produced audible
-dropouts (2026-08-25/26). Measured, and each **rejected**: pinning or demoting
-the `output:Spectrum` thread made it *worse* (3 XRUNs/11 min, a slower consumer
-stalls `player` longer); a cheaper `samplerate_converter` did not help
-(5.3% -> 0.92% of a core, still failing); `audio_buffer_size "32768"` did not
-help. At 44.1 kHz — where no conversion happens — the same setup ran clean for
-10 minutes. The resampler was the trigger, not CPU, priority or buffer size.
+Removing the resampler from that output (`format "*:16:2"`, 2026-08-26) cut the
+dropout rate roughly 10x and eliminated the `too slow` line entirely, but it did
+**not** solve the problem — the coupling is architectural, not a tuning knob. A
+residual ~1 XRUN per 5-10 min survived it. The tap now lives in an ALSA
+`type meter` PCM with a custom scope plugin, so MPD has exactly one output and no
+shared pool is involved.
 
-Two coordinated changes fix it:
+**→ `deploy/README-alsa-scope.md`** for the design, config, build steps, and the
+two traps (`-DPIC`; alsa-lib's s16 scope aborting mpd on DSD).
 
-1. `format "*:16:2"` on the FIFO output — `*` keeps the source rate, so there is
-   **no resampler in that chain at any rate**.
-2. The backend drains the FIFO unconditionally and applies the frame rate by
-   discarding windows, never by declining to read (`internal/infra/spectrum`).
-   It recovers the actual rate from how fast windows arrive and remaps its bins,
-   holding the drawn range at the 48 kHz Nyquist so the meter looks identical
-   whatever the album's rate.
+Also rejected by measurement, do not retry: pinning or demoting the
+`output:Spectrum` thread (made it *worse* — a slower consumer stalls `player`
+longer), a cheaper `samplerate_converter`, and a larger `audio_buffer_size`.
 
-Verified: 192 kHz + VU meter, 9 min, 0 XRUNs, 0 `too slow`, pipe flat at 0 bytes
-while carrying 768 KB/s. The DAC is untouched — `hw_params` still reads
-`S32_LE / 192000`.
+The backend side is unchanged: it drains the FIFO unconditionally and applies the
+frame rate by discarding windows, never by declining to read
+(`internal/infra/spectrum`). It recovers the actual rate from how fast windows
+arrive and remaps its bins, holding the drawn range at the 48 kHz Nyquist so the
+meter looks identical whatever the album's rate.
 
-**If you change the FIFO `format`, `FFTSize` or `FPS`, the reader must still
-drain at the full write rate.** `TestReaderDrainsIndependentlyOfTheFrameRate`
-guards it.
+**If you change the FIFO framing, `FFTSize` or `FPS`, the reader must still drain
+at the full write rate.** `TestReaderDrainsIndependentlyOfTheFrameRate` guards it.
 
 Diagnosing a suspected recurrence — anything but a flat near-zero line is the bug:
 
