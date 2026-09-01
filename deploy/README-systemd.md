@@ -129,7 +129,7 @@ residual ~1 XRUN per 5-10 min survived it. The tap now lives in an ALSA
 `type meter` PCM with a custom scope plugin, so MPD has exactly one output and no
 shared pool is involved.
 
-**→ `deploy/README-alsa-scope.md`** for the design, config, build steps, and the
+**→ `deploy/README-alsa-tap.md`** for the design, config, build steps, and the
 two traps (`-DPIC`; alsa-lib's s16 scope aborting mpd on DSD).
 
 Also rejected by measurement, do not retry: pinning or demoting the

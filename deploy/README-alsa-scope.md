@@ -1,3 +1,9 @@
+> **SUPERSEDED (2026-09-01).** This design could not meter native DSD — alsa-lib's s16
+> scope refuses `DSD_U32_BE`, and `snd_pcm_scope_enable()` discards the error, so the
+> next accessor call trips `assert(s16->buf_areas)` and **aborts mpd mid-track**.
+> Replaced by the `snd_pcm_extplug` tap in [`README-alsa-tap.md`](README-alsa-tap.md).
+> Kept for the rationale on why a second MPD output can never work, which still stands.
+
 # The VU meter tap — ALSA `type meter`, not a second MPD output
 
 The LCD VU meter needs a copy of the audio. The obvious way to get one is a second
