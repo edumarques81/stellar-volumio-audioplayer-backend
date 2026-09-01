@@ -88,6 +88,10 @@ typedef struct {
 	_Atomic unsigned int head; /* producer writes */
 	_Atomic unsigned int tail; /* consumer writes */
 
+	/* Exact output byte rate (stereo S16), published for the writer to pace to.
+	 * 0 until the first hw_params. */
+	_Atomic unsigned int out_byterate;
+
 	pthread_t writer;
 	_Atomic int writer_running;
 	int writer_started;
@@ -158,12 +162,51 @@ static void *writer_main(void *arg)
 	sigaddset(&pipeset, SIGPIPE);
 	pthread_sigmask(SIG_BLOCK, &pipeset, NULL);
 
+	/* Pace output to the exact byte rate rather than draining the ring as fast as
+	 * it fills.
+	 *
+	 * transfer() delivers one MPD period at a time, so a free-running writer emits
+	 * in bursts. The backend infers the stream rate from FIFO arrival timing over a
+	 * short window, and bursty arrival made it flap between 44100 and 48000 — 234
+	 * remaps in 20 minutes, against 2 in 50 on the path this replaced. We know the
+	 * true rate exactly, so meter it out on a monotonic clock and the estimator
+	 * settles. Credit is capped so a pause cannot bank time and then burst. */
+	struct timespec last;
+	clock_gettime(CLOCK_MONOTONIC, &last);
+	double credit = 0.0;
+
 	while (atomic_load_explicit(&tap->writer_running, memory_order_acquire)) {
-		unsigned int n = ring_get(tap, buf, sizeof(buf));
-		if (n == 0) {
+		struct timespec now;
+		clock_gettime(CLOCK_MONOTONIC, &now);
+		double dt = (double)(now.tv_sec - last.tv_sec) +
+			    (double)(now.tv_nsec - last.tv_nsec) / 1e9;
+		last = now;
+
+		unsigned int byterate =
+			atomic_load_explicit(&tap->out_byterate, memory_order_relaxed);
+		if (byterate == 0) {
 			usleep(5000);
 			continue;
 		}
+		credit += dt * (double)byterate;
+		if (credit > (double)sizeof(buf))
+			credit = (double)sizeof(buf);
+		if (credit < 64.0) {
+			usleep(2000);
+			continue;
+		}
+
+		unsigned int want = (unsigned int)credit;
+		if (want > sizeof(buf))
+			want = sizeof(buf);
+		unsigned int n = ring_get(tap, buf, want);
+		if (n == 0) {
+			/* nothing staged — do not bank the idle time */
+			credit = 0.0;
+			usleep(5000);
+			continue;
+		}
+		credit -= (double)n;
 		if (fd < 0) {
 			/* O_NONBLOCK: returns ENXIO rather than blocking when the
 			 * backend is not reading yet. */
@@ -320,11 +363,13 @@ static snd_pcm_sframes_t tap_transfer(snd_pcm_extplug_t *ext,
 static int tap_hw_params(snd_pcm_extplug_t *ext, snd_pcm_hw_params_t *params)
 {
 	stellar_tap_t *tap = ext->private_data;
+	unsigned int out_rate;
 	(void)params;
 
 	tap->channels = ext->channels;
 	tap->dsd_count[0] = tap->dsd_count[1] = 0;
 	tap->dsd_frames = 0;
+	out_rate = ext->rate;
 
 	switch (ext->format) {
 	case SND_PCM_FORMAT_S16_LE:
@@ -340,13 +385,18 @@ static int tap_hw_params(snd_pcm_extplug_t *ext, snd_pcm_hw_params_t *params)
 		tap->dsd_decim = ext->rate / DSD_TARGET_RATE;
 		if (tap->dsd_decim == 0)
 			tap->dsd_decim = 1;
+		out_rate = ext->rate / tap->dsd_decim;
 		break;
 	default:
 		/* Big-endian PCM, S24_3LE, float, DSD_U8/U16: pass through with no
 		 * meter rather than guess. Nothing here is reachable on this DAC. */
 		tap->mode = TAP_MODE_NONE;
+		out_rate = 0;
 		break;
 	}
+
+	/* stereo S16 out, whatever came in */
+	atomic_store_explicit(&tap->out_byterate, out_rate * 4u, memory_order_relaxed);
 	return 0;
 }
 

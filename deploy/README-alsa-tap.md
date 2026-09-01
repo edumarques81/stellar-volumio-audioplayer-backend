@@ -75,6 +75,14 @@ U8/8000/mono exactly as the bare card does. It is a tap, not a `plug` layer.
 ring. A writer thread drains the ring into the FIFO. Nothing on the audio thread can
 block — the ring drops on overflow, the FIFO write is `O_NONBLOCK` with drop-on-full.
 
+The writer **paces output to the exact byte rate** on `CLOCK_MONOTONIC` rather than
+draining the ring as fast as it fills. `transfer()` delivers one MPD period at a time,
+so a free-running writer emits in bursts, and the backend — which infers the stream rate
+from FIFO arrival timing over a short window — flapped between 44100 and 48000:
+**234 remaps in 20 min**, against 2 in 50 min on the meter path. Pacing took that to
+**0 remaps in 6 min**. Credit is capped at one buffer so a pause cannot bank time and
+then burst, and is zeroed whenever the ring runs dry.
+
 `SIGPIPE` is blocked **thread-locally** in the writer (`pthread_sigmask`), never with a
 process-wide handler: we are a guest inside mpd. A blocked `SIGPIPE` with default
 disposition simply goes pending and never fires, while `write()` still returns `EPIPE`
