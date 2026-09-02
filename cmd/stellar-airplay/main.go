@@ -120,14 +120,21 @@ func main() {
 	log.Info().Int64("dropped", fw.droppedFrames()).Msg("stellar-airplay stopped")
 }
 
-// reopenInterval paces reopening the metadata pipe. The open no longer waits
-// for a writer to attach, so a pipe with nobody on the far end — shairport
-// stopped, or this daemon started first on a cold boot — reads EOF straight
-// away and would spin without this.
+// reopenInterval paces reopening the metadata pipe after a genuine failure —
+// the pipe not existing yet on a cold boot, or a read error. It is no longer
+// the pacing of a steady-state poll: the read end is now held open across
+// writer sessions, so the common path never comes back here at all.
 const reopenInterval = 500 * time.Millisecond
 
-// tailLoop tails the metadata pipe until ctx is cancelled, reopening each time
-// the writer side closes so the next AirPlay session is picked up immediately.
+// tailLoop tails the metadata pipe until ctx is cancelled.
+//
+// The one descriptor obtained below stays open for the lifetime of the daemon
+// and spans every AirPlay session, because shairport-sync only attaches its
+// write end when a reader is already there. Closing and reopening between
+// sessions — which is what this loop used to do on every EOF, twice a second —
+// meant the read end was missing for most of each cycle, so shairport usually
+// could not attach and no metadata was ever emitted. Reopening is now strictly
+// error recovery.
 func tailLoop(ctx context.Context, path string, b *bundler) {
 	for ctx.Err() == nil {
 		chunks, err := tailPipe(ctx, path, b)
@@ -137,12 +144,13 @@ func tailLoop(ctx context.Context, path string, b *bundler) {
 			return
 		case err != nil:
 			log.Warn().Err(err).Str("pipe", path).Msg("pipe tail terminated; will reopen")
-		case chunks > 0:
-			log.Info().Str("pipe", path).Int("chunks", chunks).Msg("pipe writer closed; will reopen")
 		default:
-			// Nobody is writing. Expected whenever shairport-sync is not
-			// running, so reopening quietly beats logging twice a second.
-			log.Debug().Str("pipe", path).Msg("no writer on pipe; will reopen")
+			// Unexpected on Linux: OpenPersistent holds a writer reference
+			// of our own, so the stream has no EOF to reach. Reaching here
+			// means the fallback read-only open was taken, which is worth
+			// saying out loud rather than hiding at debug level.
+			log.Warn().Str("pipe", path).Int("chunks", chunks).
+				Msg("metadata stream ended; read end is not persistent — will reopen")
 		}
 
 		if !fifo.Sleep(ctx, reopenInterval) {
@@ -151,15 +159,18 @@ func tailLoop(ctx context.Context, path string, b *bundler) {
 	}
 }
 
-// tailPipe reads one writer session off the pipe, returning the number of
+// tailPipe tails the pipe across writer sessions, returning the number of
 // metadata chunks parsed.
 //
 // The pipe is silent for long stretches — shairport-sync writes at track
 // boundaries and on volume/pause events, not continuously — so the read has to
 // be interruptible or a cancelled context is never observed and shutdown hangs
 // until systemd SIGKILLs the daemon. See the fifo package for the mechanism.
+//
+// OpenPersistent, not Open: the descriptor must outlive any one AirPlay
+// session, or shairport-sync finds no reader attached and never writes.
 func tailPipe(ctx context.Context, path string, b *bundler) (int, error) {
-	f, err := fifo.Open(path)
+	f, err := fifo.OpenPersistent(path)
 	if err != nil {
 		return 0, err
 	}

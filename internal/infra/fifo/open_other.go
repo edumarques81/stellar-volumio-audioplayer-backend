@@ -11,3 +11,10 @@ import "os"
 func Open(path string) (*os.File, error) {
 	return os.Open(path)
 }
+
+// OpenPersistent has no EOF-suppressing equivalent on platforms without POSIX
+// FIFO semantics, so it degrades to Open. See open_unix.go for why callers
+// want it and what they lose here.
+func OpenPersistent(path string) (*os.File, error) {
+	return Open(path)
+}
