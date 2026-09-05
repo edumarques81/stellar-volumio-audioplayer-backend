@@ -296,6 +296,131 @@ def probe_tag_write(path: Path, fill: dict[str, str]) -> tuple[str, bool]:
     return "", altered
 
 
+# --------------------------------------------------------------------------
+# Per-track tags
+# --------------------------------------------------------------------------
+#
+# Album-level tags alone leave every track titled with its own filename, which
+# is what MPD falls back to when TIT2 is absent. A Bandcamp WAV download is the
+# worst case: the files carry no tags whatsoever, so a 17-track album arrives
+# as seventeen rows reading "artist - album - 01 Title.wav".
+#
+# The filename is the only per-track metadata that exists, and unlike a folder
+# name it is highly structured. It is still a guess, so it is gated the same
+# way the MusicBrainz match is: derive numbers and titles for the whole album,
+# then accept them only on positive evidence that the parse was right.
+
+TRACK_NUM_RE = re.compile(r"^(\d{1,3})(?!\d)[\s._)\-]+(.+)$")
+
+
+def _common_prefix(names: list[str]) -> str:
+    """Longest prefix shared by every name, trimmed to a separator boundary.
+
+    Bandcamp names every file "<artist> - <album> - NN Title", so the shared
+    prefix is exactly the part that is not per-track. Taking only what *all*
+    files share is what makes this safe: a prefix that is not really a prefix
+    cannot survive the comparison.
+
+    Two trims matter. Trailing digits come off first, because a nine-track
+    album shares the "0" of "01".."09" and eating it would renumber the album.
+    Then the prefix is cut back to the last separator, so it can never end
+    mid-word and steal the first letters of a title.
+    """
+    if len(names) < 2:
+        return ""
+    head = names[0]
+    for name in names[1:]:
+        limit = min(len(head), len(name))
+        i = 0
+        while i < limit and head[i] == name[i]:
+            i += 1
+        head = head[:i]
+        if not head:
+            return ""
+    head = re.sub(r"\d+$", "", head)
+    m = re.search(r"^(.*[\s._)\-])", head)
+    return m.group(1) if m else ""
+
+
+def _parse_stems(audio: list[Path], strip_prefix: bool) -> dict[Path, tuple[int, str]]:
+    """Parse (number, title) out of each filename. Empty dict if any file fails."""
+    stems = [p.stem for p in audio]
+    prefix = _common_prefix(stems) if strip_prefix else ""
+    out: dict[Path, tuple[int, str]] = {}
+    for path, stem in zip(audio, stems):
+        rest = stem[len(prefix):] if prefix and stem.startswith(prefix) else stem
+        m = TRACK_NUM_RE.match(rest.strip())
+        if not m:
+            return {}
+        title = m.group(2).strip(" -_.")
+        if not title:
+            return {}
+        out[path] = (int(m.group(1)), title)
+    return out
+
+
+def derive_track_tags(audio: list[Path],
+                      mb_tracks: dict[int, str] | None = None
+                      ) -> tuple[dict[Path, dict[str, str]], str]:
+    """Per-file title/tracknumber from filenames. Returns (tags, why-not).
+
+    The gate is that the parsed numbers are exactly 1..N with no gaps and no
+    duplicates. That is strong evidence the parse found real track numbers
+    rather than a year, a bitrate, or the leading digits of a title: a wrong
+    reading essentially never lands on a complete sequence. A genuine gap --
+    a partial download, or a disc split across folders -- fails the gate too,
+    which is the right answer, because renumbering those would be worse than
+    leaving them alone.
+
+    `mb_tracks` only ever *canonicalises*: a MusicBrainz title is adopted in
+    place of the filename's when the two already agree after normalisation, so
+    "Into The Freedom" picks up the release's "Into the Freedom". Where they
+    disagree the filename wins and nothing is invented -- the release may be a
+    different edition, as a Bandcamp download and its CD pressing often are.
+    """
+    for strip_prefix in (True, False):
+        parsed = _parse_stems(audio, strip_prefix)
+        if not parsed:
+            continue
+        numbers = sorted(n for n, _ in parsed.values())
+        if numbers != list(range(1, len(audio) + 1)):
+            continue
+
+        out: dict[Path, dict[str, str]] = {}
+        for path, (number, title) in parsed.items():
+            canonical = (mb_tracks or {}).get(number, "")
+            if canonical and normalise_name(canonical) == normalise_name(title):
+                title = canonical
+            out[path] = {"title": title, "tracknumber": str(number)}
+        return out, ""
+
+    return {}, ("filenames do not yield a complete 1..%d track sequence" % len(audio))
+
+
+def fetch_release_tracks(release_id: str) -> dict[int, str]:
+    """Track number -> canonical title for a release. Empty on any failure.
+
+    Best-effort by design: this only ever improves the spelling of a title the
+    filename already supplied, so a network failure here must not hold up an
+    ingest that is otherwise complete.
+    """
+    url = f"{MB_ROOT}/release/{urllib.parse.quote(release_id)}?inc=recordings&fmt=json"
+    data = _http_json(url)
+    if not data:
+        return {}
+    out: dict[int, str] = {}
+    for medium in data.get("media") or []:
+        for track in medium.get("tracks") or []:
+            try:
+                number = int(str(track.get("number", "")).strip())
+            except (TypeError, ValueError):
+                continue
+            title = (track.get("title") or "").strip()
+            if title and number not in out:
+                out[number] = title
+    return out
+
+
 def by_extension(paths: list[Path]) -> dict[str, list[Path]]:
     grouped: dict[str, list[Path]] = {}
     for path in paths:
@@ -788,6 +913,7 @@ def process_item(entry: Path, staging: Path, args) -> ItemReport:
     artist = next((t.get("artist") for t in existing if t.get("artist")), "")
 
     fill: dict[str, str] = {}
+    mb_release_id = ""
     if not album:
         candidate = candidate_album_title(tree.name)
         log(f"    no Album tag; candidate from folder name: {candidate!r}")
@@ -821,6 +947,7 @@ def process_item(entry: Path, staging: Path, args) -> ItemReport:
                 if match.get("date"):
                     fill["date"] = match["date"][:4]
                 fill["musicbrainz_albumid"] = match["id"]
+                mb_release_id = match["id"]
             else:
                 # Refusing to guess is the safe branch: the folder name is what
                 # the human who assembled the album called it.
@@ -835,18 +962,51 @@ def process_item(entry: Path, staging: Path, args) -> ItemReport:
         # explicit keeps the album from splitting per-track.
         fill["albumartist"] = artist
 
+    # A file with no Artist tag displays a blank artist even when AlbumArtist
+    # is set, because the two are separate fields and clients read Artist for
+    # the now-playing line. Mirror it down rather than leave the album looking
+    # anonymous on the LCD.
+    if not artist and not any(t.get("artist") for t in existing):
+        inherited = fill.get("albumartist") or albumartist
+        if inherited:
+            fill["artist"] = inherited
+
+    # ---- per-track tags ----------------------------------------------------
+    per_file: dict[Path, dict[str, str]] = {}
+    if not any(t.get("title") for t in existing):
+        mb_tracks = fetch_release_tracks(mb_release_id) if (mb_release_id and not args.no_network) else {}
+        per_file, why_not = derive_track_tags(audio, mb_tracks)
+        if per_file:
+            canonical = sum(1 for path, tags in per_file.items()
+                            if mb_tracks.get(int(tags["tracknumber"])) == tags["title"])
+            note = f"track titles and numbers derived from filenames ({len(per_file)} track(s))"
+            if canonical:
+                note += f", {canonical} confirmed against MusicBrainz"
+            report.notes.append(note)
+            log(f"    {note}")
+        else:
+            report.notes.append(f"no per-track titles: {why_not}")
+            log(f"    no per-track titles: {why_not}")
+
     # ---- write, and check what stuck --------------------------------------
-    if fill and mutable:
-        log(f"    writing tags: {', '.join(sorted(fill))}")
+    def tags_for(path: Path) -> dict[str, str]:
+        """Album-level tags, plus this file's own title and track number."""
+        merged = dict(fill)
+        merged.update(per_file.get(path, {}))
+        return merged
+
+    if (fill or per_file) and mutable:
+        written = sorted(set(fill) | {k for t in per_file.values() for k in t})
+        log(f"    writing tags: {', '.join(written)}")
         for path in audio:
-            problem, altered = probe_tag_write(path, fill)
+            problem, altered = probe_tag_write(path, tags_for(path))
             if altered:
                 report.md5_mismatches.append(path.name)
             if problem:
                 report.tag_failures.append(f"{path.name}: {problem}")
             else:
                 report.tagged.append(path.name)
-    elif fill:
+    elif fill or per_file:
         # Preview. Whether a tag sticks is a property of the container format,
         # not of the individual file, so one file per extension answers the
         # question for the whole album -- and the smallest one answers it
@@ -861,7 +1021,7 @@ def process_item(entry: Path, staging: Path, args) -> ItemReport:
             probe = work / f"probe{ext}"
             shutil.copy2(rep, probe)
             try:
-                problem, altered = probe_tag_write(probe, fill)
+                problem, altered = probe_tag_write(probe, tags_for(rep))
             finally:
                 probe.unlink(missing_ok=True)
 

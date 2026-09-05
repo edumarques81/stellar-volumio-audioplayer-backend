@@ -415,3 +415,99 @@ def urllib_unquote(url: str) -> str:
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+
+
+# ---------------------------------------------------------------------------
+# Per-track tags
+#
+# The regression these exist for: a Bandcamp WAV download carries no tags at
+# all, so an album ingested with only album-level tags arrived as 17 tracks
+# each titled with its own filename -- "uyama hiroto - freeform jazz - 01 Into
+# The Freedom". Album, artist and date were right; every track title was the
+# raw path.
+# ---------------------------------------------------------------------------
+
+def _paths(*names):
+    return [Path(f"/staging/{n}") for n in names]
+
+
+BANDCAMP = _paths(
+    "uyama hiroto - freeform jazz - 01 Into The Freedom.wav",
+    "uyama hiroto - freeform jazz - 02 Yin And Yang.wav",
+    "uyama hiroto - freeform jazz - 03 Taiko.wav",
+)
+
+
+class DeriveTrackTagsTests(unittest.TestCase):
+
+    def test_strips_the_shared_prefix_and_numbers_the_tracks(self):
+        tags, why = ingest.derive_track_tags(BANDCAMP)
+        self.assertEqual(why, "")
+        self.assertEqual(tags[BANDCAMP[0]], {"title": "Into The Freedom", "tracknumber": "1"})
+        self.assertEqual(tags[BANDCAMP[2]], {"title": "Taiko", "tracknumber": "3"})
+
+    def test_nine_track_album_keeps_its_leading_zero_out_of_the_prefix(self):
+        """Every stem shares the "0" of 01..09; eating it would renumber them."""
+        album = _paths(*(f"Band - Record - 0{n} Song {n}.flac" for n in range(1, 10)))
+        tags, why = ingest.derive_track_tags(album)
+        self.assertEqual(why, "")
+        self.assertEqual(sorted(int(t["tracknumber"]) for t in tags.values()), list(range(1, 10)))
+        self.assertEqual(tags[album[0]]["title"], "Song 1")
+
+    def test_bare_numbered_filenames_need_no_prefix(self):
+        album = _paths("01 - First.flac", "02 - Second.flac")
+        tags, why = ingest.derive_track_tags(album)
+        self.assertEqual(why, "")
+        self.assertEqual(tags[album[1]], {"title": "Second", "tracknumber": "2"})
+
+    def test_gap_in_the_sequence_is_refused(self):
+        """A gap means a partial download or a wrong parse. Renumbering is worse."""
+        album = _paths("01 First.flac", "02 Second.flac", "04 Fourth.flac")
+        tags, why = ingest.derive_track_tags(album)
+        self.assertEqual(tags, {})
+        self.assertIn("complete", why)
+
+    def test_duplicate_numbers_are_refused(self):
+        album = _paths("01 First.flac", "01 Also First.flac")
+        tags, _ = ingest.derive_track_tags(album)
+        self.assertEqual(tags, {})
+
+    def test_unnumbered_filenames_are_refused(self):
+        album = _paths("Opening.flac", "Closing.flac")
+        tags, _ = ingest.derive_track_tags(album)
+        self.assertEqual(tags, {})
+
+    def test_a_year_is_not_read_as_a_track_number(self):
+        album = _paths("1984 Orwell.flac", "1985 Sequel.flac")
+        tags, _ = ingest.derive_track_tags(album)
+        self.assertEqual(tags, {})
+
+    def test_musicbrainz_canonicalises_a_title_it_agrees_with(self):
+        """Casing only -- "Into The Freedom" becomes the release's "Into the Freedom"."""
+        mb = {1: "Into the Freedom", 2: "Yin and Yang", 3: "Taiko"}
+        tags, _ = ingest.derive_track_tags(BANDCAMP, mb)
+        self.assertEqual(tags[BANDCAMP[0]]["title"], "Into the Freedom")
+        self.assertEqual(tags[BANDCAMP[1]]["title"], "Yin and Yang")
+
+    def test_musicbrainz_never_overrides_a_title_it_disagrees_with(self):
+        """A different edition must not rename the files it does not match."""
+        mb = {1: "Something Else Entirely", 2: "Yin and Yang", 3: "Taiko"}
+        tags, _ = ingest.derive_track_tags(BANDCAMP, mb)
+        self.assertEqual(tags[BANDCAMP[0]]["title"], "Into The Freedom")
+
+    def test_missing_musicbrainz_track_leaves_the_filename_title(self):
+        tags, _ = ingest.derive_track_tags(BANDCAMP, {2: "Yin and Yang"})
+        self.assertEqual(tags[BANDCAMP[0]]["title"], "Into The Freedom")
+
+
+class CommonPrefixTests(unittest.TestCase):
+
+    def test_never_ends_mid_word(self):
+        """Cutting back to a separator stops it stealing a title's first letters."""
+        self.assertEqual(ingest._common_prefix(["Band - Alpha", "Band - Anvil"]), "Band - ")
+
+    def test_single_name_has_no_shared_prefix(self):
+        self.assertEqual(ingest._common_prefix(["01 Only Track"]), "")
+
+    def test_nothing_in_common_yields_nothing(self):
+        self.assertEqual(ingest._common_prefix(["01 One", "02 Two"]), "")
