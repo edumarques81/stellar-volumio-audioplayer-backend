@@ -402,7 +402,10 @@ func (s *Server) setupHandlers() {
 			// Same reasoning for a drop-box ingest: a preview takes minutes
 			// and its result is a broadcast, so a client that reconnects
 			// mid-run would otherwise be stranded with no plan and no Import
-			// button. No-op unless a confirmable plan is actually pending.
+			// button. Always sends a status — it is the only event that sets
+			// the clients' `available`, so a reconnect between runs that got
+			// nothing would leave the surface with no ingest UI at all — and
+			// additionally replays a plan that is still confirmable.
 			s.ingestHandlers.PushTo(client)
 		}()
 

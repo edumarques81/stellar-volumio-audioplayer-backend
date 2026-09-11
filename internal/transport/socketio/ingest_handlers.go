@@ -106,10 +106,25 @@ func (h *IngestHandlers) RegisterHandlers(client *socket.Socket) {
 // waiting for the first. Replaying here mirrors what the connect-time batch
 // already does for AirPlay state.
 //
-// Nothing is sent when there is no plan to confirm, and the same auth gate as
-// the interactive events applies: an unauthorized controller must not learn
-// the inbox's filenames just by connecting. Refusals are silent — this is a
-// push nobody asked for, so an error banner would be noise.
+// Status goes out unconditionally, the plan only when there is one. That
+// asymmetry is the point: status is the only event that ever sets the clients'
+// `isAvailable`, and the entire ingest card renders behind it, so a client that
+// reconnects between runs must still get one or the feature is invisible to it
+// for the rest of the session — and the client that needs it most is exactly
+// the one whose own `ingest:status` was lost with the connection that carried
+// it. It also re-establishes `busy` for a client that was away when its own
+// commit finished: `pushIngestResult` is a one-shot broadcast to whoever
+// happened to be connected, and a commit runs for minutes, so a locked screen
+// or a Wi-Fi blip loses it for good. Clearing the resulting stuck spinner is
+// the client's job (each surface drops its own phase latch on connect), but it
+// cannot do it against a stale `busy` it was never sent a correction for —
+// observed 2026-09-11, a four-minute commit left the iPad spinning for two and
+// a half hours.
+//
+// The same auth gate as the interactive events applies: an unauthorized
+// controller must not learn the inbox's filenames just by connecting. Refusals
+// are silent — this is a push nobody asked for, so an error banner would be
+// noise.
 func (h *IngestHandlers) PushTo(client *socket.Socket) {
 	if h == nil || client == nil {
 		return
@@ -121,14 +136,14 @@ func (h *IngestHandlers) pushTo(em ingestEmitter, ip string) {
 	if !h.isAuthorized(ip) {
 		return
 	}
-	report, ok := h.svc.PendingPreview()
-	if !ok {
-		return
-	}
 	// Status first: the clients derive "a run is in flight" from it, and a
 	// plan arriving before that would flash a confirmable button on a surface
 	// that is actually mid-commit.
 	h.emit(em, "pushIngestStatus", h.svc.Status())
+	report, ok := h.svc.PendingPreview()
+	if !ok {
+		return
+	}
 	h.emit(em, "pushIngestPreview", report)
 }
 

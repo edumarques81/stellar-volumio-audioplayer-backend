@@ -413,12 +413,30 @@ func TestIngestPushTo(t *testing.T) {
 			want: []string{"pushIngestStatus", "pushIngestPreview"},
 		},
 		{
-			name: "no plan on file is silent",
+			// Status is unconditional. It is the only event that ever sets
+			// the clients' `isAvailable`, and the whole ingest card renders
+			// behind it -- a reconnecting client that gets nothing here has
+			// no ingest UI at all for the rest of its session. It is also
+			// how a client whose commit finished while it was away learns
+			// the run is over (busy=false), which is the only thing that
+			// unsticks a stranded "Importing..." spinner.
+			name: "no plan on file still sends status",
 			svc: &fakeIngest{
 				status: ingest.Status{Available: true, Count: 2},
 			},
 			ip:   "127.0.0.1",
-			want: nil,
+			want: []string{"pushIngestStatus"},
+		},
+		{
+			// Mid-commit: the plan has been spent, so there is nothing to
+			// replay, but busy=true is exactly what the reconnecting client
+			// needs in order to keep its spinner honest.
+			name: "busy with no plan still sends status",
+			svc: &fakeIngest{
+				status: ingest.Status{Available: true, Count: 1, Busy: true},
+			},
+			ip:   "127.0.0.1",
+			want: []string{"pushIngestStatus"},
 		},
 		{
 			// The inbox filenames come off a private share; a controller that
@@ -469,6 +487,12 @@ func TestIngestPushTo(t *testing.T) {
 			// every other surface redraw a plan it did not ask for.
 			if _, ok := hasEvent(mu, broadcasts, "pushIngestPreview"); ok {
 				t.Fatal("replay must not broadcast")
+			}
+			// Status matters more, now that it is unconditional: broadcast, it
+			// would fan every single connect out to every client, each one
+			// paying a directory read for a snapshot nobody asked for.
+			if _, ok := hasEvent(mu, broadcasts, "pushIngestStatus"); ok {
+				t.Fatal("hydration must not broadcast status")
 			}
 			// Refusals are silent: this is an unsolicited push, so an error
 			// banner on connect would be pure noise.
