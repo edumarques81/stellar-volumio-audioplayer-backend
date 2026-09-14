@@ -68,6 +68,8 @@ type Service struct {
 	mu      sync.Mutex
 	running bool
 	token   string
+	// observer is notified on each edge of running. See SetRunStateObserver.
+	observer func(running bool)
 	// pending is the report that issued token, kept for as long as the token
 	// is spendable. Preview and commit results reach clients as broadcasts, so
 	// a controller that was backgrounded or off-network while the dry run
@@ -97,6 +99,33 @@ func (s *Service) Available() bool {
 	}
 	info, err := os.Stat(s.cfg.InboxDir)
 	return err == nil && info.IsDir()
+}
+
+// SetRunStateObserver registers a callback fired once when a run starts and
+// once when it ends. Passing nil clears it.
+//
+// It exists because `running` is owned by execute, so a caller wrapping
+// Preview/Commit cannot observe the transition: anything it samples before the
+// call is taken before the flag is set, and anything after is taken once it has
+// been cleared. That is why the ingest UI never learned that another surface
+// had started a run — the two broadcasts around the call both reported idle.
+//
+// The callback runs on the goroutine driving the run with the service lock
+// released, so it may call back into Status() (which is exactly what the
+// transport does — it re-snapshots rather than trusting the bool, so the
+// payload also carries a fresh inbox listing). It must not block for long: the
+// leading edge fires before the script starts and the trailing edge before the
+// run's own result reaches its caller.
+//
+// A refused run — single-flight rejecting a second one — produces no edges.
+// Its trailing edge would clear a busy state the first run still owns.
+func (s *Service) SetRunStateObserver(fn func(running bool)) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	s.observer = fn
+	s.mu.Unlock()
 }
 
 // Status lists what is waiting in the inbox without running the script.
@@ -215,13 +244,30 @@ func (s *Service) execute(ctx context.Context, dryRun bool) (Report, error) {
 		return Report{}, ErrBusy
 	}
 	s.running = true
+	observer := s.observer
 	s.mu.Unlock()
 
+	// Registered before the leading edge fires, not after: the observer calls
+	// into the transport, which calls into a third-party socket library, on a
+	// goroutine with no recover. If that panics with the reset still unwritten
+	// the flag stays true for the life of the process and every later run is
+	// refused with ErrBusy, with every client UI stuck on "busy" and nothing
+	// short of a restart to clear it.
 	defer func() {
 		s.mu.Lock()
 		s.running = false
+		observer := s.observer
 		s.mu.Unlock()
+		if observer != nil {
+			observer(false)
+		}
 	}()
+
+	// Outside the lock, always: the observer's whole purpose is to re-read
+	// Status(), which takes the same mutex.
+	if observer != nil {
+		observer(true)
+	}
 
 	args := []string{"--json"}
 	if dryRun {

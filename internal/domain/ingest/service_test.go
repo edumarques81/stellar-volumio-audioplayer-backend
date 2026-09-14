@@ -474,6 +474,200 @@ func TestPendingPreview_DropsAStalePlan(t *testing.T) {
 // Single-flight
 // --------------------------------------------------------------------------
 
+// --------------------------------------------------------------------------
+// Run-state observer
+//
+// Clients derive "a run is in flight" from Status.Busy, and the only way an
+// already-connected surface learns a run started somewhere else is a push. The
+// transport cannot produce one on its own: `running` flips inside execute, so
+// anything the handler emits around a Preview/Commit call is taken either too
+// early or too late and always reports idle. The observer is that edge.
+// --------------------------------------------------------------------------
+
+func TestRunStateObserver_FiresOnBothEdgesWithBusyVisible(t *testing.T) {
+	t.Parallel()
+
+	runner := &fakeRunner{stdout: []byte(previewJSON)}
+	svc, _ := newService(t, runner, "Album A")
+
+	var mu sync.Mutex
+	var edges []bool
+	var busyAtEdge []bool
+	// Status() takes the same mutex execute holds. If a refactor ever invoked
+	// the observer under that lock this call deadlocks and the test hangs
+	// rather than failing — read a hang here as the contract being broken, not
+	// as flake. The transport depends on it: pushTo holds emitMu across
+	// Status(), so an observer holding the service lock would deadlock the
+	// whole ingest surface.
+	svc.SetRunStateObserver(func(running bool) {
+		// Status() must be callable from inside the callback: the transport's
+		// whole job here is to re-snapshot and broadcast. A callback fired
+		// under the service lock would deadlock on this line.
+		busy := svc.Status().Busy
+		mu.Lock()
+		edges = append(edges, running)
+		busyAtEdge = append(busyAtEdge, busy)
+		mu.Unlock()
+	})
+
+	if _, err := svc.Preview(context.Background()); err != nil {
+		t.Fatalf("Preview: %v", err)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(edges) != 2 || edges[0] != true || edges[1] != false {
+		t.Fatalf("edges = %v, want [true false]", edges)
+	}
+	// The point of the whole exercise: a snapshot taken on the leading edge
+	// reports busy, so the broadcast the transport builds from it does too.
+	if !busyAtEdge[0] {
+		t.Fatal("Status().Busy was false on the leading edge -- the broadcast would say idle")
+	}
+	if busyAtEdge[1] {
+		t.Fatal("Status().Busy was true on the trailing edge -- clients would stay soft-locked")
+	}
+}
+
+func TestRunStateObserver_CommitFiresToo(t *testing.T) {
+	t.Parallel()
+
+	runner := &fakeRunner{stdouts: [][]byte{[]byte(previewJSON), []byte(commitJSON)}}
+	svc, _ := newService(t, runner, "Album A")
+
+	report, err := svc.Preview(context.Background())
+	if err != nil {
+		t.Fatalf("Preview: %v", err)
+	}
+
+	var mu sync.Mutex
+	var edges []bool
+	svc.SetRunStateObserver(func(running bool) {
+		mu.Lock()
+		edges = append(edges, running)
+		mu.Unlock()
+	})
+
+	if _, err := svc.Commit(context.Background(), report.Token); err != nil {
+		t.Fatalf("Commit: %v", err)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(edges) != 2 || edges[0] != true || edges[1] != false {
+		t.Fatalf("edges = %v, want [true false]", edges)
+	}
+}
+
+func TestRunStateObserver_RefusedRunHasNoEdges(t *testing.T) {
+	t.Parallel()
+
+	release := make(chan struct{})
+	entered := make(chan struct{})
+	runner := &fakeRunner{
+		stdout: []byte(previewJSON),
+		onRun: func() {
+			close(entered)
+			<-release
+		},
+	}
+	svc, _ := newService(t, runner, "Album A")
+
+	var mu sync.Mutex
+	edges := 0
+	svc.SetRunStateObserver(func(bool) {
+		mu.Lock()
+		edges++
+		mu.Unlock()
+	})
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		if _, err := svc.Preview(context.Background()); err != nil {
+			t.Errorf("first run: %v", err)
+		}
+	}()
+	<-entered
+
+	// A refused second run changes nothing, so it must not announce a
+	// transition -- its trailing edge would clear a busy flag the first run
+	// still owns.
+	if _, err := svc.Preview(context.Background()); !errors.Is(err, ingest.ErrBusy) {
+		t.Fatalf("second run err = %v, want ErrBusy", err)
+	}
+
+	mu.Lock()
+	if edges != 1 {
+		mu.Unlock()
+		t.Fatalf("edges so far = %d, want 1 (the first run's leading edge only)", edges)
+	}
+	mu.Unlock()
+
+	close(release)
+	<-done
+
+	mu.Lock()
+	defer mu.Unlock()
+	if edges != 2 {
+		t.Fatalf("edges = %d, want 2", edges)
+	}
+}
+
+func TestRunStateObserver_UnsetIsSafe(t *testing.T) {
+	t.Parallel()
+	// main.go wires one, but nothing in the domain requires it.
+	runner := &fakeRunner{stdout: []byte(previewJSON)}
+	svc, _ := newService(t, runner, "Album A")
+	if _, err := svc.Preview(context.Background()); err != nil {
+		t.Fatalf("Preview with no observer: %v", err)
+	}
+}
+
+// A panic in the leading-edge observer must not leave the service busy.
+//
+// The callback ends up in a third-party socket library, on a goroutine the
+// transport spawns with no recover. If a panic there escaped with `running`
+// still set, every later run would be refused with ErrBusy and every client
+// would sit on a "busy" that nothing can clear short of restarting the
+// process. The reset is a defer registered before the edge fires, so the
+// panic still unwinds — it just takes the flag with it.
+func TestRunStateObserver_PanicOnLeadingEdgeStillClearsRunning(t *testing.T) {
+	t.Parallel()
+
+	runner := &fakeRunner{stdout: []byte(previewJSON)}
+	svc, _ := newService(t, runner, "Album A")
+
+	var edges []bool
+	svc.SetRunStateObserver(func(running bool) {
+		edges = append(edges, running)
+		if running {
+			panic("observer blew up")
+		}
+	})
+
+	func() {
+		defer func() {
+			if recover() == nil {
+				t.Fatal("expected the observer's panic to propagate")
+			}
+		}()
+		_, _ = svc.Preview(context.Background())
+	}()
+
+	if got := svc.Status().Busy; got {
+		t.Fatal("service is wedged busy after an observer panic")
+	}
+	if len(edges) != 2 || !edges[0] || edges[1] {
+		t.Fatalf("edges = %v, want [true false] (the trailing edge must still fire)", edges)
+	}
+
+	svc.SetRunStateObserver(nil)
+	if _, err := svc.Preview(context.Background()); err != nil {
+		t.Fatalf("a later run must not be refused: %v", err)
+	}
+}
+
 func TestSingleFlight_SecondRunIsRefused(t *testing.T) {
 	t.Parallel()
 

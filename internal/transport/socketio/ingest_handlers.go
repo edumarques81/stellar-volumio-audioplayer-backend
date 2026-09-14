@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net"
+	"sync"
 	"time"
 
 	"github.com/edumarques81/stellar-volumio-audioplayer-backend/internal/domain/ingest"
@@ -28,6 +29,14 @@ type IngestService interface {
 	// PendingPreview returns a plan that is still confirmable, for replay to
 	// a client that missed the broadcast.
 	PendingPreview() (ingest.Report, bool)
+	// SetRunStateObserver registers the callback fired on each edge of a run.
+	// It is the only way the transport can learn that a run started, because
+	// the flag lives inside the service for the duration of the call.
+	//
+	// Single slot, last writer wins: exactly one IngestHandlers per Service,
+	// or the second silently detaches the first and the first's clients never
+	// hear about another run.
+	SetRunStateObserver(func(running bool))
 }
 
 // ingestEmitter is the one method these handlers need from a connected client.
@@ -60,6 +69,34 @@ type IngestHandlers struct {
 	// broadcast fans a payload out to every connected client. Injectable so
 	// handler tests can observe it without a live Socket.IO server.
 	broadcast func(event string, payload any)
+
+	// emitMu serializes every ingest push — and, the part that actually
+	// matters, is held across the *read* of the state each push reports.
+	//
+	// Two goroutines produce status: the connect-time hydration for one
+	// client, and the broadcast on a run's trailing edge. Unsynchronised they
+	// inverted: hydration sampled `busy: true`, the run then finished and
+	// broadcast `busy: false`, and hydration's older frame was written last.
+	// The client was left soft-locked on a run that had finished, with nothing
+	// left to correct it until its next reconnect.
+	//
+	// Serializing the sends alone would not fix that — the stale snapshot
+	// would still be the last one written. The snapshot has to be taken inside
+	// the same critical section, so a state read later can never be sent
+	// earlier.
+	//
+	// Ordering the calls does order the wire, but not because the library
+	// writes synchronously — the websocket transport hands the actual write to
+	// a goroutine. It clears `writable` synchronously before spawning it and
+	// only sets it again once the write has landed, and flush() dispatches
+	// nothing while that flag is down; everything else queues in a FIFO write
+	// buffer. So the frames leave in call order via that interlock. Worth
+	// knowing, because the library carries a `// Needs further investigation`
+	// on the offload and nothing here would catch it changing.
+	//
+	// Lock order is always emitMu -> the service's own lock, never the
+	// reverse: the run-state observer is invoked with the service unlocked.
+	emitMu sync.Mutex
 }
 
 // NewIngestHandlers builds the bundle. trustedSpecs takes the same IP/CIDR
@@ -76,17 +113,27 @@ func NewIngestHandlers(svc IngestService, server *Server, trustedSpecs []string)
 			server.io.Emit(event, payload)
 		}
 	}
+	if svc != nil {
+		// Both edges, re-snapshotted rather than derived from the bool: the
+		// payload also carries the inbox listing, which a commit has just
+		// changed by the time the trailing edge fires.
+		svc.SetRunStateObserver(func(bool) { h.broadcastStatus() })
+	}
 	return h, nil
 }
 
 // RegisterHandlers attaches the ingest events to a client.
 //
-// Status answers inline — it is a directory listing. Preview and commit are
-// dispatched to a goroutine because both shell out to the ingest script, and
-// blocking here would stall the client's entire event loop.
+// All three are dispatched to a goroutine. Preview and commit obviously, since
+// both shell out to the ingest script for minutes. Status used to answer
+// inline on the grounds that it is only a directory listing, and that stopped
+// being true when it started taking emitMu: the longest holder of that lock is
+// a connect-time hydration walking the whole drop-box to hash a pending plan,
+// and the kiosk reconnects on an idle timer. Blocking here stalls the client's
+// entire event loop.
 func (h *IngestHandlers) RegisterHandlers(client *socket.Socket) {
 	client.On("ingest:status", func(_ ...any) {
-		h.handleStatus(client, extractRemoteIP(client))
+		go h.handleStatus(client, extractRemoteIP(client))
 	})
 	client.On("ingest:preview", func(_ ...any) {
 		go h.handlePreview(client, extractRemoteIP(client))
@@ -136,6 +183,11 @@ func (h *IngestHandlers) pushTo(em ingestEmitter, ip string) {
 	if !h.isAuthorized(ip) {
 		return
 	}
+	// Both reads happen inside emitMu, so neither this status nor this plan
+	// can be overtaken by a broadcast describing newer state (see emitMu).
+	h.emitMu.Lock()
+	defer h.emitMu.Unlock()
+
 	// Status first: the clients derive "a run is in flight" from it, and a
 	// plan arriving before that would flash a confirmable button on a surface
 	// that is actually mid-commit.
@@ -160,6 +212,8 @@ func (h *IngestHandlers) handleStatus(em ingestEmitter, ip string) {
 	if !h.authorize(em, ip, "status") {
 		return
 	}
+	h.emitMu.Lock()
+	defer h.emitMu.Unlock()
 	h.emit(em, "pushIngestStatus", h.svc.Status())
 }
 
@@ -169,15 +223,17 @@ func (h *IngestHandlers) handlePreview(em ingestEmitter, ip string) {
 	}
 
 	log.Info().Str("remote_ip", ip).Msg("ingest: preview requested")
-	h.broadcastStatus()
-	defer h.broadcastStatus()
+	// No status broadcast here: the run announces its own edges through the
+	// observer wired in NewIngestHandlers, which is the only place that can
+	// report `busy: true` — the flag is set inside Preview and cleared before
+	// it returns, so anything emitted around this call reports idle twice.
 
 	ctx, cancel := context.WithTimeout(context.Background(), ingestPreviewTimeout)
 	defer cancel()
 
 	report, err := h.svc.Preview(ctx)
 	if err != nil {
-		h.emitError(em, "preview", err)
+		h.emitErrorWithStatus(em, "preview", err)
 		return
 	}
 
@@ -185,7 +241,7 @@ func (h *IngestHandlers) handlePreview(em ingestEmitter, ip string) {
 		Int("would_ingest", report.Summary.WouldIngest).
 		Int("refused", report.Summary.Refused).
 		Msg("ingest: preview complete")
-	h.broadcast("pushIngestPreview", report)
+	h.broadcastOrdered("pushIngestPreview", report)
 }
 
 func (h *IngestHandlers) handleCommit(em ingestEmitter, ip, token string) {
@@ -198,15 +254,14 @@ func (h *IngestHandlers) handleCommit(em ingestEmitter, ip, token string) {
 	}
 
 	log.Info().Str("remote_ip", ip).Msg("ingest: commit requested")
-	h.broadcastStatus()
-	defer h.broadcastStatus()
+	// Edges come from the run itself; see handlePreview.
 
 	ctx, cancel := context.WithTimeout(context.Background(), ingestCommitTimeout)
 	defer cancel()
 
 	report, err := h.svc.Commit(ctx, token)
 	if err != nil {
-		h.emitError(em, "commit", err)
+		h.emitErrorWithStatus(em, "commit", err)
 		return
 	}
 
@@ -215,7 +270,7 @@ func (h *IngestHandlers) handleCommit(em ingestEmitter, ip, token string) {
 		Int("refused", report.Summary.Refused).
 		Int("audio_altered", report.Summary.AudioAltered).
 		Msg("ingest: commit complete")
-	h.broadcast("pushIngestResult", report)
+	h.broadcastOrdered("pushIngestResult", report)
 }
 
 // ingestToken pulls the plan token out of the event args, accepting both a
@@ -273,6 +328,27 @@ func (h *IngestHandlers) emitError(em ingestEmitter, phase string, err error) {
 	})
 }
 
+// emitErrorWithStatus is emitError plus a fresh status, for the failures that
+// never reached the run and therefore produced no observer edges.
+//
+// ErrStalePlan is the one that matters: it means the inbox moved under the
+// plan, so the requester's cached listing is wrong by definition, and the
+// old handler-level `defer broadcastStatus()` used to refresh it. ErrBusy is
+// excluded because the run that refused this one is itself broadcasting both
+// its edges, and a second frame here would only race them.
+//
+// Status goes first, for the same reason it does in pushTo: the clients react
+// to the error by clearing their plan, and they should do that against the
+// listing that caused it.
+func (h *IngestHandlers) emitErrorWithStatus(em ingestEmitter, phase string, err error) {
+	if !errors.Is(err, ingest.ErrBusy) {
+		h.emitMu.Lock()
+		h.emit(em, "pushIngestStatus", h.svc.Status())
+		h.emitMu.Unlock()
+	}
+	h.emitError(em, phase, err)
+}
+
 func (h *IngestHandlers) emit(em ingestEmitter, event string, payload any) {
 	if em == nil {
 		return
@@ -282,6 +358,21 @@ func (h *IngestHandlers) emit(em ingestEmitter, event string, payload any) {
 	_ = em.Emit(event, payload)
 }
 
+// broadcastStatus snapshots and fans out in one critical section. Called on
+// both edges of every run, and nowhere else — the handlers deliberately do not
+// bracket their own calls with it (see handlePreview).
 func (h *IngestHandlers) broadcastStatus() {
+	h.emitMu.Lock()
+	defer h.emitMu.Unlock()
 	h.broadcast("pushIngestStatus", h.svc.Status())
+}
+
+// broadcastOrdered fans out an already-built payload, in line behind whatever
+// else is being pushed. A plan or a result that jumped ahead of the status
+// describing the same run would arrive at a client that still believes the
+// previous state.
+func (h *IngestHandlers) broadcastOrdered(event string, payload any) {
+	h.emitMu.Lock()
+	defer h.emitMu.Unlock()
+	h.broadcast(event, payload)
 }

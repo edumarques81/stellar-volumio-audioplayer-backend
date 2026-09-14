@@ -3,8 +3,11 @@ package socketio
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/edumarques81/stellar-volumio-audioplayer-backend/internal/domain/ingest"
 )
@@ -58,21 +61,79 @@ type fakeIngest struct {
 	// value means "no plan on file", which is the common case.
 	pending    ingest.Report
 	hasPending bool
+	// statusFn replaces the canned status when set, so a test can make a
+	// snapshot block and force an interleaving.
+	statusFn func() ingest.Status
 
 	mu           sync.Mutex
 	previewCalls int
 	commitCalls  int
 	commitTokens []string
+	running      bool
+	observer     func(running bool)
 }
 
 func (f *fakeIngest) Available() bool { return f.status.Available }
 
-func (f *fakeIngest) Status() ingest.Status { return f.status }
+func (f *fakeIngest) Status() ingest.Status {
+	if f.statusFn != nil {
+		return f.statusFn()
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	st := f.status
+	if f.running {
+		st.Busy = true
+	}
+	return st
+}
+
+func (f *fakeIngest) SetRunStateObserver(fn func(running bool)) {
+	f.mu.Lock()
+	f.observer = fn
+	f.mu.Unlock()
+}
+
+// refusedBeforeRun lists the errors the real Service returns *before* it
+// enters execute, and which therefore announce no edges at all. Modelling this
+// matters: a fake that fired edges for a stale plan would happily bless a
+// handler that reported busy for a run that never started.
+func refusedBeforeRun(err error) bool {
+	return errors.Is(err, ingest.ErrBusy) ||
+		errors.Is(err, ingest.ErrStalePlan) ||
+		errors.Is(err, ingest.ErrNoPlan) ||
+		errors.Is(err, ingest.ErrUnavailable)
+}
+
+// fireEdges mirrors what ingest.Service does around a real run: flip running,
+// announce, run, unflip, announce. A test that skipped this would prove the
+// handler emits nothing, which is exactly the bug.
+func (f *fakeIngest) fireEdges() {
+	f.mu.Lock()
+	f.running = true
+	obs := f.observer
+	f.mu.Unlock()
+	if obs != nil {
+		obs(true)
+	}
+
+	f.mu.Lock()
+	f.running = false
+	obs = f.observer
+	f.mu.Unlock()
+	if obs != nil {
+		obs(false)
+	}
+}
 
 func (f *fakeIngest) Preview(context.Context) (ingest.Report, error) {
 	f.mu.Lock()
 	f.previewCalls++
 	f.mu.Unlock()
+	if refusedBeforeRun(f.previewErr) {
+		return ingest.Report{}, f.previewErr
+	}
+	f.fireEdges()
 	return f.previewReport, f.previewErr
 }
 
@@ -81,6 +142,10 @@ func (f *fakeIngest) Commit(_ context.Context, token string) (ingest.Report, err
 	f.commitCalls++
 	f.commitTokens = append(f.commitTokens, token)
 	f.mu.Unlock()
+	if refusedBeforeRun(f.commitErr) {
+		return ingest.Report{}, f.commitErr
+	}
+	f.fireEdges()
 	return f.commitReport, f.commitErr
 }
 
@@ -543,6 +608,243 @@ func TestIngestPushTo_NilSafe(t *testing.T) {
 	// ingest service must not panic every client that connects.
 	var h *IngestHandlers
 	h.PushTo(nil)
+}
+
+// --- busy broadcasting and emit ordering -----------------------------------
+
+// statusesFrom pulls the Busy flag out of every pushIngestStatus in order.
+// A failure that never reached the run still has to leave the requester's
+// listing correct.
+//
+// ErrStalePlan is the case with teeth: it means the inbox moved under the
+// plan, so the client's cached count is wrong by construction. The old code
+// refreshed it with a `defer broadcastStatus()` on every return path; removing
+// that (it was reporting idle twice and was the reason busy never reached the
+// wire) took this with it. ErrBusy is deliberately excluded — the run that
+// refused this one is already broadcasting both of its own edges.
+func TestIngest_PreRunFailuresStillRefreshTheRequestersStatus(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name        string
+		err         error
+		wantRefresh bool
+	}{
+		{"stale plan", ingest.ErrStalePlan, true},
+		{"no plan", ingest.ErrNoPlan, true},
+		{"unavailable", ingest.ErrUnavailable, true},
+		{"busy", ingest.ErrBusy, false},
+	} {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			svc := &fakeIngest{
+				status:    ingest.Status{Available: true, Items: []string{"Album A"}, Count: 1},
+				commitErr: tc.err,
+			}
+			h, broadcasts, bmu := newHandlers(t, svc)
+			client := &recorder{}
+
+			h.handleCommit(client, "127.0.0.1", "spent-token")
+
+			if _, ok := client.find("pushIngestError"); !ok {
+				t.Fatal("the requester must still be told what failed")
+			}
+			st, ok := client.find("pushIngestStatus")
+			if ok != tc.wantRefresh {
+				t.Fatalf("status refresh to requester = %v, want %v", ok, tc.wantRefresh)
+			}
+			if tc.wantRefresh {
+				if got := st.payload.(ingest.Status); got.Count != 1 || got.Busy {
+					t.Fatalf("refreshed status = %+v, want the live listing and not busy", got)
+				}
+				// It is the requester's problem, not everyone's: a commit that
+				// really changed the inbox broadcasts from the run's own
+				// trailing edge.
+				if busy := statusesFrom(bmu, broadcasts); len(busy) != 0 {
+					t.Fatalf("broadcast %v, want nothing — no run started", busy)
+				}
+			}
+		})
+	}
+}
+
+func statusesFrom(mu *sync.Mutex, events *[]emitted) []bool {
+	mu.Lock()
+	defer mu.Unlock()
+	var busy []bool
+	for _, e := range *events {
+		if e.event != "pushIngestStatus" {
+			continue
+		}
+		st, ok := e.payload.(ingest.Status)
+		if !ok {
+			continue
+		}
+		busy = append(busy, st.Busy)
+	}
+	return busy
+}
+
+func TestIngest_RunEdgesBroadcastBusyBothWays(t *testing.T) {
+	t.Parallel()
+
+	// Without this, `busy` is dead on the wire: the handler's own broadcasts
+	// were taken before the run flipped the flag and after it had cleared it,
+	// so every surface that did not start the run thought the system was idle
+	// and offered an Import button that could only fail with ErrBusy.
+	for _, tc := range []struct {
+		name string
+		run  func(h *IngestHandlers, client *recorder)
+	}{
+		{
+			name: "preview",
+			run: func(h *IngestHandlers, client *recorder) {
+				h.handlePreview(client, "127.0.0.1")
+			},
+		},
+		{
+			name: "commit",
+			run: func(h *IngestHandlers, client *recorder) {
+				h.handleCommit(client, "127.0.0.1", "plan-token")
+			},
+		},
+	} {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			svc := &fakeIngest{status: ingest.Status{Available: true, Items: []string{}}}
+			h, broadcasts, mu := newHandlers(t, svc)
+
+			tc.run(h, &recorder{})
+
+			if got := statusesFrom(mu, broadcasts); len(got) != 2 || got[0] != true || got[1] != false {
+				t.Fatalf("broadcast busy sequence = %v, want [true false]", got)
+			}
+		})
+	}
+}
+
+func TestIngest_RefusedRunBroadcastsNothing(t *testing.T) {
+	t.Parallel()
+
+	// A second run is refused before single-flight touches `running`. Emitting
+	// a trailing edge for it would clear a busy flag the first run still owns.
+	svc := &fakeIngest{
+		status:     ingest.Status{Available: true, Items: []string{}},
+		previewErr: ingest.ErrBusy,
+	}
+	h, broadcasts, mu := newHandlers(t, svc)
+
+	h.handlePreview(&recorder{}, "127.0.0.1")
+
+	if got := statusesFrom(mu, broadcasts); len(got) != 0 {
+		t.Fatalf("refused run broadcast %v, want nothing", got)
+	}
+}
+
+// orderedEmitter records into a shared log so a test can assert the global
+// order of snapshots and sends across goroutines.
+type orderedEmitter struct {
+	record func(string)
+}
+
+func (o *orderedEmitter) Emit(ev string, args ...any) error {
+	label := "emit:" + ev
+	if len(args) > 0 {
+		if st, ok := args[0].(ingest.Status); ok {
+			label = fmt.Sprintf("emit:%s(busy=%v)", ev, st.Busy)
+		}
+	}
+	o.record(label)
+	return nil
+}
+
+// A status push reports state the backend read moments earlier, and two
+// goroutines produce them: the connect-time hydration, and the broadcast on a
+// run's trailing edge. Left unsynchronised they invert — hydration samples
+// busy=true, the run ends and broadcasts busy=false, and hydration's older
+// frame lands last. The client is then soft-locked on a run that finished,
+// with nothing left to correct it until the next reconnect: precisely the
+// class of bug this whole area exists to fix.
+//
+// Serializing the sends is not enough on its own; the state each one reports
+// has to be *read* inside the same critical section, which is what this pins.
+func TestIngest_StatusSendsAreOrderedWithTheirSnapshots(t *testing.T) {
+	var logMu sync.Mutex
+	var events []string
+	record := func(s string) {
+		logMu.Lock()
+		events = append(events, s)
+		logMu.Unlock()
+	}
+
+	var calls atomic.Int32
+	held := make(chan struct{})
+	release := make(chan struct{})
+
+	svc := &fakeIngest{status: ingest.Status{Available: true, Items: []string{}}}
+	svc.statusFn = func() ingest.Status {
+		n := calls.Add(1)
+		record(fmt.Sprintf("snapshot%d", n))
+		if n == 1 {
+			// The hydration snapshot: taken while a run is still in flight,
+			// and held open long enough for that run to finish underneath it.
+			close(held)
+			<-release
+			return ingest.Status{Available: true, Busy: true}
+		}
+		return ingest.Status{Available: true, Busy: false}
+	}
+
+	h, _, _ := newHandlers(t, svc)
+	h.broadcast = func(ev string, payload any) {
+		if st, ok := payload.(ingest.Status); ok {
+			record(fmt.Sprintf("broadcast:%s(busy=%v)", ev, st.Busy))
+			return
+		}
+		record("broadcast:" + ev)
+	}
+
+	hydrated := make(chan struct{})
+	go func() {
+		defer close(hydrated)
+		h.pushTo(&orderedEmitter{record: record}, "127.0.0.1")
+	}()
+	<-held
+
+	broadcast := make(chan struct{})
+	go func() {
+		defer close(broadcast)
+		h.broadcastStatus()
+	}()
+	// Give the competing broadcast every opportunity to overtake: without the
+	// shared critical section it snapshots and sends immediately, inverting
+	// the pair.
+	time.Sleep(50 * time.Millisecond)
+	close(release)
+
+	<-hydrated
+	<-broadcast
+
+	logMu.Lock()
+	got := append([]string(nil), events...)
+	logMu.Unlock()
+
+	want := []string{
+		"snapshot1",
+		"emit:pushIngestStatus(busy=true)",
+		"snapshot2",
+		"broadcast:pushIngestStatus(busy=false)",
+	}
+	if len(got) != len(want) {
+		t.Fatalf("event log = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("event log = %v, want %v", got, want)
+		}
+	}
 }
 
 // --- token parsing ---------------------------------------------------------
