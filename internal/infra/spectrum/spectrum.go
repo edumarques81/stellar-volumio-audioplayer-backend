@@ -479,21 +479,33 @@ func (s *Streamer) Process(left, right []float64) SpectrumData {
 	specL := fft.FFTReal(winL)
 	specR := fft.FFTReal(winR)
 
-	binsL, peakL := s.computeChannelBins(specL)
-	binsR, peakR := s.computeChannelBins(specR)
+	binsL := s.computeChannelBins(specL)
+	binsR := s.computeChannelBins(specR)
 
-	// RMS must reflect actual signal level, not spectral shape. Compute it
-	// in the time domain from the (normalised, un-windowed) PCM samples;
-	// the bin-derived RMS we used to return was always relative to the
-	// loudest bin and pegged ~0.4 regardless of input level.
+	// Both level figures must reflect actual signal level, not spectral
+	// shape, so both are taken in the time domain from the (normalised,
+	// un-windowed) PCM samples.
+	//
+	// The bin-derived RMS we used to return was always relative to the
+	// loudest bin and pegged ~0.4 regardless of input level. Peak had the
+	// same defect and outlived the RMS fix: it was the maximum of the
+	// already-normalised bins, so it was 1.0 for every non-silent frame.
 	rmsL := timeDomainRMS(left)
 	rmsR := timeDomainRMS(right)
+	peakL := timeDomainPeak(left)
+	peakR := timeDomainPeak(right)
 
 	// Transitional mono fallback for legacy consumers.
 	mono := make([]float64, s.cfg.NumBins)
 	for i := range mono {
 		mono[i] = (binsL[i] + binsR[i]) / 2.0
 	}
+	// max, deliberately, where Bins and RMS above take the average: a peak
+	// indicator that averaged the channels would under-report a transient
+	// present in only one of them, which is the entire thing it exists to
+	// catch. The asymmetry does mean mono Peak/RMS overstates the crest
+	// factor of hard-panned content — acceptable in a field that is already
+	// deprecated and unread.
 	monoPeak := peakL
 	if peakR > monoPeak {
 		monoPeak = peakR
@@ -516,11 +528,14 @@ func (s *Streamer) Process(left, right []float64) SpectrumData {
 }
 
 // computeChannelBins converts raw FFT complex output for a single channel
-// into logarithmically-grouped frequency bins normalised 0.0–1.0, and the
-// peak bin value. RMS is intentionally not returned here: a bin-normalised
-// RMS describes spectral shape, not signal level — compute RMS in the time
-// domain (see timeDomainRMS).
-func (s *Streamer) computeChannelBins(spectrum []complex128) (bins []float64, peak float64) {
+// into logarithmically-grouped frequency bins normalised 0.0–1.0.
+//
+// It returns bins and nothing else, deliberately. Neither level figure can
+// be derived here: normalising by the loudest bin discards absolute level,
+// so a bin-derived RMS describes spectral shape rather than loudness and a
+// bin-derived peak is the constant 1.0. Both come from the time domain —
+// see timeDomainRMS and timeDomainPeak.
+func (s *Streamer) computeChannelBins(spectrum []complex128) (bins []float64) {
 	bins = make([]float64, s.cfg.NumBins)
 
 	// Compute magnitude for each FFT bin (only first half — real input)
@@ -557,17 +572,14 @@ func (s *Streamer) computeChannelBins(spectrum []complex128) (bins []float64, pe
 		}
 	}
 
-	// Normalize bins to 0.0–1.0 and record the peak.
+	// Normalize bins to 0.0–1.0.
 	if maxMag > 0 {
 		for i := range bins {
 			bins[i] /= maxMag
-			if bins[i] > peak {
-				peak = bins[i]
-			}
 		}
 	}
 
-	return bins, peak
+	return bins
 }
 
 // timeDomainRMS returns the RMS of the [-1, 1]-normalised PCM samples.
@@ -582,4 +594,22 @@ func timeDomainRMS(samples []float64) float64 {
 		sumSq += x * x
 	}
 	return math.Sqrt(sumSq / float64(len(samples)))
+}
+
+// timeDomainPeak returns the largest absolute sample value in a window of
+// [-1, 1]-normalised PCM — the sample-peak level, in the same 0..1 linear
+// units as timeDomainRMS so the two are directly comparable (their ratio is
+// the crest factor).
+//
+// This is a window peak, not a peak-hold: it decays with the window rather
+// than latching, which is what a consumer wanting a peak indicator on top of
+// the VU needle should hold themselves.
+func timeDomainPeak(samples []float64) float64 {
+	var peak float64
+	for _, x := range samples {
+		if a := math.Abs(x); a > peak {
+			peak = a
+		}
+	}
+	return peak
 }

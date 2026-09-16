@@ -25,13 +25,21 @@ func (f *fakeEmitter) BroadcastToAll(event string, data interface{}) {
 	f.events = append(f.events, emittedEvent{event: event, data: data})
 }
 
+// synthFrameAmplitudeInt16 is the tone amplitude synthFrame emits, and
+// synthFrameAmplitude is the same value normalised to [-1, 1] — the
+// sample-peak a Process() call on a synthFrame tone must report.
+const (
+	synthFrameAmplitudeInt16 = 16000
+	synthFrameAmplitude      = synthFrameAmplitudeInt16 / 32768.0
+)
+
 // synthFrame builds a single FFTSize-sized stereo PCM buffer encoded as
 // 16-bit little-endian, interleaved L/R. fL and fR are tone frequencies in
 // Hz (use 0 for silence). The amplitudes are 50% of full-scale so the FFT
 // has comfortable headroom.
 func synthFrame(fftSize, sampleRate int, fL, fR float64) []byte {
 	buf := make([]byte, fftSize*4)
-	amp := int16(16000)
+	amp := int16(synthFrameAmplitudeInt16)
 	for i := 0; i < fftSize; i++ {
 		var l, r int16
 		if fL > 0 {
@@ -78,11 +86,21 @@ func TestProcessLeftOnlyHasLeftPeak(t *testing.T) {
 
 	data := s.Process(left, right)
 
-	if data.PeakL <= 0.5 {
-		t.Errorf("expected PeakL > 0.5 for left tone, got %.3f", data.PeakL)
+	// synthFrame's tone is int16 amplitude 16000, i.e. 16000/32768 ≈ 0.4883
+	// of full scale. Asserting the amplitude rather than a "non-trivial"
+	// floor is the point: the original `> 0.5` passed for years against a
+	// PeakL that was hardcoded 1.0 by a normalisation bug.
+	if math.Abs(data.PeakL-synthFrameAmplitude) > 0.01 {
+		t.Errorf("expected PeakL ≈ %.4f for left tone, got %.4f", synthFrameAmplitude, data.PeakL)
 	}
 	if data.PeakR >= 0.01 {
 		t.Errorf("expected PeakR < 0.01 for silent right, got %.3f", data.PeakR)
+	}
+	// The deprecated mono fallback takes max(L, R) where Bins and RMS take
+	// the average, so a hard-panned frame is what distinguishes them: max
+	// gives 0.4883 here, an average would give 0.2441.
+	if math.Abs(data.Peak-synthFrameAmplitude) > 0.01 {
+		t.Errorf("mono Peak = %.4f, want max(L,R) ≈ %.4f", data.Peak, synthFrameAmplitude)
 	}
 	if len(data.BinsL) != cfg.NumBins {
 		t.Fatalf("expected %d L bins, got %d", cfg.NumBins, len(data.BinsL))
@@ -114,8 +132,8 @@ func TestProcessRightOnlyHasRightPeak(t *testing.T) {
 
 	data := s.Process(left, right)
 
-	if data.PeakR <= 0.5 {
-		t.Errorf("expected PeakR > 0.5 for right tone, got %.3f", data.PeakR)
+	if math.Abs(data.PeakR-synthFrameAmplitude) > 0.01 {
+		t.Errorf("expected PeakR ≈ %.4f for right tone, got %.4f", synthFrameAmplitude, data.PeakR)
 	}
 	if data.PeakL >= 0.01 {
 		t.Errorf("expected PeakL < 0.01 for silent left, got %.3f", data.PeakL)
@@ -371,5 +389,100 @@ func TestBinsCoverTheAudibleRangeAtEveryRate(t *testing.T) {
 		if top(s) >= top(baseline) {
 			t.Errorf("%dHz spans %d bins, should be narrower than 44.1kHz's %d", rate, top(s), top(baseline))
 		}
+	}
+}
+
+// TestProcessPeakReflectsSignalLevel is the peak-side twin of
+// TestProcessRMSReflectsSignalLevel, and it exists because PeakL/PeakR had
+// exactly the bug that test was written to kill — one field later.
+//
+// computeChannelBins normalised every bin by the loudest bin and then took
+// the maximum of the *already normalised* values, so the answer was the
+// definition of 1.0 for any non-silent input. A 60-second capture off the
+// live Pi confirmed it: 938/938 frames reported peak == 1 with zero
+// variance, including frames whose RMS was -74 dBFS.
+//
+// The surviving tests did not catch it because they only ever asserted
+// "> 0.5" for a tone and "== 0" for silence, and a constant 1.0 satisfies
+// both. Pin the amplitude instead: a sine of amplitude A has a time-domain
+// peak of A, so peak must track A and must not equal 1.0 unless the signal
+// actually reaches full scale.
+func TestProcessPeakReflectsSignalLevel(t *testing.T) {
+	cfg := Config{SampleRate: 44100, FFTSize: 2048, NumBins: 64, FPS: 30}
+	s := New(cfg)
+
+	tests := []struct {
+		name string
+		amp  float64 // int16 amplitude of the left-channel tone
+	}{
+		{name: "half scale", amp: 16000},
+		{name: "quarter scale", amp: 8000},
+		{name: "near full scale", amp: 32000},
+		{name: "very quiet", amp: 300},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			pcm := make([]byte, cfg.FFTSize*4)
+			for i := 0; i < cfg.FFTSize; i++ {
+				l := int16(tt.amp * math.Sin(2*math.Pi*1000.0*float64(i)/float64(cfg.SampleRate)))
+				binary.LittleEndian.PutUint16(pcm[i*4:i*4+2], uint16(l))
+			}
+			left, right := decodeStereo(pcm, cfg.FFTSize)
+			data := s.Process(left, right)
+
+			// 2048 samples at 44.1 kHz is ~46 tone periods, so the sampled
+			// maximum lands within a hair of the true amplitude.
+			// Relative, not absolute: at amp 300 the expected peak is 0.0092,
+			// so a flat 0.01 tolerance would be wider than the value itself
+			// and a regression returning 0 would pass this row. The error
+			// here is a constant 1 LSB (1/32768) from int16 truncation, so
+			// 2% plus a floor leaves several times the needed headroom at
+			// every level in the table.
+			want := tt.amp / 32768.0
+			if math.Abs(data.PeakL-want) > want*0.02+1e-4 {
+				t.Errorf("PeakL = %.4f, want ≈ %.4f for amplitude %.0f", data.PeakL, want, tt.amp)
+			}
+			if data.PeakR != 0 {
+				t.Errorf("PeakR = %.4f, want 0 for a silent right channel", data.PeakR)
+			}
+			// A sine's crest factor is sqrt(2): peak must sit above RMS but
+			// nowhere near the old constant 1.0 for a quiet signal.
+			if data.PeakL <= data.RMSL {
+				t.Errorf("PeakL %.4f must exceed RMSL %.4f for a sine", data.PeakL, data.RMSL)
+			}
+		})
+	}
+}
+
+// TestProcessPeakIsNotPeggedAtOne is the single assertion that would have
+// caught the shipped bug on its own: two inputs 30 dB apart must not report
+// the same peak.
+func TestProcessPeakIsNotPeggedAtOne(t *testing.T) {
+	cfg := Config{SampleRate: 44100, FFTSize: 2048, NumBins: 64, FPS: 30}
+	s := New(cfg)
+
+	loudPCM := synthFrame(cfg.FFTSize, cfg.SampleRate, 1000.0, 1000.0)
+	loudL, loudR := decodeStereo(loudPCM, cfg.FFTSize)
+	loud := s.Process(loudL, loudR)
+
+	quietPCM := make([]byte, cfg.FFTSize*4)
+	for i := 0; i < cfg.FFTSize; i++ {
+		v := int16(500.0 * math.Sin(2*math.Pi*1000.0*float64(i)/float64(cfg.SampleRate)))
+		binary.LittleEndian.PutUint16(quietPCM[i*4:i*4+2], uint16(v))
+		binary.LittleEndian.PutUint16(quietPCM[i*4+2:i*4+4], uint16(v))
+	}
+	quietL, quietR := decodeStereo(quietPCM, cfg.FFTSize)
+	quiet := s.Process(quietL, quietR)
+
+	if loud.PeakL <= quiet.PeakL {
+		t.Errorf("loud PeakL %.4f must exceed quiet PeakL %.4f", loud.PeakL, quiet.PeakL)
+	}
+	if quiet.PeakL >= 0.1 {
+		t.Errorf("quiet PeakL = %.4f, want well under 0.1 (a ~-36 dBFS tone)", quiet.PeakL)
+	}
+	// The deprecated mono fallback is max(L, R) and must track too.
+	if quiet.Peak >= 0.1 {
+		t.Errorf("quiet mono Peak = %.4f, want well under 0.1", quiet.Peak)
 	}
 }
