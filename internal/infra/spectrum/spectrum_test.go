@@ -509,7 +509,7 @@ func TestFrameGateDeliversTheConfiguredRate(t *testing.T) {
 		{name: "44.1 kHz, window does not divide the interval", sampleRate: 44100, fftSize: 2048, fps: 20, wantFPS: 20},
 		{name: "96 kHz", sampleRate: 96000, fftSize: 2048, fps: 20, wantFPS: 20},
 		{name: "192 kHz", sampleRate: 192000, fftSize: 2048, fps: 20, wantFPS: 20},
-		{name: "48 kHz, window divides the interval exactly", sampleRate: 40960, fftSize: 2048, fps: 20, wantFPS: 20},
+		{name: "window divides the interval exactly (40960 Hz)", sampleRate: 40960, fftSize: 2048, fps: 20, wantFPS: 20},
 		// Windows arriving slower than FPS cannot be conjured: the ceiling is
 		// the window rate itself, and every window must be emitted.
 		{name: "window slower than FPS emits every window", sampleRate: 44100, fftSize: 16384, fps: 20, wantFPS: 44100.0 / 16384.0},
@@ -569,5 +569,91 @@ func TestFrameGateDoesNotBankAStall(t *testing.T) {
 	}
 	if burst > 1 {
 		t.Errorf("stall banked %d extra immediate frames, want at most 1", burst)
+	}
+}
+
+// TestStreamEmitsAtTheConfiguredRate pins the wiring, not the gate.
+//
+// frameGate's own arithmetic is covered by the table above, but the two lines
+// that feed it in streamFromFIFO are not, and they are the lines most likely
+// to be "tidied" wrong later. Measuring the gap from the previous EMIT instead
+// of the previous WINDOW looks equivalent and is not: the gate meters emitted
+// time against arrived time, so it has to see every window, including the ones
+// it discards. With that one line moved, a 512-sample window at 44.1 kHz
+// delivers 23.6 fps against a configured 10 — and deleting the gate call
+// outright delivers 86.
+func TestStreamEmitsAtTheConfiguredRate(t *testing.T) {
+	const (
+		sampleRate = 44100
+		fftSize    = 512 // 11.6 ms per window, ~86 windows/s
+		fps        = 10
+		duration   = 5 * time.Second
+	)
+
+	path := makeFIFO(t)
+	em := &safeEmitter{}
+	s := New(Config{
+		FIFOPath: path, SampleRate: sampleRate, FFTSize: fftSize,
+		NumBins: 8, FPS: fps,
+	})
+	s.Start(context.Background(), em)
+	defer s.Stop()
+
+	w := openWriter(t, path)
+
+	// Feed real-time 44.1 kHz stereo S16 in 10 ms slices, so windows arrive at
+	// the rate they would from MPD rather than as fast as the pipe accepts.
+	const sliceFrames = sampleRate / 100
+	slice := make([]byte, sliceFrames*4)
+	for i := range slice {
+		slice[i] = byte(i * 7) // non-silent; the gate must not care about level
+	}
+
+	// One paced loop, with the first second thrown away: the reader has to
+	// attach to the FIFO and the gate's first-window fast path fires once, and
+	// neither belongs in a steady-state rate.
+	const warmup = time.Second
+	var (
+		before  int
+		start   time.Time
+		elapsed time.Duration
+	)
+	begin := time.Now()
+	for {
+		since := time.Since(begin)
+		if since >= warmup && start.IsZero() {
+			em.mu.Lock()
+			before = len(em.frames)
+			em.mu.Unlock()
+			start = time.Now()
+		}
+		if !start.IsZero() && time.Since(start) >= duration {
+			elapsed = time.Since(start)
+			break
+		}
+		if _, err := w.Write(slice); err != nil && !errors.Is(err, syscall.EAGAIN) {
+			t.Fatalf("write to FIFO: %v", err)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	if before == 0 {
+		t.Fatal("no frame emitted during warm-up — the reader never started")
+	}
+
+	em.mu.Lock()
+	got := len(em.frames) - before
+	em.mu.Unlock()
+
+	rate := float64(got) / elapsed.Seconds()
+	const lo, hi = 8.0, 13.0
+	if rate < lo || rate > hi {
+		t.Errorf(
+			"emitted %.2f fps over %s (%d frames), want %g..%g for FPS=%d — "+
+				"~%0.1f means the gate is measuring from the last emit instead of "+
+				"the last window, ~%0.0f means it is not gating at all",
+			rate, elapsed.Round(time.Millisecond), got, lo, hi, fps,
+			23.6, float64(sampleRate)/fftSize,
+		)
 	}
 }

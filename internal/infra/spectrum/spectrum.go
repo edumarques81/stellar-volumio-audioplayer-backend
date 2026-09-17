@@ -213,9 +213,13 @@ func (s *Streamer) Stop() {
 	}
 }
 
-// frameInterval is the shortest gap between two emitted spectrum frames.
+// frameInterval is the average gap between two emitted spectrum frames.
 //
-// It caps how often a frame is broadcast; it does NOT gate how often the FIFO
+// Average, not floor: frameGate owes at most one frame after a stall and pays
+// it on the next window, so two frames can land back to back. What it
+// guarantees is the long-run rate.
+//
+// It paces how often a frame is broadcast; it does NOT gate how often the FIFO
 // is read. streamFromFIFO drains a window every iteration and applies this by
 // discarding windows, so the pipe is drained at whatever rate MPD writes it
 // even when FPS is low. Gating the *read* on a fixed cadence is what caused
@@ -236,9 +240,16 @@ func (cfg Config) frameInterval() time.Duration {
 // ceil(interval/window) windows per frame, and a rate that moved with the
 // source sample rate.
 //
-// Letting each window deposit the time it represents and each emit spend one
-// interval makes the average rate exactly FPS however the two periods divide,
-// at the cost of at most one window of jitter in the spacing.
+// Letting each window deposit the time that has actually passed since the
+// previous window, and each emit spend one interval, makes the average rate
+// exactly FPS however the two periods divide, at the cost of at most one
+// window of jitter in the spacing.
+//
+// Deposit wall-clock arrival gaps, NOT the window's nominal FFTSize/sampleRate
+// duration. The two agree in steady state and diverge exactly where it
+// matters: when the FIFO has backed up and drains in a burst, the real gaps
+// are ~0, so the gate emits none of that stale audio, whereas nominal time
+// would emit in proportion to the backlog.
 type frameGate struct {
 	interval time.Duration
 	credit   time.Duration
@@ -458,7 +469,7 @@ func (s *Streamer) streamFromFIFO(ctx context.Context, pipe *os.File, emitter So
 		}
 
 		if frames == 0 {
-			log.Printf("[Spectrum] FIFO %s streaming, emitting at up to %d fps", s.cfg.FIFOPath, s.cfg.FPS)
+			log.Printf("[Spectrum] FIFO %s streaming, emitting at %d fps", s.cfg.FIFOPath, s.cfg.FPS)
 		}
 
 		// The window is already out of the pipe, so the rate can be measured

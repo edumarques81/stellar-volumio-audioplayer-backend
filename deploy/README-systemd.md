@@ -34,6 +34,18 @@ STELLAR_POWER_TRUSTED_REMOTES=192.168.1.0/24
 # iPhone remote. Set to the LAN subnet rather than the phone's address:
 # the phone is on DHCP and a pinned IP breaks on the next lease.
 STELLAR_INGEST_TRUSTED_REMOTES=192.168.1.0/24
+
+# Optional. VU meter / spectrum broadcast rate, frames per second.
+# Default 20. Omit it unless the meter is costing more than it is worth:
+# it is the one knob that dials back a load the kiosk and the backend
+# carry while audio is playing, without a rebuild. Measured on the Pi,
+# 20 fps costs ~1.1 pp of one core in the backend over 10.8, and 6 fps
+# costs ~2 pp less again. The audio path is unaffected at any of these
+# (verified by hw_ptr drift and avail_max at 44.1 and 192 kHz) — the
+# needle is a nicety, bit-perfect playback is not, so this exists to be
+# turned down if that ever stops being true. A value that is not a
+# positive integer is logged and ignored.
+#STELLAR_SPECTRUM_FPS=20
 ```
 
 ### Keys that MUST be absent or blank on a Pi-resident deployment
