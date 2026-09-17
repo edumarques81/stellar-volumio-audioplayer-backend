@@ -224,6 +224,54 @@ func (cfg Config) frameInterval() time.Duration {
 	return time.Duration(float64(time.Second) / float64(cfg.FPS))
 }
 
+// frameGate decides which arriving windows become emitted frames.
+//
+// It is a token bucket in elapsed time, not a "has interval elapsed since the
+// last emit?" test, and the difference is not cosmetic. Frames only exist on
+// window boundaries, so the naive test can only ever round UP to a whole
+// number of windows: at 44.1 kHz the window is 46.4 ms against a 50 ms
+// interval, 46.4 < 50, so it waits for two and delivers 10.8 fps against a
+// configured 20. Measured on the Pi before this changed: 17159 frames in
+// 1593 s = 10.77/s, and 15.6 fps on 96 kHz material — exactly
+// ceil(interval/window) windows per frame, and a rate that moved with the
+// source sample rate.
+//
+// Letting each window deposit the time it represents and each emit spend one
+// interval makes the average rate exactly FPS however the two periods divide,
+// at the cost of at most one window of jitter in the spacing.
+type frameGate struct {
+	interval time.Duration
+	credit   time.Duration
+	started  bool
+}
+
+func newFrameGate(interval time.Duration) *frameGate {
+	return &frameGate{interval: interval}
+}
+
+// allow reports whether the window that just arrived should be emitted.
+// elapsed is the time since the previous window.
+func (g *frameGate) allow(elapsed time.Duration) bool {
+	if !g.started {
+		// Emit immediately rather than leaving the meter dark for a whole
+		// interval at the start of a stream.
+		g.started = true
+		return true
+	}
+	g.credit += elapsed
+	if g.credit < g.interval {
+		return false
+	}
+	g.credit -= g.interval
+	// A stall must not bank time and then burst: a 10 s gap is 200 intervals
+	// of credit, and spending it would dump 200 frames at the clients back to
+	// back. Owe at most one frame.
+	if g.credit > g.interval {
+		g.credit = g.interval
+	}
+	return true
+}
+
 // rateEstimator recovers the FIFO's actual sample rate from how fast windows
 // arrive, so the analyser does not have to be told when MPD's output format
 // changes. It matters because the FIFO may carry the source rate rather than a
@@ -366,7 +414,8 @@ func (s *Streamer) streamFromFIFO(ctx context.Context, pipe *os.File, emitter So
 	// including when the FIFO carries the source rate rather than a fixed one.
 	// ReadFull blocks until a full window has arrived, so the data itself is
 	// the clock and the loop can never spin.
-	var lastEmit time.Time
+	gate := newFrameGate(frameInterval)
+	lastWindow := time.Now()
 	rate := newRateEstimator(s.cfg.SampleRate)
 
 	frames := 0
@@ -420,10 +469,16 @@ func (s *Streamer) streamFromFIFO(ctx context.Context, pipe *os.File, emitter So
 
 		// Frame-rate limiting happens here, after the read, so skipping a
 		// frame costs a discarded window and never a byte left in the pipe.
-		if !lastEmit.IsZero() && time.Since(lastEmit) < frameInterval {
+		//
+		// Measure the gap from the previous WINDOW, not the previous emit:
+		// the gate meters out emitted time against arrived time, so it needs
+		// every window's arrival, including the ones it discards.
+		now := time.Now()
+		elapsed := now.Sub(lastWindow)
+		lastWindow = now
+		if !gate.allow(elapsed) {
 			continue
 		}
-		lastEmit = time.Now()
 
 		// Split 16-bit stereo PCM into normalised L/R float channels.
 		numFrames := n / bytesPerFrame

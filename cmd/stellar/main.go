@@ -357,7 +357,11 @@ func main() {
 			SampleRate: 44100,
 			FFTSize:    2048,
 			NumBins:    64,
-			FPS:        20, // CAVA reference rate; was 30 pre-M1.B
+			// CAVA reference rate; was 30 pre-M1.B. Overridable so the
+			// emit rate can be dialled back without a rebuild if it ever
+			// costs the kiosk or the audio path more than it is worth —
+			// the needle is a nicety, bit-perfect playback is not.
+			FPS: envIntOr("STELLAR_SPECTRUM_FPS", 20),
 		})
 		spectrumStreamer.Start(ctx, &socketIOEmitter{server: socketServer})
 		defer spectrumStreamer.Stop()
@@ -845,6 +849,25 @@ func envOr(key, fallback string) string {
 		return v
 	}
 	return fallback
+}
+
+// envIntOr returns the environment variable parsed as a positive int, or
+// fallback when it is unset, empty, unparseable, or not positive. A bad value
+// is logged and ignored rather than fatal: this only tunes the VU meter's
+// refresh rate, and refusing to boot the whole appliance over a typo in an
+// optional knob would be the worse failure.
+func envIntOr(key string, fallback int) int {
+	raw := os.Getenv(key)
+	if raw == "" {
+		return fallback
+	}
+	n, err := strconv.Atoi(strings.TrimSpace(raw))
+	if err != nil || n <= 0 {
+		log.Warn().Str("key", key).Str("value", raw).Int("using", fallback).
+			Msg("Ignoring unusable integer env var")
+		return fallback
+	}
+	return n
 }
 
 // attrsToMaps converts gompd Attrs slice to map slice.

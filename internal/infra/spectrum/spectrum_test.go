@@ -486,3 +486,88 @@ func TestProcessPeakIsNotPeggedAtOne(t *testing.T) {
 		t.Errorf("quiet mono Peak = %.4f, want well under 0.1", quiet.Peak)
 	}
 }
+
+// --- emit rate ------------------------------------------------------------
+//
+// Frames only exist on window boundaries, so a limiter that asks "has a full
+// frameInterval elapsed since the last emit?" can only ever round UP to a
+// whole number of windows. At 44.1 kHz the window is 46.4 ms against a 50 ms
+// interval, so it waits for two — 10.8 fps against a configured 20. Measured
+// on the Pi: 17159 frames in 1593 s = 10.77/s, and 15.6 fps on 96 kHz
+// material, both exactly ceil(interval/window) windows per frame.
+//
+// The gate must instead deliver FPS on average whatever the two periods are.
+
+func TestFrameGateDeliversTheConfiguredRate(t *testing.T) {
+	tests := []struct {
+		name       string
+		sampleRate int
+		fftSize    int
+		fps        int
+		wantFPS    float64
+	}{
+		{name: "44.1 kHz, window does not divide the interval", sampleRate: 44100, fftSize: 2048, fps: 20, wantFPS: 20},
+		{name: "96 kHz", sampleRate: 96000, fftSize: 2048, fps: 20, wantFPS: 20},
+		{name: "192 kHz", sampleRate: 192000, fftSize: 2048, fps: 20, wantFPS: 20},
+		{name: "48 kHz, window divides the interval exactly", sampleRate: 40960, fftSize: 2048, fps: 20, wantFPS: 20},
+		// Windows arriving slower than FPS cannot be conjured: the ceiling is
+		// the window rate itself, and every window must be emitted.
+		{name: "window slower than FPS emits every window", sampleRate: 44100, fftSize: 16384, fps: 20, wantFPS: 44100.0 / 16384.0},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := Config{SampleRate: tt.sampleRate, FFTSize: tt.fftSize, NumBins: 64, FPS: tt.fps}
+			window := time.Duration(float64(time.Second) * float64(tt.fftSize) / float64(tt.sampleRate))
+			g := newFrameGate(cfg.frameInterval())
+
+			const simulated = 60 * time.Second
+			windows := int(simulated / window)
+			emitted := 0
+			for i := 0; i < windows; i++ {
+				if g.allow(window) {
+					emitted++
+				}
+			}
+
+			got := float64(emitted) / simulated.Seconds()
+			if math.Abs(got-tt.wantFPS) > tt.wantFPS*0.02 {
+				t.Errorf("emit rate %.2f fps, want %.2f (window %.2f ms, interval %.2f ms)",
+					got, tt.wantFPS, float64(window.Microseconds())/1000, float64(cfg.frameInterval().Microseconds())/1000)
+			}
+		})
+	}
+}
+
+// TestFrameGateEmitsTheFirstWindowImmediately keeps the meter from being dark
+// for a whole frame interval at the start of a stream.
+func TestFrameGateEmitsTheFirstWindowImmediately(t *testing.T) {
+	g := newFrameGate(50 * time.Millisecond)
+	if !g.allow(0) {
+		t.Fatal("first window must be emitted immediately")
+	}
+}
+
+// TestFrameGateDoesNotBankAStall pins the one thing a naive credit counter
+// gets wrong: after a long silence the accumulated credit must not buy a
+// burst of back-to-back frames.
+func TestFrameGateDoesNotBankAStall(t *testing.T) {
+	interval := 50 * time.Millisecond
+	g := newFrameGate(interval)
+	g.allow(0) // prime
+
+	if !g.allow(10 * time.Second) {
+		t.Fatal("the window after a stall should emit")
+	}
+	// A 10s stall is 200 intervals of credit. At most one more frame may be
+	// owed; anything beyond that is a burst.
+	burst := 0
+	for i := 0; i < 20; i++ {
+		if g.allow(0) {
+			burst++
+		}
+	}
+	if burst > 1 {
+		t.Errorf("stall banked %d extra immediate frames, want at most 1", burst)
+	}
+}
