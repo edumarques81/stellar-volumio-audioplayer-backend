@@ -88,6 +88,61 @@ process-wide handler: we are a guest inside mpd. A blocked `SIGPIPE` with defaul
 disposition simply goes pending and never fires, while `write()` still returns `EPIPE`
 so the reopen path works. The pending bit is drained after each `EPIPE`.
 
+### Every drop must be a whole frame — the frozen-needle bug
+
+The FIFO is a bare byte stream with no framing, and the backend never re-syncs: it reads
+2048-frame windows forever from wherever it happens to be. So **losing a number of bytes
+that is not a multiple of 4 shifts every subsequent sample permanently.** Each `int16`
+the backend then decodes straddles two real samples — the low byte of one paired with the
+high byte of the next. The low byte of PCM is essentially uncorrelated, so the decoded
+signal is uniform full-scale noise with RMS exactly `1/sqrt(3) = 0.5774`, dead constant
+regardless of what is playing. After the meter's +8 dB calibration that sits at +3.2 VU,
+past the +2 end stop, so **both needles clamp at maximum and stop moving** until the FIFO
+is reopened.
+
+That is the signature to look for. A needle that is stuck near 0 VU with
+`rmsL ≈ rmsR ≈ 0.577` and a standard deviation under 0.01 is this, not a loud master:
+
+```bash
+# on the Pi, against the live kiosk — mean ≈ 0.577 with ~zero spread means misaligned
+python3 /tmp/cdp_vu_stats30.py
+```
+
+Observed 2026-09-17: locked at 0.5771 mean for 22 minutes, from one FIFO reopen to the
+next, while ordinary 44.1 kHz WAVs played normally.
+
+The writer had three unquantised drop sites, all fed by `want = (unsigned int)credit` —
+an arbitrary byte count derived from elapsed wall time, so almost never a multiple of 4:
+
+1. **Consume-then-fail-to-open.** `ring_get()` advanced the tail *before* the `fd < 0`
+   check, so every failed `open()` destroyed the bytes it had just taken. This is the one
+   that fired: the reader-absent window after a reopen is exactly when `open()` fails
+   repeatedly. Fixed by opening **before** consuming.
+2. **`EAGAIN`.** The chunk was already out of the ring and was simply abandoned. Fixed by
+   quantising `want` down to a multiple of `FRAME_BYTES`, so a whole-chunk drop stays
+   aligned.
+3. **Short write.** Legal on a non-blocking pipe for `n > PIPE_BUF`; the return value was
+   never compared to `n`, so the tail vanished. Fixed by looping until the chunk is
+   written and permitting a drop **only on a frame boundary** — if a partial write lands
+   mid-frame the writer is committed to finishing those 1–3 bytes. If the reader stays
+   wedged for 50 ms mid-frame, the fd is closed instead, which is the only other aligned
+   exit: the backend sees EOF and reopens on a fresh stream.
+
+`ring_put()`'s overflow drop was always safe — it discards whole staged windows, which are
+multiples of 4 by construction.
+
+Measured by forcing the trigger (`systemctl restart stellar-backend`, which closes the
+read end) and sampling `pushSpectrum`:
+
+| Plugin | Reopens | Misaligned |
+|---|---|---|
+| before | 6 | **2** |
+| after | 12 | **0** |
+
+**When changing the writer, the invariant to preserve is: the running total of bytes
+handed to `write()` is a multiple of `FRAME_BYTES` at every point where bytes may be
+discarded.** Pacing, buffering and back-pressure are all negotiable; that is not.
+
 ### Metering
 
 | Slave format | Handling |

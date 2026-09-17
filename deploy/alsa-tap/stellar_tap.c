@@ -60,6 +60,23 @@
  * ~85 ms at 192 kHz — far more than the writer thread's 5 ms poll needs. */
 #define RING_BYTES     (64u * 1024u)
 
+/* One output frame: interleaved stereo S16. Every byte count that can be
+ * DROPPED must be a multiple of this.
+ *
+ * The FIFO is a byte stream with no framing, and the backend never re-syncs —
+ * it just reads 2048-frame windows forever. So losing a number of bytes that
+ * is not a multiple of 4 shifts every subsequent sample permanently: each
+ * int16 the backend decodes then straddles two real samples, pairing a low
+ * byte with the next sample's high byte. The low byte of PCM is essentially
+ * uncorrelated, so the result is uniform full-scale noise with RMS 1/sqrt(3)
+ * = 0.5774 — dead constant, regardless of the music. After the meter's +8 dB
+ * calibration that lands at +3.2 VU, past the +2 end stop, so BOTH needles
+ * clamp at maximum and stop moving until the FIFO is reopened.
+ *
+ * Observed live on 2026-09-17: pinned at 0.5771 mean for 22 minutes straight,
+ * from one FIFO reopen to the next, while the music played normally. */
+#define FRAME_BYTES    4u
+
 /* The backend infers the stream rate from how fast windows arrive, so PCM is
  * forwarded at its native rate. DSD is decimated to land near this. */
 #define DSD_TARGET_RATE 44100u
@@ -196,9 +213,34 @@ static void *writer_main(void *arg)
 			continue;
 		}
 
+		/* Open BEFORE consuming. ring_get() advances the tail, so taking
+		 * bytes out and only then discovering that no reader is attached
+		 * destroys them — and the amount destroyed was an arbitrary
+		 * `credit`-derived count, so it shifted the stream by 1-3 bytes.
+		 * That is the reopen-triggered failure FRAME_BYTES describes: the
+		 * 10 s window where the backend is not reading is precisely when
+		 * this loop spins on a failing open. */
+		if (fd < 0) {
+			/* O_NONBLOCK: returns ENXIO rather than blocking when the
+			 * backend is not reading yet. */
+			fd = open(tap->fifo_path, O_WRONLY | O_NONBLOCK);
+			if (fd < 0) {
+				/* No reader. Leave the ring alone and do not bank
+				 * the idle time. */
+				credit = 0.0;
+				usleep(5000);
+				continue;
+			}
+		}
+
 		unsigned int want = (unsigned int)credit;
 		if (want > sizeof(buf))
 			want = sizeof(buf);
+		want -= want % FRAME_BYTES; /* whole frames only, so a drop stays aligned */
+		if (want == 0) {
+			usleep(2000);
+			continue;
+		}
 		unsigned int n = ring_get(tap, buf, want);
 		if (n == 0) {
 			/* nothing staged — do not bank the idle time */
@@ -207,15 +249,37 @@ static void *writer_main(void *arg)
 			continue;
 		}
 		credit -= (double)n;
-		if (fd < 0) {
-			/* O_NONBLOCK: returns ENXIO rather than blocking when the
-			 * backend is not reading yet. */
-			fd = open(tap->fifo_path, O_WRONLY | O_NONBLOCK);
-			if (fd < 0)
-				continue; /* drop until a reader shows up */
-		}
-		ssize_t w = write(fd, buf, n);
-		if (w < 0 && errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR) {
+
+		/* Write it all, or drop what is left — but only ever drop on a
+		 * frame boundary. A short write is legal on a non-blocking pipe
+		 * for n > PIPE_BUF, and abandoning its tail was the second way to
+		 * shift the stream. If a partial write lands mid-frame we are
+		 * committed: finish those 1-3 bytes before any drop is allowed. */
+		unsigned int off = 0;
+		int stalls = 0;
+		while (off < n) {
+			ssize_t w = write(fd, buf + off, n - off);
+			if (w > 0) {
+				off += (unsigned int)w;
+				stalls = 0;
+				continue;
+			}
+			if (w < 0 && errno == EINTR)
+				continue;
+			if (w < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+				if (off % FRAME_BYTES == 0)
+					break; /* pipe full — drop the rest, still aligned */
+				if (++stalls > 50) {
+					/* Reader is wedged mid-frame. Closing is the
+					 * only aligned exit: the backend sees EOF and
+					 * reopens on a fresh stream. */
+					close(fd);
+					fd = -1;
+					break;
+				}
+				usleep(1000);
+				continue;
+			}
 			if (errno == EPIPE) {
 				/* consume the SIGPIPE we just made pending on this thread */
 				struct timespec zero = { 0, 0 };
@@ -223,6 +287,7 @@ static void *writer_main(void *arg)
 			}
 			close(fd);
 			fd = -1;
+			break;
 		}
 	}
 	if (fd >= 0)
