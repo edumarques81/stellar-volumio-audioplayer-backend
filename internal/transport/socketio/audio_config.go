@@ -66,6 +66,10 @@ type ApplyBitPerfectResponse struct {
 	Errors  []string `json:"errors"`  // Any errors encountered
 }
 
+// deviceKeyRe matches the `device` setting key, without also matching a longer
+// key that merely starts with it.
+var deviceKeyRe = regexp.MustCompile(`^device[ \t]`)
+
 // GetPlaybackOptions returns available audio output devices.
 func GetPlaybackOptions() PlaybackOptionsResponse {
 	response := PlaybackOptionsResponse{
@@ -161,7 +165,7 @@ func GetPlaybackOptions() PlaybackOptionsResponse {
 
 // GetCurrentAudioOutput reads the current audio output device from MPD config.
 func GetCurrentAudioOutput() string {
-	data, err := os.ReadFile("/etc/mpd.conf")
+	data, err := os.ReadFile(mpdConfigPath)
 	if err != nil {
 		log.Warn().Err(err).Msg("Failed to read MPD config for audio output")
 		return ""
@@ -235,12 +239,18 @@ func getCardNameByNumber(cardNum string) string {
 
 // SetPlaybackSettings changes the audio output device in MPD config.
 func SetPlaybackSettings(deviceName string) error {
+	// Resolved before the lock: getCardNumberByName shells out to `aplay -l`,
+	// and a slow or wedged aplay must not block every other config path.
 	cardNum := getCardNumberByName(deviceName)
 	if cardNum == "" {
 		return exec.ErrNotFound
 	}
 
-	data, err := os.ReadFile("/etc/mpd.conf")
+	// Serialised against every other rewrite of this file; see mpdConfigMu.
+	mpdConfigMu.Lock()
+	defer mpdConfigMu.Unlock()
+
+	data, err := os.ReadFile(mpdConfigPath)
 	if err != nil {
 		return err
 	}
@@ -248,38 +258,38 @@ func SetPlaybackSettings(deviceName string) error {
 	content := string(data)
 	newDevice := `"hw:` + cardNum + `,0"`
 
+	// Scoped with the same block finder the DSD helpers use. The previous
+	// `strings.HasPrefix(trimmed, "audio_output")` also matched the top-level
+	// `audio_output_format` directive, which flipped block tracking on outside
+	// any block and put the next `device` line it met at risk.
 	lines := strings.Split(content, "\n")
-	var newLines []string
-	inAudioOutput := false
+	open, closeIdx, ok := findAudioOutputBlock(lines)
+	if !ok {
+		return exec.ErrNotFound
+	}
+
 	foundDevice := false
-
-	for _, line := range lines {
-		trimmed := strings.TrimSpace(line)
-
-		if !strings.HasPrefix(trimmed, "#") {
-			if strings.HasPrefix(trimmed, "audio_output") {
-				inAudioOutput = true
-			} else if inAudioOutput && trimmed == "}" {
-				inAudioOutput = false
-			} else if inAudioOutput && strings.HasPrefix(trimmed, "device") {
-				line = `    device      ` + newDevice
-				foundDevice = true
-			}
+	for i := open + 1; i < closeIdx; i++ {
+		bare, cr := splitCR(lines[i])
+		trimmed := strings.TrimSpace(bare)
+		if strings.HasPrefix(trimmed, "#") || !deviceKeyRe.MatchString(trimmed) {
+			continue
 		}
-		newLines = append(newLines, line)
+		lines[i] = `    device      ` + newDevice + cr
+		foundDevice = true
+		break
 	}
 
 	if !foundDevice {
 		return exec.ErrNotFound
 	}
 
-	newContent := strings.Join(newLines, "\n")
+	newContent := strings.Join(lines, "\n")
 	if err := writeMPDConfig(newContent); err != nil {
 		return err
 	}
 
-	cmd := exec.Command("sudo", "systemctl", "restart", "mpd")
-	if err := cmd.Run(); err != nil {
+	if err := restartMPD(); err != nil {
 		log.Error().Err(err).Msg("Failed to restart MPD after changing audio output")
 		return err
 	}
@@ -311,7 +321,7 @@ func getCardNumberByName(cardName string) string {
 // GetBitPerfectStatus checks bit-perfect audio configuration natively in Go.
 func GetBitPerfectStatus() BitPerfectStatus {
 	mpdConfig := ""
-	if data, err := os.ReadFile("/etc/mpd.conf"); err == nil {
+	if data, err := os.ReadFile(mpdConfigPath); err == nil {
 		mpdConfig = string(data)
 	} else {
 		log.Warn().Err(err).Msg("Failed to read MPD config")
@@ -479,100 +489,6 @@ func NormalizeBitPerfectStatus(status BitPerfectStatus) BitPerfectStatus {
 	return status
 }
 
-// writeMPDConfig writes the MPD config file using sudo to handle permissions.
-func writeMPDConfig(content string) error {
-	cmd := exec.Command("sudo", "tee", "/etc/mpd.conf")
-	cmd.Stdin = strings.NewReader(content)
-	cmd.Stdout = nil
-	if err := cmd.Run(); err != nil {
-		return err
-	}
-	return nil
-}
-
-// GetDsdMode returns the current DSD playback mode from MPD config.
-func GetDsdMode() DsdModeResponse {
-	response := DsdModeResponse{
-		Mode:    "native",
-		Success: true,
-	}
-
-	data, err := os.ReadFile("/etc/mpd.conf")
-	if err != nil {
-		log.Error().Err(err).Msg("Failed to read MPD config")
-		response.Error = "Failed to read MPD config"
-		response.Success = false
-		return response
-	}
-
-	content := string(data)
-	if strings.Contains(content, `dop`) {
-		if strings.Contains(content, `dop             "yes"`) || strings.Contains(content, `dop "yes"`) {
-			response.Mode = "dop"
-		}
-	}
-
-	return response
-}
-
-// SetDsdMode sets the DSD playback mode in MPD config and restarts MPD.
-func SetDsdMode(mode string) DsdModeResponse {
-	response := DsdModeResponse{
-		Mode:    mode,
-		Success: false,
-	}
-
-	if mode != "native" && mode != "dop" {
-		response.Error = "Invalid mode. Must be 'native' or 'dop'"
-		return response
-	}
-
-	data, err := os.ReadFile("/etc/mpd.conf")
-	if err != nil {
-		log.Error().Err(err).Msg("Failed to read MPD config")
-		response.Error = "Failed to read MPD config"
-		return response
-	}
-
-	content := string(data)
-	var newContent string
-
-	dopValue := "no"
-	if mode == "dop" {
-		dopValue = "yes"
-	}
-
-	if strings.Contains(content, `dop             "yes"`) {
-		newContent = strings.Replace(content, `dop             "yes"`, `dop             "`+dopValue+`"`, 1)
-	} else if strings.Contains(content, `dop             "no"`) {
-		newContent = strings.Replace(content, `dop             "no"`, `dop             "`+dopValue+`"`, 1)
-	} else if strings.Contains(content, `dop "yes"`) {
-		newContent = strings.Replace(content, `dop "yes"`, `dop "`+dopValue+`"`, 1)
-	} else if strings.Contains(content, `dop "no"`) {
-		newContent = strings.Replace(content, `dop "no"`, `dop "`+dopValue+`"`, 1)
-	} else {
-		response.Error = "Could not find dop setting in MPD config"
-		return response
-	}
-
-	if err := writeMPDConfig(newContent); err != nil {
-		log.Error().Err(err).Msg("Failed to write MPD config")
-		response.Error = "Failed to write MPD config: " + err.Error()
-		return response
-	}
-
-	cmd := exec.Command("sudo", "systemctl", "restart", "mpd")
-	if err := cmd.Run(); err != nil {
-		log.Error().Err(err).Msg("Failed to restart MPD")
-		response.Error = "Config updated but failed to restart MPD: " + err.Error()
-		return response
-	}
-
-	log.Info().Str("mode", mode).Msg("DSD mode changed successfully")
-	response.Success = true
-	return response
-}
-
 // GetMixerMode returns whether software mixer is enabled.
 func GetMixerMode() MixerModeResponse {
 	response := MixerModeResponse{
@@ -580,7 +496,7 @@ func GetMixerMode() MixerModeResponse {
 		Success: true,
 	}
 
-	data, err := os.ReadFile("/etc/mpd.conf")
+	data, err := os.ReadFile(mpdConfigPath)
 	if err != nil {
 		log.Error().Err(err).Msg("Failed to read MPD config")
 		response.Error = "Failed to read MPD config"
@@ -608,12 +524,15 @@ func GetMixerMode() MixerModeResponse {
 
 // SetMixerMode enables or disables the software mixer in MPD config and restarts MPD.
 func SetMixerMode(enabled bool) MixerModeResponse {
+	// Serialised against every other rewrite of this file; see mpdConfigMu.
+	mpdConfigMu.Lock()
+	defer mpdConfigMu.Unlock()
 	response := MixerModeResponse{
 		Enabled: enabled,
 		Success: false,
 	}
 
-	data, err := os.ReadFile("/etc/mpd.conf")
+	data, err := os.ReadFile(mpdConfigPath)
 	if err != nil {
 		log.Error().Err(err).Msg("Failed to read MPD config")
 		response.Error = "Failed to read MPD config"
@@ -640,8 +559,7 @@ func SetMixerMode(enabled bool) MixerModeResponse {
 		return response
 	}
 
-	cmd := exec.Command("sudo", "systemctl", "restart", "mpd")
-	if err := cmd.Run(); err != nil {
+	if err := restartMPD(); err != nil {
 		log.Error().Err(err).Msg("Failed to restart MPD")
 		response.Error = "Config updated but failed to restart MPD: " + err.Error()
 		return response
@@ -654,13 +572,16 @@ func SetMixerMode(enabled bool) MixerModeResponse {
 
 // ApplyBitPerfect applies all optimal bit-perfect settings to MPD config.
 func ApplyBitPerfect() ApplyBitPerfectResponse {
+	// Serialised against every other rewrite of this file; see mpdConfigMu.
+	mpdConfigMu.Lock()
+	defer mpdConfigMu.Unlock()
 	response := ApplyBitPerfectResponse{
 		Success: false,
 		Applied: []string{},
 		Errors:  []string{},
 	}
 
-	data, err := os.ReadFile("/etc/mpd.conf")
+	data, err := os.ReadFile(mpdConfigPath)
 	if err != nil {
 		log.Error().Err(err).Msg("Failed to read MPD config")
 		response.Errors = append(response.Errors, "Failed to read MPD config")
@@ -728,8 +649,7 @@ func ApplyBitPerfect() ApplyBitPerfectResponse {
 		return response
 	}
 
-	cmd := exec.Command("sudo", "systemctl", "restart", "mpd")
-	if err := cmd.Run(); err != nil {
+	if err := restartMPD(); err != nil {
 		log.Error().Err(err).Msg("Failed to restart MPD")
 		response.Errors = append(response.Errors, "Config updated but failed to restart MPD: "+err.Error())
 		return response
