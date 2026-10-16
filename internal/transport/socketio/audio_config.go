@@ -163,7 +163,8 @@ func GetPlaybackOptions() PlaybackOptionsResponse {
 	return response
 }
 
-// GetCurrentAudioOutput reads the current audio output device from MPD config.
+// GetCurrentAudioOutput reports the audio output card MPD is configured to use,
+// as a card name matching the values GetPlaybackOptions offers.
 func GetCurrentAudioOutput() string {
 	data, err := os.ReadFile(mpdConfigPath)
 	if err != nil {
@@ -171,43 +172,12 @@ func GetCurrentAudioOutput() string {
 		return ""
 	}
 
-	content := string(data)
-	lines := strings.Split(content, "\n")
-
-	inAudioOutput := false
-	for _, line := range lines {
-		trimmed := strings.TrimSpace(line)
-
-		if strings.HasPrefix(trimmed, "#") {
-			continue
-		}
-
-		if strings.HasPrefix(trimmed, "audio_output") {
-			inAudioOutput = true
-			continue
-		}
-
-		if inAudioOutput {
-			if trimmed == "}" {
-				inAudioOutput = false
-				continue
-			}
-
-			if strings.HasPrefix(trimmed, "device") {
-				device := extractConfigValue(content, "device")
-				if device != "" && strings.HasPrefix(device, "hw:") {
-					cardNum := strings.TrimPrefix(device, "hw:")
-					if idx := strings.Index(cardNum, ","); idx != -1 {
-						cardNum = cardNum[:idx]
-					}
-					return getCardNameByNumber(cardNum)
-				}
-				return device
-			}
-		}
+	out, err := exec.Command("aplay", "-l").Output()
+	if err != nil {
+		log.Warn().Err(err).Msg("Failed to list ALSA cards for audio output")
 	}
 
-	return ""
+	return resolveCurrentAudioOutput(string(data), readAlsaConfig(), string(out))
 }
 
 // getCardNameByNumber returns the card name for a given card number.
@@ -216,25 +186,7 @@ func getCardNameByNumber(cardNum string) string {
 	if err != nil {
 		return ""
 	}
-
-	lines := strings.Split(string(out), "\n")
-	for _, line := range lines {
-		if strings.HasPrefix(line, "card "+cardNum+":") {
-			parts := strings.SplitN(line, ":", 2)
-			if len(parts) < 2 {
-				continue
-			}
-			cardPart := strings.TrimSpace(parts[1])
-			cardNameEnd := strings.Index(cardPart, " [")
-			if cardNameEnd == -1 {
-				cardNameEnd = strings.Index(cardPart, ",")
-			}
-			if cardNameEnd != -1 {
-				return strings.TrimSpace(cardPart[:cardNameEnd])
-			}
-		}
-	}
-	return ""
+	return cardNameFromAplay(string(out), cardNum)
 }
 
 // SetPlaybackSettings changes the audio output device in MPD config.
@@ -256,7 +208,16 @@ func SetPlaybackSettings(deviceName string) error {
 	}
 
 	content := string(data)
-	newDevice := `"hw:` + cardNum + `,0"`
+
+	// NOT `hw:<cardNum>,0`. On this appliance the DAC sits behind our extplug
+	// tap, and writing the bare card silently takes the tap out of MPD's path:
+	// nothing then writes the spectrum FIFO, the LCD VU needles park on the
+	// left end stop, and no error is raised anywhere. The selector's wire
+	// contract is a card name, which cannot express "the tap in front of it",
+	// so the right device has to be derived here.
+	// -> deploy/README-alsa-tap.md
+	deviceValue := resolveOutputDeviceValue(cardNum, readAlsaConfig())
+	newDevice := `"` + deviceValue + `"`
 
 	// Scoped with the same block finder the DSD helpers use. The previous
 	// `strings.HasPrefix(trimmed, "audio_output")` also matched the top-level
@@ -294,7 +255,7 @@ func SetPlaybackSettings(deviceName string) error {
 		return err
 	}
 
-	log.Info().Str("device", deviceName).Str("hwDevice", "hw:"+cardNum+",0").Msg("Audio output changed")
+	log.Info().Str("device", deviceName).Str("alsaDevice", deviceValue).Msg("Audio output changed")
 	return nil
 }
 
@@ -367,17 +328,8 @@ func CheckBitPerfectFromConfig(mpdConfig, alsaConfig, aplayOutput string) BitPer
 		status.Config = append(status.Config, "MPD: Volume normalization disabled (good)")
 	}
 
-	// Check 3: Direct hardware output
-	if strings.Contains(mpdConfig, `device`) && strings.Contains(mpdConfig, `"hw:`) {
-		device := extractConfigValue(mpdConfig, "device")
-		if device != "" && strings.HasPrefix(device, "hw:") {
-			status.Config = append(status.Config, "MPD: Direct hardware output: "+device+" (good)")
-		}
-	} else if strings.Contains(mpdConfig, `device`) && strings.Contains(mpdConfig, `"volumio"`) {
-		status.Issues = append(status.Issues, "MPD: Using 'volumio' device (goes through plug layer)")
-	} else if mpdConfig != "" {
-		status.Warnings = append(status.Warnings, "MPD: Could not determine audio device")
-	}
+	// Check 3: Output device transparency
+	appendOutputDeviceStatus(&status, mpdConfig, alsaConfig)
 
 	// Check 4: Auto conversion settings
 	for _, setting := range []string{"auto_resample", "auto_format", "auto_channels"} {
@@ -422,6 +374,9 @@ func CheckBitPerfectFromConfig(mpdConfig, alsaConfig, aplayOutput string) BitPer
 			status.Warnings = append(status.Warnings, "Hardware: Singxer SU-6 not detected")
 		}
 	}
+
+	// Check 9: VU-meter tap in MPD's output path
+	appendVuTapStatus(&status, mpdConfig, alsaConfig)
 
 	// Determine overall status
 	if len(status.Issues) > 0 {
