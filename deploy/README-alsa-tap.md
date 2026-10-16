@@ -250,3 +250,33 @@ use `awk -F: '/avail_max/{gsub(/[ \t]/,"",$2);print $2}'`.
   **no sound at all**.
 - Reverting is one word: point `/etc/mpd.conf` at `hw:2,0` (no meter, no VU) or at the
   retired `stellar_dac` meter chain, which is still defined in `/etc/asound.conf`.
+
+### Reverting is one word, and nothing tells you it happened
+
+That one-word revert was made manually during the Sep/Oct 2026 DSD crackle hunt and
+never undone. It sat from **2026-10-01 to 2026-10-16** because a bypassed tap raises
+no error anywhere in the stack:
+
+- MPD plays normally, bit-perfect, at the correct rate and format.
+- Nothing writes `/tmp/mpd_spectrum.fifo`, so the backend's reader just blocks.
+- No `pushSpectrum` is emitted, and the LCD parks **both needles on the left end
+  stop** — visually identical to silence.
+- `verify-cutover.sh` passed (it checked `mixer_type "none"`, never the device), and
+  the bit-perfect panel reported *"MPD: Direct hardware output: hw:2,0 (good)"*, which
+  is true, and bit-perfect, and means no VU meter.
+
+Diagnose it in one command before investigating anything downstream:
+
+```bash
+grep -E '^\s*device\s+"' /etc/mpd.conf                  # want stellar_dac_tap
+ls -l /proc/$(pidof mpd)/fd | grep mpd_spectrum          # want a write fd
+```
+
+The useful differential: shairport-sync points at the same tap, so if AirPlay sessions
+log `[Spectrum] FIFO streaming` and MPD playback never does, the tap, the FIFO and the
+backend reader are all fine and only MPD's device is wrong.
+
+Both blind spots are now gated: `verify-cutover.sh` M5/M6, and Check 9 in
+`CheckBitPerfectFromConfig` (`internal/transport/socketio/alsa_pcm.go`), which warns
+when a tap exists for the card but is bypassed. `SetPlaybackSettings` also no longer
+writes a bare `hw:<N>,0` over the tap when the Settings output selector is used.
