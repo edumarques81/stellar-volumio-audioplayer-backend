@@ -45,6 +45,17 @@ if grep -qE '^\s*mixer_type\s+"none"' /etc/mpd.conf 2>/dev/null; then check "M2 
 if printf 'status\n' | nc -q1 localhost 6600 2>/dev/null | grep -qE '^(repeat|state|playlist):'; then check "M3 MPD reachable on localhost:6600" PASS; else check "M3 MPD reachable" FAIL; fi
 PORT_FLAG=$(systemctl show stellar-backend.service -p ExecStart --value 2>/dev/null | grep -o '\-port [0-9]*' | awk '{print $2}')
 if [ "$PORT_FLAG" = "3000" ]; then check "M4 backend -port 3000 (not default 3001)" PASS; else check "M4 backend -port 3000 (got '$PORT_FLAG')" FAIL; fi
+# M5/M6: the LCD VU meter depends entirely on MPD's output device naming our
+# extplug tap rather than the raw card. `device "hw:2,0"` is bit-perfect, passes
+# M2, and silently means nothing writes the spectrum FIFO -- both needles park
+# on the left end stop, which looks exactly like silence. That regression sat
+# unnoticed from 2026-10-01 to 2026-10-16 because nothing checked for it.
+# The leading ^\s* excludes the thirteen commented-out decoy blocks.
+MPD_DEV=$(grep -E '^\s*device\s+"' /etc/mpd.conf 2>/dev/null | head -1 | sed -E 's/.*"(.*)".*/\1/')
+if [ "$MPD_DEV" = "stellar_dac_tap" ]; then check "M5 mpd output via ALSA tap (LCD VU meter alive)" PASS; else check "M5 mpd output via ALSA tap (got '$MPD_DEV' -- VU meter dead, see deploy/README-alsa-tap.md)" FAIL; fi
+# A stale or missing module is worse than no VU meter: mpd cannot open the
+# device at all, so the symptom is no sound.
+if ls /usr/lib/*/alsa-lib/libasound_module_pcm_stellar_tap.so >/dev/null 2>&1; then check "M6 stellar_tap extplug installed" PASS; else check "M6 stellar_tap extplug installed" FAIL; fi
 
 echo "=== Daemons repointed to localhost ==="
 # The daemon env files are root-readable only; use sudo -n (passwordless on the

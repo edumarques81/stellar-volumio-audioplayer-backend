@@ -31,6 +31,14 @@ audio_output {
     type                "alsa"
     name                "Singxer SU-6 (Bit-Perfect)"
 
+    # NOTE: this is a reference/bootstrap config. The DEPLOYED Pi config points
+    # at "stellar_dac_tap" instead -- our snd_pcm_extplug pass-through, which
+    # also feeds the LCD VU meter's FIFO. A raw card here is bit-perfect but
+    # leaves the VU meter dead. Only switch to the tap AFTER the plugin and
+    # /etc/asound.conf are installed; naming a PCM whose module is absent means
+    # mpd cannot open the device at all, i.e. no sound.
+    #   -> deploy/README-alsa-tap.md
+    #
     # Direct hardware access - use actual card name from `aplay -l`
     device              "hw:U20SU6,0"
 
