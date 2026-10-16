@@ -180,15 +180,6 @@ func GetCurrentAudioOutput() string {
 	return resolveCurrentAudioOutput(string(data), readAlsaConfig(), string(out))
 }
 
-// getCardNameByNumber returns the card name for a given card number.
-func getCardNameByNumber(cardNum string) string {
-	out, err := exec.Command("aplay", "-l").Output()
-	if err != nil {
-		return ""
-	}
-	return cardNameFromAplay(string(out), cardNum)
-}
-
 // SetPlaybackSettings changes the audio output device in MPD config.
 func SetPlaybackSettings(deviceName string) error {
 	// Resolved before the lock: getCardNumberByName shells out to `aplay -l`,
@@ -282,10 +273,12 @@ func getCardNumberByName(cardName string) string {
 // GetBitPerfectStatus checks bit-perfect audio configuration natively in Go.
 func GetBitPerfectStatus() BitPerfectStatus {
 	mpdConfig := ""
+	mpdConfigErr := ""
 	if data, err := os.ReadFile(mpdConfigPath); err == nil {
 		mpdConfig = string(data)
 	} else {
 		log.Warn().Err(err).Msg("Failed to read MPD config")
+		mpdConfigErr = err.Error()
 	}
 
 	alsaConfig := ""
@@ -298,7 +291,21 @@ func GetBitPerfectStatus() BitPerfectStatus {
 		aplayOutput = string(out)
 	}
 
-	return CheckBitPerfectFromConfig(mpdConfig, alsaConfig, aplayOutput)
+	status := CheckBitPerfectFromConfig(mpdConfig, alsaConfig, aplayOutput)
+
+	// A log line is not enough here. /etc/mpd.conf is mpd:audio 0640 and this
+	// process reads it only via its membership of group `audio`, so a root-side
+	// rewrite that resets the owner takes the read away while MPD itself keeps
+	// starting normally. Without this the panel renders with no MPD rows at
+	// all, which reads as "no problems found" when in fact nothing was checked.
+	if mpdConfigErr != "" {
+		status.Issues = append(status.Issues,
+			"Could not read "+mpdConfigPath+" ("+mpdConfigErr+
+				") - MPD settings below are unverified")
+		status.Status = "error"
+	}
+
+	return status
 }
 
 // CheckBitPerfectFromConfig checks bit-perfect configuration from config strings.
@@ -408,29 +415,6 @@ func matchConfigValue(config, setting, value string) bool {
 		}
 	}
 	return false
-}
-
-// extractConfigValue extracts the value for a config setting.
-func extractConfigValue(config, setting string) string {
-	lines := strings.Split(config, "\n")
-	for _, line := range lines {
-		line = strings.TrimSpace(line)
-		if strings.HasPrefix(line, "#") {
-			continue
-		}
-		if strings.HasPrefix(line, setting) {
-			rest := strings.TrimPrefix(line, setting)
-			rest = strings.TrimSpace(rest)
-			start := strings.Index(rest, `"`)
-			if start != -1 {
-				end := strings.Index(rest[start+1:], `"`)
-				if end != -1 {
-					return rest[start+1 : start+1+end]
-				}
-			}
-		}
-	}
-	return ""
 }
 
 // NormalizeBitPerfectStatus converts script status values to frontend expected values.

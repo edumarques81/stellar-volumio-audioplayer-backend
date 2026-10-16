@@ -1,6 +1,7 @@
 package socketio
 
 import (
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -359,5 +360,31 @@ func TestCheckBitPerfectOutputDevice(t *testing.T) {
 			t.Errorf("no %s line contains %q\nconfig: %v\nissues: %v\nwarnings: %v",
 				tt.wantKind, tt.wantSubstr, got.Config, got.Issues, got.Warnings)
 		})
+	}
+}
+
+// TestGetBitPerfectStatusUnreadableConfig covers the failure that hit on
+// 2026-10-16: /etc/mpd.conf is mpd:audio 0640 and the backend reads it only
+// because its user is in group `audio`. A root-side rewrite silently reset the
+// owner to root:root. MPD still started, so nothing looked wrong -- but the
+// read failed and the panel simply rendered without any MPD rows. A status
+// surface that answers "no problems found" when it could not look is worse
+// than one that errors.
+func TestGetBitPerfectStatusUnreadableConfig(t *testing.T) {
+	orig := mpdConfigPath
+	t.Cleanup(func() { mpdConfigPath = orig })
+	mpdConfigPath = filepath.Join(t.TempDir(), "nope.conf")
+
+	got := GetBitPerfectStatus()
+
+	found := false
+	for _, w := range got.Issues {
+		if strings.Contains(w, "Could not read") && strings.Contains(w, "nope.conf") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("unreadable MPD config was not surfaced\nissues: %v\nwarnings: %v",
+			got.Issues, got.Warnings)
 	}
 }
