@@ -57,6 +57,16 @@ if [ "$MPD_DEV" = "stellar_dac_tap" ]; then check "M5 mpd output via ALSA tap (L
 # device at all, so the symptom is no sound.
 if ls /usr/lib/*/alsa-lib/libasound_module_pcm_stellar_tap.so >/dev/null 2>&1; then check "M6 stellar_tap extplug installed" PASS; else check "M6 stellar_tap extplug installed" FAIL; fi
 
+echo "=== Power actions (shutdown / reboot) ==="
+# P1: the backend runs unprivileged with no logind session, so /sbin/shutdown
+# (a systemctl symlink) is refused by polkit -- `pkcheck --action-id
+# org.freedesktop.login1.reboot --process <backend pid>` returns "Authorization
+# requires authentication". DefaultShutdown/DefaultReboot therefore go through
+# `sudo -n`, which needs /etc/sudoers.d/stellar-power. Without that file every
+# power button is a silent no-op: the UI shows "Rebooting in 3 seconds..." and
+# the Pi stays up. `sudo -n -l` resolves the grant WITHOUT running anything.
+if sudo -n -l /sbin/shutdown >/dev/null 2>&1; then check "P1 sudo -n /sbin/shutdown permitted (power buttons work)" PASS; else check "P1 sudo -n /sbin/shutdown permitted -- install /etc/sudoers.d/stellar-power, see deploy/README-systemd.md" FAIL; fi
+
 echo "=== Daemons repointed to localhost ==="
 # The daemon env files are root-readable only; use sudo -n (passwordless on the
 # appliance). If sudo is unavailable the check reports FAIL with a hint.

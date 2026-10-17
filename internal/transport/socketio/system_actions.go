@@ -154,9 +154,19 @@ func (h *SystemActionHandlers) handleEvent(client *socket.Socket, action string)
 		} else {
 			err = h.deps.Shutdown()
 		}
-		if err != nil {
-			log.Error().Err(err).Str("action", action).Msg("system action exec failed")
+		if err == nil {
+			return
 		}
+		log.Error().Err(err).Str("action", action).Msg("system action exec failed")
+		// Tell the caller. This path used to log and nothing more, which is
+		// how a power action that could NEVER succeed presented as the UI
+		// showing "Rebooting in 3 seconds..." and then simply nothing --
+		// indistinguishable from a working button on a Pi that ignores it.
+		// Both UI surfaces listen for this event.
+		_ = client.Emit("system:action:error", map[string]string{
+			"action": action,
+			"error":  clientErrorMessage(err),
+		})
 	}()
 }
 
@@ -229,7 +239,7 @@ func DefaultShutdown() error {
 	if runtime.GOOS == "windows" {
 		return errors.New("shutdown unsupported on windows")
 	}
-	return exec.Command("/sbin/shutdown", "-h", "now").Run()
+	return runPowerCommand("-h")
 }
 
 // DefaultReboot executes a host reboot.
@@ -237,5 +247,42 @@ func DefaultReboot() error {
 	if runtime.GOOS == "windows" {
 		return errors.New("reboot unsupported on windows")
 	}
-	return exec.Command("/sbin/shutdown", "-r", "now").Run()
+	return runPowerCommand("-r")
+}
+
+// runPowerCommand execs /sbin/shutdown with the given mode flag ("-h" or "-r").
+//
+// On Linux it goes through `sudo -n`, and that is load-bearing, not belt and
+// braces. /sbin/shutdown is a symlink to systemctl, so it asks polkit for
+// org.freedesktop.login1.{power-off,reboot}. The backend is an unprivileged
+// systemd service (User=eduardo) with no logind session, so polkit resolves it
+// as "any" -> auth_admin_keep and refuses:
+//
+//	$ pkcheck --action-id org.freedesktop.login1.reboot --process <backend pid>
+//	Authorization requires authentication and -u wasn't passed.
+//
+// Calling the binary directly therefore ALWAYS fails with "Interactive
+// authentication required", on every Pi, for every caller -- the auth gate
+// above passes, the 3-second notice goes out, and then nothing happens. The
+// deploy provisions /etc/sudoers.d/stellar-power with a NOPASSWD entry for
+// /sbin/shutdown precisely so this call can get the privilege it needs;
+// nothing ever used it. `-n` keeps it non-interactive, so a host missing that
+// entry fails immediately with a reportable error instead of blocking a
+// goroutine on a password prompt no one can answer.
+//
+// macOS keeps the direct call: there is no sudoers drop-in to lean on there,
+// and the Mac/Windows topology routes power actions to the Pi through
+// RemoteSystemActions anyway (see system_actions_remote.go).
+func runPowerCommand(mode string) error {
+	argv := powerCommand(runtime.GOOS, mode)
+	return exec.Command(argv[0], argv[1:]...).Run()
+}
+
+// powerCommand is the pure argv builder behind runPowerCommand, split out so
+// the sudo wrapper is testable on any host without execing anything.
+func powerCommand(goos, mode string) []string {
+	if goos == "linux" {
+		return []string{"sudo", "-n", "/sbin/shutdown", mode, "now"}
+	}
+	return []string{"/sbin/shutdown", mode, "now"}
 }

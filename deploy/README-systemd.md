@@ -72,14 +72,47 @@ sudo mkdir -p /etc/stellar-backend
 sudo nano /etc/stellar-backend/env        # fill in the keys
 sudo chmod 600 /etc/stellar-backend/env   # keep secrets readable by root only
 
-# 3. Reload systemd and enable the unit
+# 3. Grant the power actions (see "Why sudo" below) — REQUIRED for the
+#    Reboot / Shutdown buttons to do anything at all
+printf 'eduardo ALL=(ALL) NOPASSWD: /sbin/shutdown, /sbin/reboot\n' \
+  | sudo tee /etc/sudoers.d/stellar-power >/dev/null
+sudo chmod 440 /etc/sudoers.d/stellar-power
+sudo visudo -c -f /etc/sudoers.d/stellar-power   # must print "parsed OK"
+
+# 4. Reload systemd and enable the unit
 sudo systemctl daemon-reload
 sudo systemctl enable --now stellar-backend
 
-# 4. Verify
+# 5. Verify
 systemctl status stellar-backend
 journalctl -u stellar-backend -f
 ```
+
+### Why sudo is required for shutdown / reboot
+
+`User=eduardo` is deliberate — the backend must never run as root. But
+`/sbin/shutdown` is a symlink to `systemctl`, so it asks polkit for
+`org.freedesktop.login1.{power-off,reboot}`, and a systemd service has no
+logind session for polkit to call "active". It therefore resolves as `any` →
+`auth_admin_keep` and is refused. Against the live process:
+
+```
+$ pkcheck --action-id org.freedesktop.login1.reboot \
+          --process $(systemctl show -p MainPID --value stellar-backend)
+Authorization requires authentication and -u wasn't passed.
+```
+
+`DefaultShutdown` / `DefaultReboot` (`internal/transport/socketio/system_actions.go`)
+therefore exec `sudo -n /sbin/shutdown …`. `-n` is non-interactive on purpose:
+on a host missing the drop-in the call fails instantly with a reportable error
+instead of parking a goroutine on a password prompt nobody can answer.
+
+**This failed silently for months.** The auth gate passed, `pushShutdownNotice`
+went out, the UI said "Rebooting in 3 seconds…", the exec was refused, and the
+error went to the log and nowhere else. Both UI surfaces now listen for
+`system:action:error`, and `deploy/verify-cutover.sh` gate **P1** asserts the
+sudoers grant resolves (`sudo -n -l /sbin/shutdown`) so it cannot regress
+unnoticed.
 
 ## Readiness probe
 

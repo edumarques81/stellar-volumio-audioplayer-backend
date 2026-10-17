@@ -55,7 +55,7 @@ func TestSystemActions_RemoteCallerRefused(t *testing.T) {
 		"203.0.113.7",
 		"fe80::1",
 		"2001:db8::1",
-		"",         // empty (no handshake)
+		"",          // empty (no handshake)
 		"not-an-ip", // unparseable
 	} {
 		ip := ip
@@ -238,7 +238,7 @@ func TestNewSystemActionHandlersWithTrusted_InvalidSpec(t *testing.T) {
 	for _, bad := range []string{
 		"not-an-ip",
 		"999.999.999.999",
-		"192.168.86.0/33",   // mask out of range
+		"192.168.86.0/33", // mask out of range
 		"foo/24",
 	} {
 		bad := bad
@@ -284,5 +284,52 @@ func TestIsLoopback(t *testing.T) {
 		if got := isLoopback(ip); got != want {
 			t.Errorf("isLoopback(%q) = %v, want %v", ip, got, want)
 		}
+	}
+}
+
+// The Pi backend is an unprivileged systemd service with no logind session, so
+// /sbin/shutdown (a systemctl symlink) is refused by polkit with "Interactive
+// authentication required" -- confirmed against the live process:
+//
+//	pkcheck --action-id org.freedesktop.login1.reboot --process <backend pid>
+//	-> Authorization requires authentication and -u wasn't passed.
+//
+// The deploy provisions /etc/sudoers.d/stellar-power for exactly this call.
+// Dropping the `sudo -n` prefix makes every power action a silent no-op on
+// every Pi, so pin the argv rather than the behaviour.
+func TestPowerCommand_LinuxGoesThroughSudo(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name, mode string
+		want       []string
+	}{
+		{"shutdown", "-h", []string{"sudo", "-n", "/sbin/shutdown", "-h", "now"}},
+		{"reboot", "-r", []string{"sudo", "-n", "/sbin/shutdown", "-r", "now"}},
+	} {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := powerCommand("linux", tc.mode)
+			if len(got) != len(tc.want) {
+				t.Fatalf("argv = %q, want %q", got, tc.want)
+			}
+			for i := range tc.want {
+				if got[i] != tc.want[i] {
+					t.Fatalf("argv = %q, want %q", got, tc.want)
+				}
+			}
+		})
+	}
+}
+
+// macOS has no stellar-power sudoers drop-in to lean on, and the Mac topology
+// routes power actions to the Pi via RemoteSystemActions anyway, so the direct
+// call stays. `-n` would only turn a clear failure into a confusing one.
+func TestPowerCommand_DarwinCallsShutdownDirectly(t *testing.T) {
+	t.Parallel()
+	got := powerCommand("darwin", "-h")
+	want := []string{"/sbin/shutdown", "-h", "now"}
+	if len(got) != len(want) || got[0] != want[0] {
+		t.Fatalf("argv = %q, want %q", got, want)
 	}
 }
