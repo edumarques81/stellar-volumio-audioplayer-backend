@@ -22,6 +22,7 @@ import (
 	"github.com/edumarques81/stellar-volumio-audioplayer-backend/internal/domain/airplay"
 	"github.com/edumarques81/stellar-volumio-audioplayer-backend/internal/domain/artwork"
 	"github.com/edumarques81/stellar-volumio-audioplayer-backend/internal/domain/bios"
+	"github.com/edumarques81/stellar-volumio-audioplayer-backend/internal/domain/display"
 	"github.com/edumarques81/stellar-volumio-audioplayer-backend/internal/domain/ingest"
 	"github.com/edumarques81/stellar-volumio-audioplayer-backend/internal/domain/lastplayed"
 	"github.com/edumarques81/stellar-volumio-audioplayer-backend/internal/domain/localmusic"
@@ -195,7 +196,8 @@ func main() {
 	// on darwin/windows). Must run before the HTTP server starts accepting
 	// connections — the connection callback reads s.lcdController without
 	// locking.
-	socketServer.SetLCDController(lcd.NewPlatform())
+	lcdController := lcd.NewPlatform()
+	socketServer.SetLCDController(lcdController)
 
 	// Wire platform-selected network Reporter (real impls on Linux/darwin,
 	// stub on windows). Must run before the HTTP server accepts connections —
@@ -454,6 +456,21 @@ func main() {
 	} else {
 		log.Info().Msg("AirPlay ingest disabled (STELLAR_AIRPLAY_KEY unset)")
 	}
+
+	// Display mode + night schedules. Built here because it needs the
+	// AirPlay session (an active stream counts as "in use" just as much as
+	// MPD playback), and wired before the listener starts because the
+	// connection callback reads s.displayService without locking.
+	displayService := display.NewService(
+		filepath.Join(paths.DataDir(), "display.json"),
+		displayHardware{c: lcdController},
+		displayPlayback{mpd: mpdClient, airplay: airplaySession},
+	)
+	socketServer.SetDisplayService(displayService)
+	go displayService.Run(ctx)
+	log.Info().
+		Interface("schedule", displayService.Settings()).
+		Msg("Display schedules active (auto-off / auto-restore)")
 
 	// Readiness probe — distinct from /health. Returns 200 only when BOTH
 	// hard gates pass: MPD reachable AND cache loaded (AlbumCount>0 and not

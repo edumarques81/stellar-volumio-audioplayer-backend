@@ -23,6 +23,7 @@ import (
 	"github.com/edumarques81/stellar-volumio-audioplayer-backend/internal/domain/artwork"
 	"github.com/edumarques81/stellar-volumio-audioplayer-backend/internal/domain/audirvana"
 	"github.com/edumarques81/stellar-volumio-audioplayer-backend/internal/domain/device"
+	"github.com/edumarques81/stellar-volumio-audioplayer-backend/internal/domain/display"
 	"github.com/edumarques81/stellar-volumio-audioplayer-backend/internal/domain/lastplayed"
 	"github.com/edumarques81/stellar-volumio-audioplayer-backend/internal/domain/library"
 	"github.com/edumarques81/stellar-volumio-audioplayer-backend/internal/domain/localmusic"
@@ -93,8 +94,13 @@ type Server struct {
 	// lcdController it touches no hardware — it exists so remotes and the
 	// kiosk agree on one answer for "what is on the panel right now".
 	lcdViewState *lcd.ViewState
-	netReporter  netinfo.Reporter
-	airplay      *airplayBundle
+	// displayService owns the three-state display mode (live / standby /
+	// off) and the night schedules. When nil -- older tests, and any host
+	// that never wired it -- the handlers fall back to driving the
+	// controller directly, which is the pre-mode behaviour.
+	displayService *display.Service
+	netReporter    netinfo.Reporter
+	airplay        *airplayBundle
 }
 
 // serverBroadcaster adapts the Socket.IO server to the lcd.Broadcaster (and
@@ -113,6 +119,56 @@ func (s *Server) Broadcaster() serverBroadcaster { return serverBroadcaster{s} }
 // SetLCDController wires the platform-selected LCD controller. Called from
 // main.go after the Server is constructed.
 func (s *Server) SetLCDController(c lcd.Controller) { s.lcdController = c }
+
+// SetDisplayService wires the display mode/schedule service. Called from
+// main.go after the Server is constructed, before it accepts connections.
+func (s *Server) SetDisplayService(d *display.Service) {
+	s.displayService = d
+	if d == nil {
+		return
+	}
+	// The service changes mode by itself at 22:00 and 05:00; every client
+	// has to hear about that, not just the one that asked for something.
+	d.SetNotifier(func(status display.Status) {
+		s.Broadcaster().Emit("pushLcdStatus", status)
+	})
+}
+
+// lcdStatusPayload is what `pushLcdStatus` carries. With the display service
+// wired it is {mode, isOn}; without it, the legacy {isOn}.
+func (s *Server) lcdStatusPayload() any {
+	if s.displayService != nil {
+		return s.displayService.Status()
+	}
+	status, _ := s.lcdController.Status()
+	return status
+}
+
+// displayMode reports the current mode, falling back to the controller's
+// boolean when no service is wired.
+func (s *Server) displayMode() display.Mode {
+	if s.displayService != nil {
+		return s.displayService.Mode()
+	}
+	if status, err := s.lcdController.Status(); err == nil && !status.IsOn {
+		return display.ModeOff
+	}
+	return display.ModeLive
+}
+
+// applyDisplayMode routes a mode change through the display service, or
+// straight at the hardware when no service is wired.
+func (s *Server) applyDisplayMode(mode display.Mode) error {
+	if s.displayService != nil {
+		return s.displayService.SetMode(mode)
+	}
+	return s.lcdController.Set(mode.Lit())
+}
+
+// broadcastLcdStatus pushes the current status to every client.
+func (s *Server) broadcastLcdStatus() {
+	s.Broadcaster().Emit("pushLcdStatus", s.lcdStatusPayload())
+}
 
 // SetNetReporter wires the platform-selected Reporter. Called from main.go
 // after the Server is constructed.
@@ -377,9 +433,9 @@ func (s *Server) setupHandlers() {
 			// Also send network, LCD, system info, and audio status
 			client.Emit("pushNetworkStatus", s.networkStatus())
 			client.Emit("pushSystemInfo", s.systemInfo())
-			{
-				status, _ := s.lcdController.Status()
-				client.Emit("pushLcdStatus", status)
+			client.Emit("pushLcdStatus", s.lcdStatusPayload())
+			if s.displayService != nil {
+				client.Emit("pushLcdSettings", s.displayService.Settings())
 			}
 			// Which screen the kiosk is on. A reconnecting remote needs this
 			// to render its VU-meter control in the right state instead of
@@ -717,26 +773,84 @@ func (s *Server) setupHandlers() {
 		// LCD control events
 		client.On("getLcdStatus", func(args ...any) {
 			log.Debug().Str("id", clientID).Msg("getLcdStatus")
-			status, _ := s.lcdController.Status()
-			client.Emit("pushLcdStatus", status)
+			client.Emit("pushLcdStatus", s.lcdStatusPayload())
 		})
 
+		// lcdStandby / lcdWake are the original boolean pair and keep their
+		// original meaning -- a real hardware off, and back. The iOS app and
+		// older frontends speak only these. The three-state model lives in
+		// lcdSetMode below.
 		client.On("lcdStandby", func(args ...any) {
 			log.Debug().Str("id", clientID).Msg("lcdStandby")
-			if err := s.lcdController.Set(false); err != nil {
+			if err := s.applyDisplayMode(display.ModeOff); err != nil {
 				log.Error().Err(err).Msg("lcdStandby failed")
 				return
 			}
-			lcd.BroadcastStatus(s.Broadcaster(), s.lcdController)
+			s.broadcastLcdStatus()
 		})
 
 		client.On("lcdWake", func(args ...any) {
 			log.Debug().Str("id", clientID).Msg("lcdWake")
-			if err := s.lcdController.Set(true); err != nil {
+			if err := s.applyDisplayMode(display.ModeLive); err != nil {
 				log.Error().Err(err).Msg("lcdWake failed")
 				return
 			}
-			lcd.BroadcastStatus(s.Broadcaster(), s.lcdController)
+			s.broadcastLcdStatus()
+		})
+
+		// lcdSetMode is the three-state control: live, standby, off.
+		// Standby is painted by the kiosk and leaves the panel lit, which is
+		// the only "off" that touch can undo; off really stops the signal.
+		client.On("lcdSetMode", func(args ...any) {
+			mode, err := parseLcdSetMode(args)
+			if err != nil {
+				log.Warn().Err(err).Str("id", clientID).Msg("lcdSetMode rejected")
+				return
+			}
+			log.Debug().Str("id", clientID).Str("mode", string(mode)).Msg("lcdSetMode")
+			if err := s.applyDisplayMode(mode); err != nil {
+				log.Error().Err(err).Str("mode", string(mode)).Msg("lcdSetMode failed")
+				return
+			}
+			s.broadcastLcdStatus()
+		})
+
+		// lcdActivity is the kiosk reporting a touch. Without it the night
+		// schedule would black out a screen somebody is using at 23:00,
+		// because playback is the only other activity the backend can see.
+		client.On("lcdActivity", func(args ...any) {
+			if s.displayService == nil {
+				return
+			}
+			s.displayService.MarkActivity()
+		})
+
+		// The night schedules: auto-off and auto-restore.
+		client.On("getLcdSettings", func(args ...any) {
+			log.Debug().Str("id", clientID).Msg("getLcdSettings")
+			if s.displayService == nil {
+				return
+			}
+			client.Emit("pushLcdSettings", s.displayService.Settings())
+		})
+
+		client.On("setLcdSettings", func(args ...any) {
+			if s.displayService == nil {
+				return
+			}
+			next, err := parseLcdSettings(args, s.displayService.Settings())
+			if err != nil {
+				log.Warn().Err(err).Str("id", clientID).Msg("setLcdSettings rejected")
+				return
+			}
+			applied, err := s.displayService.UpdateSettings(next)
+			if err != nil {
+				// The schedule is live in memory either way; the client
+				// still needs to see what was applied.
+				log.Error().Err(err).Msg("setLcdSettings: persist failed")
+			}
+			log.Info().Interface("settings", applied).Msg("LCD schedule updated")
+			s.Broadcaster().Emit("pushLcdSettings", applied)
 		})
 
 		// LCD view events — which screen the kiosk shows, as opposed to
@@ -758,13 +872,11 @@ func (s *Server) setupHandlers() {
 			// Waking is opt-in and requested by the caller, not inferred:
 			// a remote asking for the VU meter wants to see it, whereas the
 			// kiosk reporting its own navigation is by definition already lit.
-			if wake {
-				if status, statusErr := s.lcdController.Status(); statusErr == nil && !status.IsOn {
-					if setErr := s.lcdController.Set(true); setErr != nil {
-						log.Error().Err(setErr).Msg("lcdSetView wake failed")
-					} else {
-						lcd.BroadcastStatus(s.Broadcaster(), s.lcdController)
-					}
+			if wake && s.displayMode() != display.ModeLive {
+				if setErr := s.applyDisplayMode(display.ModeLive); setErr != nil {
+					log.Error().Err(setErr).Msg("lcdSetView wake failed")
+				} else {
+					s.broadcastLcdStatus()
 				}
 			}
 
