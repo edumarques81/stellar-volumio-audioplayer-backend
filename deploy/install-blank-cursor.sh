@@ -18,6 +18,11 @@
 #                              handful a desktop usually needs.
 #   3. cage (the compositor) — draws `left_ptr` / `default` wherever no client
 #                              has set a cursor.
+#   4. Anything that resolves a theme *by name* rather than honouring
+#                              XCURSOR_THEME — GTK passes Chromium whatever
+#                              `gtk-cursor-theme-name` holds, and
+#                              /etc/alternatives/x-cursor-theme points at
+#                              Adwaita here. Those names are shadowed below.
 #
 # So: one fully transparent image, published under every cursor name anything
 # is likely to request, as the theme `blank`. /usr/local/share/icons comes
@@ -133,6 +138,44 @@ Comment=Kiosk default — resolves to the fully transparent "blank" theme
 Inherits=blank
 EOF
 
-chmod -R a+rX /usr/local/share/icons/blank "$DEFAULT_DIR"
+# ...and give it the glyphs directly, so a lookup under that name never has
+# to make it as far as following Inherits.
+ln -sfn "$THEME_DIR/cursors" "$DEFAULT_DIR/cursors"
+
+# Shadow the themes a client might resolve *by name* instead of honouring
+# XCURSOR_THEME. GTK hands Chromium whatever `gtk-cursor-theme-name` says,
+# /etc/alternatives/x-cursor-theme points at Adwaita on this image, and a
+# toolkit that finds none of them falls back to a hardcoded name. Each of
+# those names gets a directory here whose `cursors` is a symlink to blank's,
+# and /usr/local/share/icons precedes /usr/share/icons on XCURSOR_PATH, so
+# the lookup lands on the transparent glyph whichever name it asked for.
+#
+# The real themes under /usr/share/icons are untouched — this only wins for
+# processes that run with our XCURSOR_PATH, i.e. the kiosk.
+SHADOW=(Adwaita DMZ-White DMZ-Black PiXflat breeze_cursors)
+if alt=$(readlink -f /etc/alternatives/x-cursor-theme 2>/dev/null) && [[ -n "$alt" ]]; then
+  # .../<theme>/cursor.theme -> <theme>
+  alt_name=$(basename "$(dirname "$alt")")
+  if [[ -n "$alt_name" && "$alt_name" != "icons" ]]; then
+    printf '%s\n' "${SHADOW[@]}" | grep -qxF "$alt_name" || SHADOW+=("$alt_name")
+  fi
+fi
+
+for theme in "${SHADOW[@]}"; do
+  [[ "$theme" == "blank" ]] && continue
+  dir="/usr/local/share/icons/$theme"
+  mkdir -p "$dir"
+  ln -sfn "$THEME_DIR/cursors" "$dir/cursors"
+  cat > "$dir/index.theme" <<EOF
+[Icon Theme]
+Name=$theme
+Comment=Kiosk shadow — resolves to the fully transparent "blank" theme
+Inherits=blank
+EOF
+  cp "$dir/index.theme" "$dir/cursor.theme"
+done
+
+chmod -R a+rX /usr/local/share/icons
 
 echo "blank cursor theme installed: $(ls "$THEME_DIR/cursors" | wc -l) names"
+echo "shadowed by name: ${SHADOW[*]}"
