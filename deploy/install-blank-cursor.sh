@@ -1,93 +1,138 @@
 #!/usr/bin/env bash
 #
-# Install a fully transparent XCursor theme and point the kiosk at it.
+# install-blank-cursor.sh — make the mouse pointer invisible on the LCD kiosk.
 #
-# WHY: the LCD panel is touch-only (ILITEK), but wlroots still renders a pointer
-# for it. That pointer is drawn by the COMPOSITOR, not by the page, so the
-# frontend's `cursor: none !important` (Volumio2-UI/src/app.css) cannot suppress
-# it — and it does not appear in CDP screenshots either, because CDP captures the
-# page and not the compositor. cage 0.2.0 exposes no hide-cursor flag (`-d -h -m
-# -s -v` only), so the supported route is an XCursor theme whose every glyph is a
-# 1x1 fully transparent image.
+# The panel is touch-only, so any pointer glyph on screen is noise. Three
+# different parties can draw one, and all three have to be closed off:
 #
-# If the theme ever fails to load, wlroots falls back to the stock cursor:
-# visible, but harmless. Nothing here touches audio.
+#   1. The page itself       — `cursor: none !important` in Volumio2-UI's
+#                              src/app.css. Covers everything *inside* the
+#                              document, and nothing else.
+#   2. Chromium's own chrome — native <select> popups, drag feedback and the
+#                              like are separate surfaces that page CSS cannot
+#                              reach. Chromium asks the XCursor theme for them
+#                              by name, and falls back to a *built-in bitmap*
+#                              for any name the theme does not define. That
+#                              fallback is the hole this script closes: the
+#                              theme must answer to every name, not just the
+#                              handful a desktop usually needs.
+#   3. cage (the compositor) — draws `left_ptr` / `default` wherever no client
+#                              has set a cursor.
 #
-# Run on the Pi:  sudo bash install-blank-cursor.sh
+# So: one fully transparent image, published under every cursor name anything
+# is likely to request, as the theme `blank`. /usr/local/share/icons comes
+# first on XCURSOR_PATH (set in /usr/local/bin/stellar-kiosk.sh), so this theme
+# wins over Adwaita and friends in /usr/share/icons.
+#
+# Idempotent. Run with sudo on the Pi, then restart the kiosk:
+#   sudo bash install-blank-cursor.sh && sudo systemctl restart getty@tty1
+#
 set -euo pipefail
 
 THEME_DIR=/usr/local/share/icons/blank
-KIOSK=/usr/local/bin/stellar-kiosk.sh
+DEFAULT_DIR=/usr/local/share/icons/default
 
-python3 - "$THEME_DIR" <<'PY'
-import os, struct, sys
-base = sys.argv[1]
-cur = os.path.join(base, "cursors")
-os.makedirs(cur, exist_ok=True)
+if [[ $EUID -ne 0 ]]; then
+  echo "install-blank-cursor.sh must run as root (it writes under /usr/local/share)." >&2
+  exit 1
+fi
 
-def xcursor_blank(sizes=(24, 32, 48, 64)):
-    """Minimal Xcursor file: one 1x1 fully transparent ARGB image per nominal size.
+mkdir -p "$THEME_DIR/cursors" "$DEFAULT_DIR"
 
-    Format: 16-byte header, then one 12-byte TOC entry per image
-    (type 0xfffd0002 = IMAGE, subtype = nominal size, absolute offset), then each
-    image chunk: 36-byte header (hdrsize, type, subtype, version, w, h, xhot,
-    yhot, delay) followed by w*h little-endian ARGB pixels.
-    """
-    header = b"Xcur" + struct.pack("<III", 16, 0x00010000, len(sizes))
-    off = len(header) + 12 * len(sizes)
-    toc = b""
-    chunks = b""
-    for s in sizes:
-        toc += struct.pack("<III", 0xfffd0002, s, off)
-        chunks += struct.pack("<IIIIIIIII", 36, 0xfffd0002, s, 1, 1, 1, 0, 0, 0)
-        chunks += struct.pack("<I", 0x00000000)   # fully transparent pixel
-        off += 36 + 4
-    return header + toc + chunks
-
-open(os.path.join(cur, "default"), "wb").write(xcursor_blank())
-
-# Every cursor name wlroots / GTK / Chromium might request resolves to the same
-# blank glyph, so no code path can reintroduce a visible pointer.
-names = ["left_ptr", "arrow", "top_left_arrow", "pointer", "hand", "hand1",
-         "hand2", "text", "xterm", "ibeam", "watch", "wait", "progress",
-         "crosshair", "cross", "move", "all-scroll", "grab", "grabbing",
-         "not-allowed", "help", "context-menu", "n-resize", "s-resize",
-         "e-resize", "w-resize", "col-resize", "row-resize"]
-for n in names:
-    p = os.path.join(cur, n)
-    if os.path.lexists(p):
-        os.remove(p)
-    os.symlink("default", p)
-
-open(os.path.join(base, "index.theme"), "w").write(
-    "[Icon Theme]\nName=blank\nComment=Fully transparent cursor for kiosk use\n")
-open(os.path.join(base, "cursor.theme"), "w").write(
-    "[Icon Theme]\nName=blank\nInherits=blank\n")
-print("theme installed at %s (%d names)" % (base, len(names) + 1))
-PY
-
-if grep -q XCURSOR_THEME "$KIOSK"; then
-    echo "$KIOSK already exports XCURSOR_THEME — leaving it alone"
+# A 1x1 fully transparent Xcursor, published at several nominal sizes so that
+# whatever XCURSOR_SIZE is in force resolves to this image rather than falling
+# through to another theme.
+#
+# An existing file is left alone. A cursor image that libXcursor cannot parse
+# is worse than no theme at all — the client falls back to its own built-in
+# arrow — so a glyph already known to work is never overwritten on a re-run.
+if [[ -s "$THEME_DIR/cursors/default" ]]; then
+  echo "keeping the existing transparent glyph ($(stat -c%s "$THEME_DIR/cursors/default") bytes)"
 else
-    cp "$KIOSK" "$KIOSK.bak-$(date +%Y%m%d-%H%M%S)"
-    python3 - "$KIOSK" <<'PY'
-import sys
-p = sys.argv[1]
-s = open(p).read()
-anchor = "mkdir -p $XDG_RUNTIME_DIR\n"
-assert s.count(anchor) == 1, "anchor not found in %s" % p
-open(p, "w").write(s.replace(anchor, anchor + """
-# Hide the compositor-drawn pointer (see install-blank-cursor.sh for why CSS
-# cannot do this and cage has no flag for it).
-export XCURSOR_PATH=/usr/local/share/icons:/usr/share/icons
-export XCURSOR_THEME=blank
-export XCURSOR_SIZE=24
-"""))
-print("patched %s" % p)
+python3 - "$THEME_DIR/cursors/default" <<'PY'
+import struct, sys
+
+SIZES = (16, 24, 32, 48, 64)
+IMAGE_TYPE = 0xfffd0002
+
+toc_bytes = 12 * len(SIZES)
+offset = 16 + toc_bytes
+
+toc, chunks = b"", b""
+for size in SIZES:
+    toc += struct.pack("<III", IMAGE_TYPE, size, offset)
+    # chunk header (36) + one ARGB pixel, fully transparent
+    chunks += struct.pack(
+        "<IIIIIIIII",
+        36,           # header length
+        IMAGE_TYPE,
+        size,         # subtype == nominal size
+        1,            # chunk version
+        1, 1,         # width, height
+        0, 0,         # xhot, yhot
+        0,            # delay
+    ) + struct.pack("<I", 0x00000000)
+    offset += 40
+
+header = struct.pack("<4sIII", b"Xcur", 16, 0x10000, len(SIZES))
+with open(sys.argv[1], "wb") as fh:
+    fh.write(header + toc + chunks)
 PY
 fi
 
-bash -n "$KIOSK" && echo "kiosk script parses OK"
-echo
-echo "Apply by restarting the kiosk:  pkill -x cage"
-echo "(agetty autologin re-runs ~/.bash_profile, which execs $KIOSK)"
+# Every name Chromium, GTK, Qt, wlroots or an X11 app might ask for. A name
+# that is missing is not "no cursor" — it is the client's own built-in arrow.
+NAMES=(
+  # freedesktop / CSS
+  default context-menu help pointer progress wait cell crosshair text
+  vertical-text alias copy move no-drop not-allowed grab grabbing
+  all-scroll col-resize row-resize n-resize e-resize s-resize w-resize
+  ne-resize nw-resize se-resize sw-resize ew-resize ns-resize
+  nesw-resize nwse-resize zoom-in zoom-out
+  # X11 legacy names, still requested by plenty of toolkits
+  arrow left_ptr right_ptr top_left_arrow left_ptr_watch watch
+  xterm ibeam hand hand1 hand2 question_arrow cross crossed_circle
+  fleur size_all size_hor size_ver size_fdiag size_bdiag
+  sb_h_double_arrow sb_v_double_arrow sb_up_arrow sb_down_arrow
+  sb_left_arrow sb_right_arrow double_arrow
+  top_side bottom_side left_side right_side
+  top_left_corner top_right_corner bottom_left_corner bottom_right_corner
+  dotbox draped_box circle pirate plus target
+  # drag-and-drop feedback
+  dnd-none dnd-move dnd-copy dnd-link dnd-no-drop dnd-ask
+  link pointer-move closedhand openhand
+  # Chromium / Wayland extras
+  color-picker up-arrow down-arrow left-arrow right-arrow
+)
+
+cd "$THEME_DIR/cursors"
+for name in "${NAMES[@]}"; do
+  [[ "$name" == "default" ]] && continue
+  ln -sfn default "$name"
+done
+
+cat > "$THEME_DIR/index.theme" <<'EOF'
+[Icon Theme]
+Name=blank
+Comment=Fully transparent cursor for kiosk use
+EOF
+
+cat > "$THEME_DIR/cursor.theme" <<'EOF'
+[Icon Theme]
+Name=blank
+Inherits=blank
+EOF
+
+# Belt and braces: anything that resolves the theme literally named "default"
+# (rather than honouring XCURSOR_THEME) lands on blank too, because
+# /usr/local/share/icons precedes /usr/share/icons on XCURSOR_PATH.
+cat > "$DEFAULT_DIR/index.theme" <<'EOF'
+[Icon Theme]
+Name=Default
+Comment=Kiosk default — resolves to the fully transparent "blank" theme
+Inherits=blank
+EOF
+
+chmod -R a+rX /usr/local/share/icons/blank "$DEFAULT_DIR"
+
+echo "blank cursor theme installed: $(ls "$THEME_DIR/cursors" | wc -l) names"
