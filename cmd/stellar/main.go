@@ -382,6 +382,31 @@ func main() {
 		},
 		&upnpBridge{player: playerService, mpd: mpdClient},
 	)
+	// Expose the library as a UPnP MediaServer so DLNA control points (VLC,
+	// Kodi, BubbleUPnP, mconnect) can browse and pull it. The ContentDirectory
+	// publishes /stream URLs on the backend's own port, so playback on a remote
+	// device never touches MPD or ALSA — the DAC keeps its single consumer.
+	if librarySvc := socketServer.LibraryService(); librarySvc != nil {
+		backendPort, perr := strconv.Atoi(*port)
+		if perr != nil || backendPort <= 0 {
+			log.Warn().Str("port", *port).
+				Msg("non-numeric port; UPnP MediaServer disabled (stream URLs would be unreachable)")
+		} else {
+			upnpService.EnableMediaServer(
+				upnp.MediaServerConfig{
+					FriendlyName: "Stellar Library",
+					// Distinct from the renderer UDN above: these are two
+					// separate UPnP root devices in one process.
+					UDN:         "4d696e69-4469-5343-9a61-5374656c6c62",
+					BackendPort: backendPort,
+				},
+				&upnpLibrary{lib: librarySvc, musicDir: mpdMusicDir},
+			)
+		}
+	} else {
+		log.Warn().Msg("Library service unavailable; UPnP MediaServer disabled")
+	}
+
 	if err := upnpService.Start(); err != nil {
 		log.Warn().Err(err).Msg("UPnP AV Renderer failed to start — Audirvana discovery disabled")
 	} else {

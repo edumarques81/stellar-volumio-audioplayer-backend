@@ -63,11 +63,11 @@ func TestBuildNotifyAliveUUIDOnly(t *testing.T) {
 func TestSSDPDeviceTypes(t *testing.T) {
 	// Ensure we announce all required types for Audirvana discovery
 	required := map[string]bool{
-		"upnp:rootdevice":                                       false,
-		"urn:schemas-upnp-org:device:MediaRenderer:1":           false,
-		"urn:schemas-upnp-org:service:AVTransport:1":            false,
-		"urn:schemas-upnp-org:service:RenderingControl:1":       false,
-		"urn:schemas-upnp-org:service:ConnectionManager:1":      false,
+		"upnp:rootdevice": false,
+		"urn:schemas-upnp-org:device:MediaRenderer:1":      false,
+		"urn:schemas-upnp-org:service:AVTransport:1":       false,
+		"urn:schemas-upnp-org:service:RenderingControl:1":  false,
+		"urn:schemas-upnp-org:service:ConnectionManager:1": false,
 	}
 
 	for _, dt := range ssdpDeviceTypes {

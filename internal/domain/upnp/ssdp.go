@@ -16,7 +16,7 @@ const (
 	ssdpInterval = 60 * time.Second
 )
 
-// ssdpDeviceTypes lists the notification types we announce.
+// ssdpDeviceTypes lists the notification types the MediaRenderer announces.
 var ssdpDeviceTypes = []string{
 	"upnp:rootdevice",
 	"urn:schemas-upnp-org:device:MediaRenderer:1",
@@ -25,24 +25,63 @@ var ssdpDeviceTypes = []string{
 	"urn:schemas-upnp-org:service:ConnectionManager:1",
 }
 
-// SSDPAnnouncer sends periodic SSDP NOTIFY messages and responds to M-SEARCH.
+// SSDPAdvert describes one UPnP root device to announce.
+//
+// Stellar hosts two root devices in one process — a MediaRenderer (so control
+// points can push audio *to* the appliance) and a MediaServer (so they can
+// browse the library *on* it). They are separate devices with separate UDNs
+// and separate description documents, but they share one SSDP socket: binding
+// port 1900 twice is needlessly fragile, and one listener answering for both
+// is what the protocol expects anyway.
+type SSDPAdvert struct {
+	// UDN is this device's UUID, without the "uuid:" prefix.
+	UDN string
+	// DeviceType is the device's primary type URN, used as the ST of an
+	// M-SEARCH response when the search was for ssdp:all.
+	DeviceType string
+	// DescPath is the path of this device's description document.
+	DescPath string
+	// NotifyTypes are the NT values announced for this device. It must
+	// include upnp:rootdevice, the device type, and each service type.
+	NotifyTypes []string
+}
+
+// descURL builds this advert's absolute LOCATION header value.
+func (ad SSDPAdvert) descURL(localIP string, port int) string {
+	return fmt.Sprintf("http://%s:%d%s", localIP, port, ad.DescPath)
+}
+
+// SSDPAnnouncer sends periodic SSDP NOTIFY messages and responds to M-SEARCH
+// on behalf of every advertised device.
 type SSDPAnnouncer struct {
 	cfg           DeviceConfig
-	descURL       string
+	adverts       []SSDPAdvert
 	conn          *net.UDPConn
 	multicastAddr *net.UDPAddr
 }
 
-// NewSSDPAnnouncer creates a new SSDP announcer for the given device config.
-func NewSSDPAnnouncer(cfg DeviceConfig) *SSDPAnnouncer {
-	return &SSDPAnnouncer{
-		cfg:     cfg,
-		descURL: fmt.Sprintf("http://%s:%d/upnp/description.xml", cfg.LocalIP, cfg.Port),
+// rendererAdvert is the MediaRenderer advert implied by a DeviceConfig.
+func rendererAdvert(cfg DeviceConfig) SSDPAdvert {
+	return SSDPAdvert{
+		UDN:         cfg.UDN,
+		DeviceType:  "urn:schemas-upnp-org:device:MediaRenderer:1",
+		DescPath:    "/upnp/description.xml",
+		NotifyTypes: ssdpDeviceTypes,
 	}
 }
 
+// NewSSDPAnnouncer creates an announcer for the MediaRenderer alone.
+func NewSSDPAnnouncer(cfg DeviceConfig) *SSDPAnnouncer {
+	return &SSDPAnnouncer{cfg: cfg, adverts: []SSDPAdvert{rendererAdvert(cfg)}}
+}
+
+// AddAdvert registers an additional root device to announce. It must be called
+// before Start.
+func (a *SSDPAnnouncer) AddAdvert(ad SSDPAdvert) {
+	a.adverts = append(a.adverts, ad)
+}
+
 // Start begins the SSDP announcement loop and M-SEARCH listener.
-// It blocks until ctx is cancelled, then sends ssdp:byebye.
 func (a *SSDPAnnouncer) Start(ctx context.Context) error {
 	maddr, err := net.ResolveUDPAddr("udp4", ssdpAddr)
 	if err != nil {
@@ -82,7 +121,9 @@ func (a *SSDPAnnouncer) Start(ctx context.Context) error {
 func (a *SSDPAnnouncer) Stop() {
 	a.sendByeBye()
 	if a.conn != nil {
-		a.conn.Close()
+		if err := a.conn.Close(); err != nil {
+			log.Debug().Err(err).Msg("SSDP socket close failed")
+		}
 	}
 }
 
@@ -112,7 +153,9 @@ func (a *SSDPAnnouncer) listenMSearch(ctx context.Context) {
 		default:
 		}
 
-		a.conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+		if err := a.conn.SetReadDeadline(time.Now().Add(2 * time.Second)); err != nil {
+			return
+		}
 		n, addr, err := a.conn.ReadFromUDP(buf)
 		if err != nil {
 			continue
@@ -123,103 +166,167 @@ func (a *SSDPAnnouncer) listenMSearch(ctx context.Context) {
 			continue
 		}
 
-		// Check if the search target matches any of our device types
-		if a.matchesSearchTarget(msg) {
-			a.respondToMSearch(addr)
-		}
+		a.respondToMSearch(addr, msg)
 	}
 }
 
-// matchesSearchTarget checks if the M-SEARCH request matches our device.
+// matchesSearchTarget reports whether the M-SEARCH matches any advertised
+// device. Retained as the single predicate used to decide "is this for us".
 func (a *SSDPAnnouncer) matchesSearchTarget(msg string) bool {
 	if strings.Contains(msg, "ssdp:all") {
 		return true
 	}
-	for _, dt := range ssdpDeviceTypes {
-		if strings.Contains(msg, dt) {
+	for _, nt := range a.notifyTypes() {
+		if strings.Contains(msg, nt) {
 			return true
 		}
 	}
 	return false
 }
 
-// respondToMSearch sends a unicast M-SEARCH response.
-func (a *SSDPAnnouncer) respondToMSearch(addr *net.UDPAddr) {
-	usn := "uuid:" + a.cfg.UDN + "::urn:schemas-upnp-org:device:MediaRenderer:1"
+// notifyTypes is the union of every advert's notification types. When no
+// adverts are configured it falls back to the renderer's set, so a
+// zero-value announcer still answers the searches the renderer cares about.
+func (a *SSDPAnnouncer) notifyTypes() []string {
+	if len(a.adverts) == 0 {
+		return ssdpDeviceTypes
+	}
+	var out []string
+	for _, ad := range a.adverts {
+		out = append(out, ad.NotifyTypes...)
+		out = append(out, "uuid:"+ad.UDN)
+	}
+	return out
+}
+
+// respondToMSearch sends one unicast response per matching (device, ST) pair.
+//
+// Responses must echo the ST the client searched for, not our own device type:
+// a control point looking for MediaServer:1 discards a reply whose ST says
+// MediaRenderer:1, which is exactly how a two-role device ends up visible in
+// only one of a client's two lists.
+func (a *SSDPAnnouncer) respondToMSearch(addr *net.UDPAddr, msg string) {
+	searchAll := strings.Contains(msg, "ssdp:all")
+
+	for _, ad := range a.adverts {
+		if searchAll {
+			for _, nt := range ad.NotifyTypes {
+				a.sendSearchResponse(addr, ad, nt)
+			}
+			a.sendSearchResponse(addr, ad, "uuid:"+ad.UDN)
+			continue
+		}
+		for _, nt := range ad.NotifyTypes {
+			if strings.Contains(msg, nt) {
+				a.sendSearchResponse(addr, ad, nt)
+			}
+		}
+		if strings.Contains(msg, "uuid:"+ad.UDN) {
+			a.sendSearchResponse(addr, ad, "uuid:"+ad.UDN)
+		}
+	}
+}
+
+// sendSearchResponse sends a single unicast M-SEARCH response.
+func (a *SSDPAnnouncer) sendSearchResponse(addr *net.UDPAddr, ad SSDPAdvert, st string) {
+	if a.conn == nil {
+		return
+	}
 	response := "HTTP/1.1 200 OK\r\n" +
 		"CACHE-CONTROL: max-age=" + fmt.Sprintf("%d", ssdpMaxAge) + "\r\n" +
-		"LOCATION: " + a.descURL + "\r\n" +
-		"SERVER: Linux/1.0 UPnP/1.0 Stellar/1.0\r\n" +
-		"ST: urn:schemas-upnp-org:device:MediaRenderer:1\r\n" +
-		"USN: " + usn + "\r\n" +
 		"EXT:\r\n" +
+		"LOCATION: " + ad.descURL(a.cfg.LocalIP, a.cfg.Port) + "\r\n" +
+		"SERVER: Linux/1.0 UPnP/1.0 Stellar/1.0\r\n" +
+		"ST: " + st + "\r\n" +
+		"USN: " + usnFor(ad.UDN, st) + "\r\n" +
 		"\r\n"
 
-	a.conn.WriteToUDP([]byte(response), addr)
-	log.Debug().Str("addr", addr.String()).Msg("Responded to M-SEARCH")
+	if _, err := a.conn.WriteToUDP([]byte(response), addr); err != nil {
+		log.Debug().Err(err).Str("st", st).Msg("Failed to send M-SEARCH response")
+		return
+	}
+	log.Debug().Str("addr", addr.String()).Str("st", st).Msg("Responded to M-SEARCH")
 }
 
-// sendAlive sends NOTIFY ssdp:alive for all device types.
+// sendAlive sends NOTIFY ssdp:alive for every advertised device and type.
 func (a *SSDPAnnouncer) sendAlive() {
-	for _, nt := range ssdpDeviceTypes {
-		a.sendNotify(nt, "ssdp:alive")
-	}
-	// Also announce the device UUID itself
-	a.sendNotify("uuid:"+a.cfg.UDN, "ssdp:alive")
-	log.Debug().Msg("Sent SSDP alive announcements")
+	a.notifyAll("ssdp:alive")
+	log.Debug().Int("devices", len(a.adverts)).Msg("Sent SSDP alive announcements")
 }
 
-// sendByeBye sends NOTIFY ssdp:byebye for all device types.
+// sendByeBye sends NOTIFY ssdp:byebye for every advertised device and type.
 func (a *SSDPAnnouncer) sendByeBye() {
-	for _, nt := range ssdpDeviceTypes {
-		a.sendNotify(nt, "ssdp:byebye")
+	a.notifyAll("ssdp:byebye")
+	log.Debug().Int("devices", len(a.adverts)).Msg("Sent SSDP byebye announcements")
+}
+
+func (a *SSDPAnnouncer) notifyAll(nts string) {
+	for _, ad := range a.adverts {
+		for _, nt := range ad.NotifyTypes {
+			a.sendNotify(ad, nt, nts)
+		}
+		// Also announce the device UUID itself
+		a.sendNotify(ad, "uuid:"+ad.UDN, nts)
 	}
-	a.sendNotify("uuid:"+a.cfg.UDN, "ssdp:byebye")
-	log.Debug().Msg("Sent SSDP byebye announcements")
 }
 
 // sendNotify sends a single SSDP NOTIFY message.
-func (a *SSDPAnnouncer) sendNotify(nt, nts string) {
+func (a *SSDPAnnouncer) sendNotify(ad SSDPAdvert, nt, nts string) {
 	if a.conn == nil || a.multicastAddr == nil {
 		return
-	}
-
-	usn := "uuid:" + a.cfg.UDN
-	if nt != usn {
-		usn = usn + "::" + nt
 	}
 
 	msg := "NOTIFY * HTTP/1.1\r\n" +
 		"HOST: 239.255.255.250:1900\r\n" +
 		"CACHE-CONTROL: max-age=" + fmt.Sprintf("%d", ssdpMaxAge) + "\r\n" +
-		"LOCATION: " + a.descURL + "\r\n" +
+		"LOCATION: " + ad.descURL(a.cfg.LocalIP, a.cfg.Port) + "\r\n" +
 		"NT: " + nt + "\r\n" +
 		"NTS: " + nts + "\r\n" +
 		"SERVER: Linux/1.0 UPnP/1.0 Stellar/1.0\r\n" +
-		"USN: " + usn + "\r\n" +
+		"USN: " + usnFor(ad.UDN, nt) + "\r\n" +
 		"\r\n"
 
-	_, err := a.conn.WriteToUDP([]byte(msg), a.multicastAddr)
-	if err != nil {
+	if _, err := a.conn.WriteToUDP([]byte(msg), a.multicastAddr); err != nil {
 		log.Debug().Err(err).Str("nt", nt).Str("nts", nts).Msg("Failed to send SSDP NOTIFY")
 	}
 }
 
-// BuildNotifyAlive builds a NOTIFY ssdp:alive message for the given notification type.
-// Exported for testing.
-func BuildNotifyAlive(cfg DeviceConfig, nt string) string {
-	descURL := fmt.Sprintf("http://%s:%d/upnp/description.xml", cfg.LocalIP, cfg.Port)
-	usn := "uuid:" + cfg.UDN
-	if nt != usn {
-		usn = usn + "::" + nt
+// usnFor builds the USN header for a given UDN and notification type. When the
+// type *is* the UUID, the USN is the bare UUID with no "::" suffix.
+func usnFor(udn, nt string) string {
+	usn := "uuid:" + udn
+	if nt == usn {
+		return usn
 	}
+	return usn + "::" + nt
+}
+
+// BuildNotifyAlive builds a NOTIFY ssdp:alive message for the given
+// notification type. Exported for testing.
+func BuildNotifyAlive(cfg DeviceConfig, nt string) string {
+	return BuildNotifyAliveFor(cfg, rendererAdvert(cfg), nt)
+}
+
+// BuildNotifyAliveFor builds a NOTIFY ssdp:alive message for a specific
+// advert. Exported for testing.
+func BuildNotifyAliveFor(cfg DeviceConfig, ad SSDPAdvert, nt string) string {
 	return "NOTIFY * HTTP/1.1\r\n" +
 		"HOST: 239.255.255.250:1900\r\n" +
 		"CACHE-CONTROL: max-age=" + fmt.Sprintf("%d", ssdpMaxAge) + "\r\n" +
-		"LOCATION: " + descURL + "\r\n" +
+		"LOCATION: " + ad.descURL(cfg.LocalIP, cfg.Port) + "\r\n" +
 		"NT: " + nt + "\r\n" +
 		"NTS: ssdp:alive\r\n" +
 		"SERVER: Linux/1.0 UPnP/1.0 Stellar/1.0\r\n" +
-		"USN: " + usn + "\r\n" +
+		"USN: " + usnFor(ad.UDN, nt) + "\r\n" +
 		"\r\n"
+}
+
+// MediaServerAdvert builds the SSDP advert for the MediaServer root device.
+func MediaServerAdvert(cfg MediaServerConfig) SSDPAdvert {
+	return SSDPAdvert{
+		UDN:         cfg.UDN,
+		DeviceType:  "urn:schemas-upnp-org:device:MediaServer:1",
+		DescPath:    MediaServerDescPath,
+		NotifyTypes: mediaServerNotifyTypes,
+	}
 }

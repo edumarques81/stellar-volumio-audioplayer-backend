@@ -372,6 +372,20 @@ func (s *Server) CacheDB() *cache.DB {
 	return s.cacheDB
 }
 
+// LibraryService exposes the cached library service for consumers outside the
+// Socket.IO transport — currently the UPnP ContentDirectory, which browses the
+// same albums, artists and tracks the sockets serve.
+//
+// It returns the *cached* service on purpose: it is the one with artwork
+// resolution and the cache-preserving guards, and a second library service
+// would mean a second reader of the same SQLite file.
+func (s *Server) LibraryService() LibraryService {
+	if s.cachedService == nil {
+		return nil
+	}
+	return s.cachedService
+}
+
 // AirplayIsActive reports whether an AirPlay session is currently active.
 // Returns false when UseAirplay was not called (AirPlay key unset) or when
 // no session is in progress. Safe to call from any goroutine. This is an

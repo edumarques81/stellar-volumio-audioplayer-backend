@@ -13,10 +13,10 @@ type didlLite struct {
 
 // didlItem represents a single <item> in the DIDL-Lite document.
 type didlItem struct {
-	Title       string   `xml:"title"`
-	Creator     string   `xml:"creator"`
-	Album       string   `xml:"album"`
-	AlbumArtURI string   `xml:"albumArtURI"`
+	Title       string    `xml:"title"`
+	Creator     string    `xml:"creator"`
+	Album       string    `xml:"album"`
+	AlbumArtURI string    `xml:"albumArtURI"`
 	Resources   []didlRes `xml:"res"`
 }
 
