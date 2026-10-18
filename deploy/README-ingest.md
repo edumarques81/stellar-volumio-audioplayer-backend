@@ -155,8 +155,11 @@ Dependencies already present on the Pi: `python3`, `mutagen`, `mpc`, `unzip`, `p
 
 ### Samba share
 
-Appended to `/etc/samba/smb.conf` (backup at `/etc/samba/smb.conf.bak-999.2`), alongside
-the pre-existing read-only `[Music]` share:
+**The canonical config is `deploy/smb.conf` in this repo** — edit that, `scp` it over, then
+`sudo install -m 0644 smb.conf /etc/samba/smb.conf && sudo testparm -s && sudo systemctl restart smbd`.
+The appliance copy at `/etc/samba/smb.conf` is the deployment, not the source
+(backup at `/etc/samba/smb.conf.bak-999.2`). It lives alongside the pre-existing
+read-only `[Music]` share:
 
 ```ini
 [Inbox]
@@ -170,18 +173,44 @@ the pre-existing read-only `[Music]` share:
    force group = eduardo
    create mask = 0664
    directory mask = 0775
-   veto files = /._*/.DS_Store/.AppleDouble/.AppleDesktop/.Trashes/.fseventsd/.Spotlight-V100/__MACOSX/
+   veto files = /.DS_Store/.AppleDouble/.AppleDesktop/.Trashes/.fseventsd/.Spotlight-V100/__MACOSX/
    delete veto files = yes
+```
+
+`[global]` additionally carries the **`vfs_fruit` stack**, which is not optional:
+
+```ini
+   vfs objects = catia fruit streams_xattr
+   fruit:metadata = stream
+   fruit:resource = xattr
+   fruit:nfs_aces = no
+   fruit:zero_file_id = yes
+   fruit:posix_rename = yes
+   fruit:veto_appledouble = no
+   fruit:delete_empty_adfiles = yes
+   fruit:wipe_intentionally_left_blank_rfork = yes
 ```
 
 The share is authenticated (`valid users = eduardo`) rather than guest-writable on purpose:
 `stellar-backend` runs as `eduardo`, and `eduardo` has passwordless sudo. The SMB password
 is the existing account password, set once with `sudo smbpasswd -a eduardo`.
 
-`veto files` is what actually solves the macOS junk problem — it stops the Finder from
-creating `._*` and `.DS_Store` in the share at all, rather than cleaning up afterwards.
-This matters because those files are how the library picked up 566 phantom MPD rows before;
-the SSD must never be mounted on the Mac for the same reason.
+**`veto files` deliberately does NOT list `/._*/`, and adding it back breaks the share.**
+This doc used to say otherwise; the 2026-10-17 session proved it wrong. Vetoing the
+AppleDouble sidecars makes the Finder **abort the entire copy** the moment it tries to write
+one, which surfaces as a mid-transfer failure with no useful error and no partial state to
+diagnose. `vfs_fruit` is what handles those files — `fruit:metadata = stream` gives macOS
+somewhere to put the metadata, so the sidecars are never created as real files in the first
+place. Without the fruit stack the Finder cannot paste into `[Inbox]` at all.
+
+The remaining veto entries (`.DS_Store`, `.AppleDouble`, `.Trashes`, …) still matter:
+those files are how the library picked up 566 phantom MPD rows before. The SSD must never
+be mounted on the Mac for the same reason.
+
+One more macOS trap, unrelated to the config: **macOS reuses a single SMB session per
+server**, so a stale guest mount of `[Music]` blocks authenticated access to `[Inbox]`
+entirely — and the Finder blames a "missing original item". Unmount every
+`//stellar.local/...` share and reconnect as `eduardo` if a paste is refused.
 
 ## Troubleshooting
 
