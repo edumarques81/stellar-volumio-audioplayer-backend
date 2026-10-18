@@ -169,6 +169,8 @@ func (s *CachedService) GetAlbums(req GetAlbumsRequest) AlbumsResponse {
 			Year:       ca.Year,
 			AlbumArt:   albumArt,
 			Quality:    quality,
+			SampleRate: ca.SampleRate,
+			BitDepth:   ca.BitDepth,
 			TrackType:  ca.TrackType,
 			Genre:      ca.Genre,
 			Badge:      ca.Badge,

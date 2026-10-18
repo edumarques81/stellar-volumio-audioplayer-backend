@@ -82,7 +82,7 @@ func TestLiveSession(t *testing.T) {
 		URL:         streamURL,
 		ContentType: os.Getenv("STELLAR_CAST_TYPE"),
 		Metadata: &Metadata{
-			MetadataType: metadataTypeMusicTrack,
+			MetadataType: MetadataTypeMusicTrack,
 			Title:        "Live protocol check",
 			AlbumName:    "Stellar",
 			Artist:       "Stellar",

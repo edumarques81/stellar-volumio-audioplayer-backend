@@ -292,6 +292,8 @@ func albumFromGroup(g discgroup.Group, sourceType SourceType, includeGenre bool)
 		TrackCount: g.TrackCount,
 		Source:     sourceType,
 		Quality:    quality,
+		SampleRate: sampleRate,
+		BitDepth:   bitDepth,
 		TrackType:  trackType,
 		DiscCount:  discCount,
 		Year:       g.Year,

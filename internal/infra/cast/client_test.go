@@ -82,7 +82,7 @@ func TestLoadSendsMusicTrackMetadata(t *testing.T) {
 		ContentType: "audio/flac",
 		Duration:    561.6,
 		Metadata: &Metadata{
-			MetadataType: metadataTypeMusicTrack,
+			MetadataType: MetadataTypeMusicTrack,
 			Title:        "So What",
 			AlbumName:    "Kind of Blue",
 			Artist:       "Miles Davis",
@@ -113,8 +113,8 @@ func TestLoadSendsMusicTrackMetadata(t *testing.T) {
 	if md == nil {
 		t.Fatal("LOAD carried no metadata")
 	}
-	if md.MetadataType != metadataTypeMusicTrack {
-		t.Errorf("metadataType = %d, want %d", md.MetadataType, metadataTypeMusicTrack)
+	if md.MetadataType != MetadataTypeMusicTrack {
+		t.Errorf("metadataType = %d, want %d", md.MetadataType, MetadataTypeMusicTrack)
 	}
 	if md.AlbumName != "Kind of Blue" || md.AlbumArtist != "Miles Davis" || md.TrackNumber != 1 {
 		t.Errorf("metadata lost fields: %+v", md)
@@ -128,7 +128,7 @@ func TestLoadMetadataJSONUsesTheReceiversFieldNames(t *testing.T) {
 	// A misspelled metadata key is dropped silently by the receiver rather
 	// than rejected, so the wire names are pinned here.
 	body, err := json.Marshal(&Metadata{
-		MetadataType: metadataTypeMusicTrack,
+		MetadataType: MetadataTypeMusicTrack,
 		Title:        "So What",
 		AlbumName:    "Kind of Blue",
 		AlbumArtist:  "Miles Davis",

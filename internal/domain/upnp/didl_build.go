@@ -2,8 +2,9 @@ package upnp
 
 import (
 	"fmt"
-	"net/url"
 	"strings"
+
+	"github.com/edumarques81/stellar-volumio-audioplayer-backend/internal/domain/filestream"
 )
 
 // didlHeader opens a DIDL-Lite document with the namespaces every DLNA control
@@ -139,11 +140,7 @@ func formatDIDLDuration(totalSec int) string {
 // names survive the round trip. url.PathEscape on the whole path would escape
 // the separators too and the request would 404.
 func streamURLFor(baseURL, relPath string) string {
-	segments := strings.Split(strings.TrimPrefix(relPath, "/"), "/")
-	for i, seg := range segments {
-		segments[i] = url.PathEscape(seg)
-	}
-	return strings.TrimSuffix(baseURL, "/") + "/stream/" + strings.Join(segments, "/")
+	return filestream.StreamURL(baseURL, relPath)
 }
 
 // artURLFor turns a backend-relative artwork URL into an absolute one.
@@ -153,17 +150,5 @@ func streamURLFor(baseURL, relPath string) string {
 // origin. Re-escaping here would double-encode the percent signs and the
 // request would miss.
 func artURLFor(baseURL, artPath string) string {
-	if baseURL == "" || artPath == "" {
-		return ""
-	}
-	// Enrichment can store an absolute third-party URL (a Deezer hotlink,
-	// which cannot be cached locally). Those are already client-reachable and
-	// must be published verbatim, not prefixed with our own origin.
-	if strings.HasPrefix(artPath, "http://") || strings.HasPrefix(artPath, "https://") {
-		return artPath
-	}
-	if !strings.HasPrefix(artPath, "/") {
-		artPath = "/" + artPath
-	}
-	return strings.TrimSuffix(baseURL, "/") + artPath
+	return filestream.AssetURL(baseURL, artPath)
 }

@@ -119,10 +119,10 @@ type mediaInfo struct {
 	Metadata    *Metadata `json:"metadata,omitempty"`
 }
 
-// metadataTypeMusicTrack selects MusicTrackMediaMetadata, the only metadata
+// MetadataTypeMusicTrack selects MusicTrackMediaMetadata, the only metadata
 // type whose fields the Nest Hub's music UI actually renders — album name,
 // track number and album artist are all absent from the generic type.
-const metadataTypeMusicTrack = 3
+const MetadataTypeMusicTrack = 3
 
 // Metadata is MusicTrackMediaMetadata. Field names are fixed by the Cast
 // receiver; a misspelling is silently dropped rather than rejected, so changing

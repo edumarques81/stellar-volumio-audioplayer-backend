@@ -15,6 +15,7 @@ package filestream
 import (
 	"errors"
 	"net/http"
+	"net/url"
 	"os"
 	"path"
 	"path/filepath"
@@ -251,4 +252,42 @@ func (s *Server) Handler(prefix string) http.Handler {
 		// 206/416 responses.
 		http.ServeContent(w, r, info.Name(), info.ModTime(), f)
 	})
+}
+
+// StreamURL composes the absolute URL a LAN device should fetch a library file
+// from.
+//
+// Each path segment is escaped individually so "/" stays structural while
+// spaces, "#", "?" and non-ASCII — all common in this library's paths — are
+// encoded. url.PathEscape leaves "+" literal, which matters: a query-escaped
+// path would turn "+" into a space and the lookup would miss.
+func StreamURL(baseURL, relPath string) string {
+	if baseURL == "" || relPath == "" {
+		return ""
+	}
+	segments := strings.Split(strings.TrimPrefix(relPath, "/"), "/")
+	for i, seg := range segments {
+		segments[i] = url.PathEscape(seg)
+	}
+	return strings.TrimSuffix(baseURL, "/") + "/stream/" + strings.Join(segments, "/")
+}
+
+// AssetURL prefixes an already-built backend path — an /albumart or /artistart
+// URL the library composed — with the origin a LAN device can reach.
+//
+// It does not escape: the library has already query-escaped those values, and
+// re-escaping would double the percent signs and break the lookup. An absolute
+// third-party URL (a Deezer artwork hotlink, which cannot be cached locally) is
+// passed through verbatim.
+func AssetURL(baseURL, assetPath string) string {
+	if baseURL == "" || assetPath == "" {
+		return ""
+	}
+	if strings.HasPrefix(assetPath, "http://") || strings.HasPrefix(assetPath, "https://") {
+		return assetPath
+	}
+	if !strings.HasPrefix(assetPath, "/") {
+		assetPath = "/" + assetPath
+	}
+	return strings.TrimSuffix(baseURL, "/") + assetPath
 }

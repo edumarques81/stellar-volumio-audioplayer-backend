@@ -17,10 +17,10 @@ const (
 type SortOrder string
 
 const (
-	SortAlphabetical   SortOrder = "alphabetical"
-	SortByArtist       SortOrder = "by_artist"
-	SortRecentlyAdded  SortOrder = "recently_added"
-	SortYear           SortOrder = "year"
+	SortAlphabetical  SortOrder = "alphabetical"
+	SortByArtist      SortOrder = "by_artist"
+	SortRecentlyAdded SortOrder = "recently_added"
+	SortYear          SortOrder = "year"
 )
 
 // SourceType represents the origin of a music file.
@@ -45,11 +45,13 @@ type Album struct {
 	Source     SourceType `json:"source"`
 	Year       int        `json:"year,omitempty"`
 	AddedAt    time.Time  `json:"addedAt,omitempty"`
-	Quality    string     `json:"quality,omitempty"`   // e.g. "192kHz/24bit FLAC"
-	TrackType  string     `json:"trackType,omitempty"` // e.g. "flac", "dsf"
-	Genre      string     `json:"genre,omitempty"`     // e.g. "Ambient / Post-Rock"
-	Badge      string     `json:"badge,omitempty"`     // duplicate-disambiguation label (BROWSE-01/02/03), e.g. "352.8kHz/24bit FLAC", "Disc 04", "USB"
-	DiscCount  int        `json:"discCount,omitempty"` // >1 when this Album is a collapsed multi-disc box set (BROWSE-07); 0/1 otherwise
+	Quality    string     `json:"quality,omitempty"`    // e.g. "192kHz/24bit FLAC"
+	SampleRate int        `json:"sampleRate,omitempty"` // Hz, e.g. 44100, 96000, 352800; 0 when unknown
+	BitDepth   int        `json:"bitDepth,omitempty"`   // e.g. 16, 24; 0 when unknown
+	TrackType  string     `json:"trackType,omitempty"`  // e.g. "flac", "dsf"
+	Genre      string     `json:"genre,omitempty"`      // e.g. "Ambient / Post-Rock"
+	Badge      string     `json:"badge,omitempty"`      // duplicate-disambiguation label (BROWSE-01/02/03), e.g. "352.8kHz/24bit FLAC", "Disc 04", "USB"
+	DiscCount  int        `json:"discCount,omitempty"`  // >1 when this Album is a collapsed multi-disc box set (BROWSE-07); 0/1 otherwise
 }
 
 // Artist represents an artist in the library.
