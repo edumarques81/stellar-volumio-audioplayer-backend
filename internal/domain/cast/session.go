@@ -49,8 +49,13 @@ type Item struct {
 //
 // Status uses the same play/pause/stop vocabulary as the MPD-backed player
 // state, so a client can render a cast session with the controls it already
-// has. That is the take-over model: a cast session replaces the transport view
-// rather than appearing as a second zone.
+// has: a cast session replaces the transport view rather than appearing as a
+// second zone.
+//
+// It is a separate event rather than a rewrite of pushState, though — the same
+// split AirPlay uses. The MPD handlers, the state diffing and the predictive
+// seek contract all stay untouched, and a client that is not casting keeps
+// driving the DAC.
 type State struct {
 	Active      bool   `json:"active"`
 	DeviceID    string `json:"deviceId,omitempty"`
@@ -71,9 +76,9 @@ type State struct {
 
 // Manager owns the single Cast session the appliance maintains.
 //
-// One session at a time is deliberate: the appliance has one transport UI, and
-// the take-over model means a second simultaneous session would have nowhere to
-// be displayed. Speaker groups cover the multiroom case without needing two.
+// One session at a time is deliberate: the appliance has one transport UI, so a
+// second simultaneous session would have nowhere to be displayed. Speaker
+// groups cover the multiroom case without needing two.
 type Manager struct {
 	discoverer *infracast.Discoverer
 
@@ -95,6 +100,12 @@ type Manager struct {
 	// generation invalidates the watcher of a session that has been replaced,
 	// so a late status frame from an old connection cannot resurrect it.
 	generation int
+	// loading is true from the moment a LOAD is sent until the device answers.
+	// In that window the device reports the OUTGOING track's terminal IDLE
+	// frame, which clears the media snapshot and would otherwise publish
+	// "stopped" for the two seconds it takes a Nest Hub to pick up the new
+	// track — a visible blip on every single track change.
+	loading bool
 
 	onState func(State)
 }
@@ -315,12 +326,22 @@ func (m *Manager) load(client deviceClient, item Item) error {
 		return fmt.Errorf("cast: %s: %s", item.Title, verdict.Reason)
 	}
 
-	return client.Load(infracast.Media{
+	m.setLoading(true)
+	err := client.Load(infracast.Media{
 		URL:         filestream.StreamURL(base, item.URI),
 		ContentType: verdict.ContentType,
 		Duration:    float64(item.DurationSec),
 		Metadata:    metadataFor(item, base),
 	})
+	m.setLoading(false)
+	return err
+}
+
+// setLoading opens and closes the load window described on Manager.loading.
+func (m *Manager) setLoading(v bool) {
+	m.mu.Lock()
+	m.loading = v
+	m.mu.Unlock()
 }
 
 // metadataFor builds the MusicTrackMediaMetadata the receiver renders. The
@@ -478,6 +499,7 @@ func (m *Manager) State() State {
 	device := m.device
 	queueLen := len(m.queue)
 	index := m.index
+	loading := m.loading
 	var current Item
 	if index >= 0 && index < queueLen {
 		current = m.queue[index]
@@ -521,19 +543,41 @@ func (m *Manager) State() State {
 	if s.Duration > 0 {
 		state.Duration = int(s.Duration)
 	}
+	// Mid-load the device is still reporting the track we just left, so its
+	// own position and status describe the wrong track. The user asked for
+	// this one, so say so and start it at zero.
+	if loading {
+		state.Status = "play"
+		state.Seek = 0
+	}
 	return state
 }
 
 // statusWord maps the Cast player states onto the play/pause/stop vocabulary
-// the rest of the system uses. BUFFERING reads as play because that is what the
-// user asked for and what is about to happen; showing "stopped" mid-buffer
-// makes the UI flicker on every track change.
+// the rest of the system uses.
+//
+// BUFFERING reads as play because that is what the user asked for and what is
+// about to happen; showing "stopped" mid-buffer makes the UI flicker on every
+// track change.
+//
+// IDLE *with a live media session and no idle reason* is the same case: it is
+// the pre-roll between LOAD and the device's first buffer. Measured on a Nest
+// Hub (firmware 3.80.546557) that window is three status frames and a couple of
+// seconds, so mapping it to "stop" put the transport UI back to stopped
+// immediately after every play and every track change. A terminal IDLE always
+// carries a reason, and the protocol client clears HasMedia when it sees one,
+// so neither branch can swallow a session that really has ended.
 func statusWord(s infracast.Status) string {
 	switch s.PlayerState {
 	case "PLAYING", "BUFFERING":
 		return "play"
 	case "PAUSED":
 		return "pause"
+	case "IDLE":
+		if s.HasMedia && s.IdleReason == "" {
+			return "play"
+		}
+		return "stop"
 	default:
 		return "stop"
 	}

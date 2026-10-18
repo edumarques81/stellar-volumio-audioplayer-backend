@@ -101,6 +101,7 @@ type Server struct {
 	displayService *display.Service
 	netReporter    netinfo.Reporter
 	airplay        *airplayBundle
+	cast           *castBundle
 }
 
 // serverBroadcaster adapts the Socket.IO server to the lcd.Broadcaster (and
@@ -469,6 +470,10 @@ func (s *Server) setupHandlers() {
 			// metadata frame (which may be tens of seconds away for steady
 			// playback).
 			s.pushAirplayStateTo(client)
+			// And the same for a Cast session, for the same reason: a client
+			// that missed the terminal frame would otherwise keep showing a
+			// session that has ended.
+			s.pushCastStateTo(client)
 			// Same reasoning for a drop-box ingest: a preview takes minutes
 			// and its result is a broadcast, so a client that reconnects
 			// mid-run would otherwise be stranded with no plan and no Import
@@ -538,6 +543,10 @@ func (s *Server) setupHandlers() {
 		// Register AirPlay command handler (airplay:command) — no-op when
 		// UseAirplay was not called during boot.
 		s.registerAirplayClient(client)
+
+		// Register Cast handlers (cast:*) — no-op when UseCast was not
+		// called during boot.
+		s.registerCastClient(client)
 
 		// Player control events
 		client.On("getState", func(args ...any) {

@@ -22,6 +22,7 @@ import (
 	"github.com/edumarques81/stellar-volumio-audioplayer-backend/internal/domain/airplay"
 	"github.com/edumarques81/stellar-volumio-audioplayer-backend/internal/domain/artwork"
 	"github.com/edumarques81/stellar-volumio-audioplayer-backend/internal/domain/bios"
+	domaincast "github.com/edumarques81/stellar-volumio-audioplayer-backend/internal/domain/cast"
 	"github.com/edumarques81/stellar-volumio-audioplayer-backend/internal/domain/display"
 	"github.com/edumarques81/stellar-volumio-audioplayer-backend/internal/domain/filestream"
 	"github.com/edumarques81/stellar-volumio-audioplayer-backend/internal/domain/ingest"
@@ -382,15 +383,20 @@ func main() {
 		},
 		&upnpBridge{player: playerService, mpd: mpdClient},
 	)
+	// The UPnP MediaServer and the Cast sender both publish /stream URLs on
+	// the backend's own port, so it is resolved once here for both.
+	backendPort, portErr := strconv.Atoi(*port)
+	if portErr != nil || backendPort <= 0 {
+		log.Warn().Str("port", *port).
+			Msg("non-numeric port; UPnP MediaServer and Cast disabled (stream URLs would be unreachable)")
+	}
+
 	// Expose the library as a UPnP MediaServer so DLNA control points (VLC,
-	// Kodi, BubbleUPnP, mconnect) can browse and pull it. The ContentDirectory
-	// publishes /stream URLs on the backend's own port, so playback on a remote
+	// Kodi, BubbleUPnP, mconnect) can browse and pull it. Playback on a remote
 	// device never touches MPD or ALSA — the DAC keeps its single consumer.
 	if librarySvc := socketServer.LibraryService(); librarySvc != nil {
-		backendPort, perr := strconv.Atoi(*port)
-		if perr != nil || backendPort <= 0 {
-			log.Warn().Str("port", *port).
-				Msg("non-numeric port; UPnP MediaServer disabled (stream URLs would be unreachable)")
+		if portErr != nil || backendPort <= 0 {
+			log.Warn().Msg("UPnP MediaServer disabled: no usable backend port")
 		} else {
 			upnpService.EnableMediaServer(
 				upnp.MediaServerConfig{
@@ -411,6 +417,19 @@ func main() {
 		log.Warn().Err(err).Msg("UPnP AV Renderer failed to start — Audirvana discovery disabled")
 	} else {
 		defer upnpService.Stop()
+	}
+
+	// Google Cast sender. The device pulls from the same /stream endpoint the
+	// UPnP ContentDirectory publishes, so casting never opens ALSA and the DAC
+	// keeps its single consumer. Transport runs over cast:* events rather than
+	// taking over play/pause, matching how AirPlay stays out of the MPD path.
+	if backendPort > 0 && portErr == nil {
+		castManager := domaincast.NewManager(castBaseURL(netReporter, backendPort))
+		socketServer.UseCast(castManager, socketServer.LibraryService())
+		defer castManager.Disconnect()
+		log.Info().Int("port", backendPort).Msg("Cast sender enabled")
+	} else {
+		log.Warn().Msg("Cast sender disabled: no usable backend port")
 	}
 
 	// Setup HTTP server

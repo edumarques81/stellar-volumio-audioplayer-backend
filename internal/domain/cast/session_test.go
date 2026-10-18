@@ -456,23 +456,31 @@ func TestStateReflectsTheDeviceNotTheLastCommand(t *testing.T) {
 
 func TestStatusWord(t *testing.T) {
 	tests := []struct {
-		state string
-		want  string
+		name   string
+		status infracast.Status
+		want   string
 	}{
-		{"PLAYING", "play"},
+		{"playing", infracast.Status{PlayerState: "PLAYING", HasMedia: true}, "play"},
 		// Buffering reads as play: it is what the user asked for and what is
 		// about to happen, and showing "stopped" mid-buffer flickers the UI on
 		// every track change.
-		{"BUFFERING", "play"},
-		{"PAUSED", "pause"},
-		{"IDLE", "stop"},
-		{"", "stop"},
-		{"SOMETHING_NEW", "stop"},
+		{"buffering", infracast.Status{PlayerState: "BUFFERING", HasMedia: true}, "play"},
+		{"paused", infracast.Status{PlayerState: "PAUSED", HasMedia: true}, "pause"},
+		// Pre-roll: the measured window between LOAD and the first buffer is
+		// three frames on a Nest Hub. Reporting "stop" there sent the UI back
+		// to stopped straight after every play and every track change.
+		{"pre-roll", infracast.Status{PlayerState: "IDLE", HasMedia: true}, "play"},
+		{"finished", infracast.Status{PlayerState: "IDLE", IdleReason: "FINISHED"}, "stop"},
+		{"cancelled", infracast.Status{PlayerState: "IDLE", IdleReason: "CANCELLED"}, "stop"},
+		// No session at all — the receiver app is up but nothing is loaded.
+		{"idle with no media", infracast.Status{PlayerState: "IDLE"}, "stop"},
+		{"empty", infracast.Status{}, "stop"},
+		{"unknown state", infracast.Status{PlayerState: "SOMETHING_NEW", HasMedia: true}, "stop"},
 	}
 	for _, tt := range tests {
-		t.Run(tt.state, func(t *testing.T) {
-			if got := statusWord(infracast.Status{PlayerState: tt.state}); got != tt.want {
-				t.Errorf("statusWord(%q) = %q, want %q", tt.state, got, tt.want)
+		t.Run(tt.name, func(t *testing.T) {
+			if got := statusWord(tt.status); got != tt.want {
+				t.Errorf("statusWord(%+v) = %q, want %q", tt.status, got, tt.want)
 			}
 		})
 	}
@@ -707,5 +715,53 @@ func TestLoadFailureLeavesNoPhantomSession(t *testing.T) {
 	}
 	if got := m.State().Status; got == "play" {
 		t.Error("state reports playing after a failed load")
+	}
+}
+
+func TestStateDuringALoadReportsTheTrackTheUserAsked(t *testing.T) {
+	// A Nest Hub answers a track change by first reporting the OUTGOING
+	// track's terminal IDLE frame, which clears the media snapshot. Measured
+	// live, that window is ~2s and three status frames — long enough for the
+	// transport UI to show "stopped" on every single track change.
+	m, dev := newTestManager(t)
+	if _, err := m.Play([]Item{flacItem(1, "one"), flacItem(2, "two")}, 0); err != nil {
+		t.Fatalf("Play: %v", err)
+	}
+
+	// Reproduce the mid-load frame: the device has dropped the old session
+	// and has not yet reported the new one.
+	m.setLoading(true)
+	dev.setStatus(infracast.Status{PlayerState: "IDLE", IdleReason: "INTERRUPTED", CurrentTime: 180})
+
+	got := m.State()
+	if got.Status != "play" {
+		t.Errorf("Status = %q mid-load, want play", got.Status)
+	}
+	// The device's position belongs to the track being left behind.
+	if got.Seek != 0 {
+		t.Errorf("Seek = %d mid-load, want 0", got.Seek)
+	}
+
+	m.setLoading(false)
+	if got := m.State().Status; got != "stop" {
+		t.Errorf("Status = %q once the load window closed, want stop", got)
+	}
+}
+
+func TestTheLoadWindowClosesEvenWhenTheLoadFails(t *testing.T) {
+	// Otherwise a device that refuses the media would be reported as playing
+	// for the rest of the session.
+	m, dev := newTestManager(t)
+	dev.loadErr = errors.New("LOAD_FAILED (UNSUPPORTED_MEDIA)")
+
+	if _, err := m.Play([]Item{flacItem(1, "one")}, 0); err == nil {
+		t.Fatal("Play hid a LOAD failure")
+	}
+
+	m.mu.Lock()
+	loading := m.loading
+	m.mu.Unlock()
+	if loading {
+		t.Error("the load window was left open after a failed LOAD")
 	}
 }
