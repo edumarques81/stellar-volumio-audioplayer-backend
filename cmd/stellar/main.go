@@ -23,6 +23,7 @@ import (
 	"github.com/edumarques81/stellar-volumio-audioplayer-backend/internal/domain/artwork"
 	"github.com/edumarques81/stellar-volumio-audioplayer-backend/internal/domain/bios"
 	"github.com/edumarques81/stellar-volumio-audioplayer-backend/internal/domain/display"
+	"github.com/edumarques81/stellar-volumio-audioplayer-backend/internal/domain/filestream"
 	"github.com/edumarques81/stellar-volumio-audioplayer-backend/internal/domain/ingest"
 	"github.com/edumarques81/stellar-volumio-audioplayer-backend/internal/domain/lastplayed"
 	"github.com/edumarques81/stellar-volumio-audioplayer-backend/internal/domain/localmusic"
@@ -657,6 +658,23 @@ func main() {
 		data += "}"
 		w.Write([]byte(data))
 	})
+
+	// Media file streaming endpoint.
+	//
+	// Serves raw library bytes so that LAN devices which pull content by URL
+	// (Cast receivers, UPnP/DLNA renderers, AVPlayer) can play the library
+	// directly. Decoupled from MPD and ALSA by construction: it only reads
+	// files, so remote playback never touches the bit-perfect output path.
+	//
+	// Registered before the SPA handler below, which claims "/" and must stay
+	// last in the mux.
+	fileStreamer := filestream.New(mpdMusicDir)
+	// Both forms are registered: "/stream/<path>" keeps the file extension
+	// visible in the URL, which Cast and several DLNA renderers use to infer
+	// the media type, while "/stream?path=" matches the /albumart convention.
+	mux.Handle("/stream/", fileStreamer.Handler("/stream"))
+	mux.Handle("/stream", fileStreamer.Handler("/stream"))
+	log.Info().Str("root", fileStreamer.Root()).Msg("Media streaming endpoint enabled at /stream")
 
 	// Serve static files if directory specified (SPA mode)
 	if *staticDir != "" {
